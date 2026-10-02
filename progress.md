@@ -15,6 +15,11 @@ Current implementation status and suggested next development horizon.
 - Streaming activities yield replacement snapshots and one final result while history retains only the latest step version.
 - Completed streams replay without reinvocation, and interrupted streams restart under the same step identity.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
+- SQLite persists workflow configuration and steps in `data/history.sqlite3` by default without adding dependencies.
+- Transactional streaming updates rewrite one unfinished step while preserving its identity and immutable terminal outcome.
+- SQLite replay uses indexed lookup and database-side path snapshots with bounded Python-side batches.
+- Bounded LRU caches reduce repeated configuration and step lookups during execution.
+- Write-behind buffering coalesces streaming snapshots and flushes periodically, on completion, or at runner shutdown.
 - Replay streams selected history from the root and returns recorded outcomes without repeating activities.
 - Continuation appends new descendants while preserving existing branches.
 - Child workflows execute concurrently or sequentially with independent sessions and histories.
@@ -26,8 +31,6 @@ Current implementation status and suggested next development horizon.
 
 ## Suggested next horizon
 
-- Implement a production history provider with durable configuration, immutable terminal records, and replaceable streaming snapshots under `data/`.
-- Add indexed step lookup and bounded-memory root-to-head replay for long-running workflows.
 - Define recovery-head selection for root and child workflows without requiring callers to supply every head.
 - Define interruption and idempotency policies for external effects whose results were not recorded.
 - Add a minimal CLI to run, resume, fork, and inspect workflows.
