@@ -6,10 +6,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from collections.abc import Mapping
 import importlib.util
+import importlib
 import inspect
 from pathlib import Path
 import sys
 import typing
+from types import ModuleType
 from uuid import uuid4
 
 import pydantic
@@ -19,6 +21,7 @@ from vectorops.runner.api import composition
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
+from vectorops.runner.runner.events import StepEventSink
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 
@@ -32,11 +35,13 @@ class WorkflowExecutor:
         history: WorkflowHistory,
         reporter: typing.Optional[CheckpointReporter] = None,
         execution_id: typing.Optional[str] = None,
+        event_sink: typing.Optional[StepEventSink] = None,
     ) -> None:
         self.project = project
         self.history = history
         self.reporter = reporter
         self.execution_id = execution_id
+        self.event_sink = event_sink
 
     async def execute(
         self,
@@ -60,6 +65,7 @@ class WorkflowExecutor:
             child_heads={} if child_heads is None else child_heads,
             reporter=self.reporter,
             execution_id=self.execution_id,
+            event_sink=self.event_sink,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)
@@ -80,6 +86,15 @@ class WorkflowExecutor:
     def _load(self, workflow_name: str, callable_name: str) -> WorkflowCallable:
         if not workflow_name or not callable_name.isidentifier():
             raise ValueError("workflow name and callable identifier are required")
+        if workflow_name.startswith("python:"):
+            module_name = workflow_name.removeprefix("python:")
+            if not module_name or not all(
+                part.isidentifier() for part in module_name.split(".")
+            ):
+                raise ValueError("workflow module must be an importable module name")
+            return self._entry_point(
+                importlib.import_module(module_name), callable_name
+            )
         relative_path = Path(workflow_name)
         if relative_path.suffix == "":
             relative_path = relative_path.with_suffix(".py")
@@ -98,9 +113,15 @@ class WorkflowExecutor:
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
-            entry_point = vars(module).get(callable_name)
-            if not inspect.iscoroutinefunction(entry_point):
-                raise TypeError(f"{callable_name} must be an async workflow function")
-            return typing.cast(WorkflowCallable, entry_point)
+            return self._entry_point(module, callable_name)
         finally:
             sys.modules.pop(module_name, None)
+
+    @staticmethod
+    def _entry_point(module: ModuleType, callable_name: str) -> WorkflowCallable:
+        entry_point = vars(module).get(callable_name)
+        if isinstance(entry_point, composition.WorkflowDefinition):
+            return typing.cast(WorkflowCallable, entry_point.func)
+        if not inspect.iscoroutinefunction(entry_point):
+            raise TypeError(f"{callable_name} must be an async workflow function")
+        return typing.cast(WorkflowCallable, entry_point)

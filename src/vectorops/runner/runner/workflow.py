@@ -16,6 +16,7 @@ from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.history import WorkflowHistory
+from vectorops.runner.runner.events import StepEventSink
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
@@ -29,9 +30,12 @@ class WorkflowRunner:
         self,
         path: typing.Union[str, Path],
         history: typing.Optional[WorkflowHistory] = None,
+        *,
+        event_sink: typing.Optional[StepEventSink] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
+        self.event_sink = event_sink
         self.last_execution_id: typing.Optional[str] = None
 
     async def run(
@@ -204,7 +208,7 @@ class WorkflowRunner:
                 input={} if input is None else input,
             )
         completion = await WorkflowExecutor(
-            project, history, reporter, execution_id
+            project, history, reporter, execution_id, self.event_sink
         ).execute(
             configuration,
             continue_from_step_id=continue_from_step_id,

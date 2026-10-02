@@ -7,13 +7,18 @@ from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass
 import inspect
+from pathlib import Path
 import typing
 
 import pydantic
 
 from vectorops.runner import models
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.context import (
+    ChildWorkflowHandle,
+    WorkflowExecutionContext,
+)
+from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner import streaming
 
 P = typing.ParamSpec("P")
@@ -147,3 +152,97 @@ def _validate_context_parameter(func: Callable[..., object]) -> None:
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
     ):
         raise TypeError("activity implementations require a first context parameter")
+
+
+@dataclass(frozen=True)
+class WorkflowDefinition(typing.Generic[P, T]):
+    func: Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]
+    name: str
+
+    async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        handle = await self.start(*args, **kwargs)
+        results = await gather_workflows([handle])
+        return typing.cast(T, results[0])
+
+    async def start(self, *args: P.args, **kwargs: P.kwargs) -> ChildWorkflowHandle:
+        """Establish a durable child invocation without awaiting its completion."""
+        context = _CURRENT_CONTEXT.get()
+        if context is None:
+            raise RuntimeError("child workflows require an active workflow context")
+        bound = inspect.signature(self.func).bind(None, *args, **kwargs)
+        bound.apply_defaults()
+        arguments = dict(bound.arguments)
+        arguments.pop(next(iter(arguments)))
+        configuration = models.Workflow(
+            id="binding", definition_ref=self.name, input=arguments
+        )
+        source = inspect.getsourcefile(self.func)
+        root = context.project.workflows_path.resolve()
+        if source is not None and Path(source).resolve().is_relative_to(root):
+            target = Path(source).resolve().relative_to(root).as_posix()
+        else:
+            if self.func.__module__.startswith("_runner_workflow_"):
+                raise ValueError("workflow source must remain inside the workspace")
+            target = f"python:{self.func.__module__}"
+        return await context.spawn_workflow(
+            target, self.func.__qualname__, input=configuration.input
+        )
+
+
+def workflow(*, name: typing.Optional[str] = None) -> Callable[
+    [Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]],
+    WorkflowDefinition[P, T],
+]:
+    def decorate(
+        func: Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]],
+    ) -> WorkflowDefinition[P, T]:
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError("workflow implementations must be async functions")
+        parameters = list(inspect.signature(func).parameters.values())
+        if not parameters or parameters[0].kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            raise TypeError(
+                "workflow implementations require a first context parameter"
+            )
+        if not func.__qualname__.isidentifier():
+            raise ValueError("persistent workflows must be module-level functions")
+        if any(
+            parameter.kind
+            not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            for parameter in parameters[1:]
+        ):
+            raise TypeError("workflow inputs must be named parameters")
+        if name is not None and not name.strip():
+            raise ValueError("workflow name must not be empty")
+        module_name = func.__module__
+        if module_name.startswith("_runner_workflow_"):
+            source = inspect.getsourcefile(func)
+            if source is None:
+                raise ValueError("workflow source must be discoverable")
+            module_name = Path(source).stem
+        return WorkflowDefinition(
+            func, name if name is not None else f"{module_name}.{func.__qualname__}"
+        )
+
+    return decorate
+
+
+async def gather_workflows(
+    handles: list[ChildWorkflowHandle],
+) -> list[pydantic.JsonValue]:
+    """Join explicitly started children in invocation order and return their results."""
+    context = _CURRENT_CONTEXT.get()
+    if context is None:
+        raise RuntimeError("joining workflows requires an active workflow context")
+    outcomes = await context.join_workflows(handles)
+    results: list[pydantic.JsonValue] = []
+    for outcome in outcomes:
+        if outcome.kind == "failed":
+            raise ActivityError(outcome.error)
+        results.append(outcome.result)
+    return results

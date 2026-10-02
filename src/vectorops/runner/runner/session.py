@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 import typing
+import logging
 from uuid import uuid4
 
 import pydantic
@@ -19,6 +20,7 @@ from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.history import WorkflowHistory
+from vectorops.runner.runner.events import StepEvent, StepEventSink
 
 
 class ChildExecutor(typing.Protocol):
@@ -48,6 +50,7 @@ class ExecutionSession:
         child_heads: Mapping[str, str],
         reporter: typing.Optional[CheckpointReporter] = None,
         execution_id: typing.Optional[str] = None,
+        event_sink: typing.Optional[StepEventSink] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -63,6 +66,7 @@ class ExecutionSession:
         self.replaying = continue_from_step_id is not None
         self.reporter = reporter
         self.execution_id = execution_id
+        self.event_sink = event_sink
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -205,6 +209,7 @@ class ExecutionSession:
             outcome=outcome,
         )
         await self.history.append_step(step)
+        self._emit(step, created=True)
         self.head = step.id
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
@@ -229,8 +234,32 @@ class ExecutionSession:
         if step.id != self.head or step.workflow_id != self.workflow.id:
             raise ValueError("only the active activity step can be updated")
         await self.history.update_step(step)
+        self._emit(step)
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
         return ActivityExecutionContext(self.execution_id, self.workflow.id, step.id)
+
+    def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:
+        if self.event_sink is None:
+            return
+        kind: typing.Literal[
+            "step.created", "step.updated", "step.completed", "step.failed"
+        ]
+        if step.outcome.kind == "completed":
+            kind = "step.completed"
+        elif step.outcome.kind == "failed":
+            kind = "step.failed"
+        else:
+            kind = "step.created" if created else "step.updated"
+        try:
+            self.event_sink(
+                StepEvent(
+                    kind=kind,
+                    execution_id=self.execution_id,
+                    step=step.model_copy(deep=True),
+                )
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Step event sink failed")

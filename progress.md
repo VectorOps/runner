@@ -33,6 +33,8 @@ Current implementation status and suggested next development horizon.
 - Replay streams selected history from the root and returns recorded outcomes without repeating activities.
 - Continuation appends new descendants while preserving existing branches.
 - Child workflows execute concurrently or sequentially with independent sessions and histories.
+- Decorated async workflows support direct child awaits and explicit start/gather composition using function-derived persistent targets.
+- Executor step-event hooks expose accepted snapshots for future UI listeners without making progress part of workflow results.
 - Joins reference exact child completion records and propagate or collect failures in invocation order.
 - Explicit child replay heads support partial recovery and forks across multiple nesting levels.
 - Cancellation closes replay streams, settles pending requests, and cancels owned child tasks.
