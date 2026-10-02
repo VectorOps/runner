@@ -15,6 +15,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
+from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.history import WorkflowHistory
 
@@ -44,6 +45,7 @@ class ExecutionSession:
         *,
         continue_from_step_id: typing.Optional[str],
         child_heads: Mapping[str, str],
+        reporter: typing.Optional[CheckpointReporter] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -57,6 +59,7 @@ class ExecutionSession:
         self.children: dict[str, asyncio.Task[models.WorkflowStep]] = {}
         self.replay: typing.Optional[AsyncGenerator[models.WorkflowStep, None]] = None
         self.replaying = continue_from_step_id is not None
+        self.reporter = reporter
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -183,6 +186,8 @@ class ExecutionSession:
                 "unfinished streaming activity must be the replay head"
             )
         self.head = step.id
+        if self.reporter is not None:
+            self.reporter.record(self.workflow.id, step.id)
         return step
 
     async def append(
@@ -197,6 +202,8 @@ class ExecutionSession:
         )
         await self.history.append_step(step)
         self.head = step.id
+        if self.reporter is not None:
+            self.reporter.record(self.workflow.id, step.id)
         return step
 
     def start_child(
@@ -218,3 +225,5 @@ class ExecutionSession:
         if step.id != self.head or step.workflow_id != self.workflow.id:
             raise ValueError("only the active streaming step can be updated")
         await self.history.update_step(step)
+        if self.reporter is not None:
+            self.reporter.record(self.workflow.id, step.id)

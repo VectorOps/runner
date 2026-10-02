@@ -15,7 +15,12 @@ Current implementation status and suggested next development horizon.
 - Streaming activities yield replacement snapshots and one final result while history retains only the latest step version.
 - Completed streams replay without reinvocation, and interrupted streams restart under the same step identity.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
-- SQLite persists workflow configuration and steps in `data/history.sqlite3` by default without adding dependencies.
+- Each execution retains its root and child workflow histories in `data/executions/<execution_id>/history.sqlite3`.
+- Runner-owned `data/runner-state.json` atomically persists the execution registry, lifecycle statuses, and recovery checkpoints.
+- Periodic checkpoints flush buffered history before publishing root and child heads for restart recovery.
+- Explicit resume uses recorded execution configuration and checkpoint heads without automatically rerunning interrupted workflows.
+- Exclusive project writer ownership prevents concurrent processes from conflicting over global state.
+- Explicit cleanup removes terminal execution histories while preserving active executions and unrelated records.
 - Transactional streaming updates rewrite one unfinished step while preserving its identity and immutable terminal outcome.
 - SQLite replay uses indexed lookup and database-side path snapshots with bounded Python-side batches.
 - Bounded LRU caches reduce repeated configuration and step lookups during execution.
@@ -31,8 +36,9 @@ Current implementation status and suggested next development horizon.
 
 ## Suggested next horizon
 
-- Define recovery-head selection for root and child workflows without requiring callers to supply every head.
+- Define reconciliation of durable history written after the last checkpoint without selecting unrelated fork heads.
+- Add configurable retention policies for completed execution histories.
 - Define interruption and idempotency policies for external effects whose results were not recorded.
 - Add a minimal CLI to run, resume, fork, and inspect workflows.
-- Update the README with runnable authoring and recovery examples once a history provider exists.
+- Update the README with runnable authoring, execution-state inspection, and recovery examples.
 - Keep RPC, parallel activities, retries, timeouts, and compensation outside the current scope.

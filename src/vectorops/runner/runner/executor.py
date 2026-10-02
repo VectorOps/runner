@@ -16,6 +16,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner.api import composition
+from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.project import RunnerProject
@@ -25,9 +26,15 @@ WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]
 
 
 class WorkflowExecutor:
-    def __init__(self, project: RunnerProject, history: WorkflowHistory) -> None:
+    def __init__(
+        self,
+        project: RunnerProject,
+        history: WorkflowHistory,
+        reporter: typing.Optional[CheckpointReporter] = None,
+    ) -> None:
         self.project = project
         self.history = history
+        self.reporter = reporter
 
     async def execute(
         self,
@@ -49,6 +56,7 @@ class WorkflowExecutor:
             self.execute,
             continue_from_step_id=continue_from_step_id,
             child_heads={} if child_heads is None else child_heads,
+            reporter=self.reporter,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)

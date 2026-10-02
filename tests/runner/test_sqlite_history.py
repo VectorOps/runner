@@ -337,16 +337,21 @@ async def test_default_database_follows_configured_data_directory(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     (workspace / "config.toml").write_text('data_directory = "state"\n')
-    assert await WorkflowRunner(workspace).run("activities") == 2
-    assert (workspace / "state/history.sqlite3").is_file()
+    runner = WorkflowRunner(workspace)
+    assert await runner.run("activities") == 2
+    manifest = await runner.project_state()
+    record = manifest.executions[str(runner.last_execution_id)]
+    assert (workspace / "state" / record.history_path).is_file()
     assert not (workspace / "data/history.sqlite3").exists()
 
 
 async def test_default_runner_persists_and_replays_after_restart(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
-    assert await WorkflowRunner(workspace).run("activities", workflow_id="root") == 2
-    database = SQLiteHistory(workspace / "data/history.sqlite3")
+    runner = WorkflowRunner(workspace)
+    assert await runner.run("activities", workflow_id="root") == 2
+    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
+    database = SQLiteHistory(workspace / "data" / record.history_path)
 
     def head() -> str:
         with closing(sqlite3.connect(database.path)) as connection:
@@ -361,7 +366,7 @@ async def test_default_runner_persists_and_replays_after_restart(
     completion_id = await asyncio.to_thread(head)
     assert (
         await WorkflowRunner(workspace).run(
-            "activities", continue_from_step_id=completion_id
+            "activities", continue_from_step_id=completion_id, execution_id=record.id
         )
         == 2
     )
@@ -371,16 +376,16 @@ async def test_default_runner_persists_and_replays_after_restart(
 async def test_stream_cancellation_and_restart_persist_latest_snapshot(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
+    runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        WorkflowRunner(workspace).run(
-            "streaming", input={"mode": "blocked"}, workflow_id="root"
-        )
+        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    database = SQLiteHistory(workspace / "data/history.sqlite3")
+    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
+    database = SQLiteHistory(workspace / "data" / record.history_path)
 
     def head() -> str:
         with closing(sqlite3.connect(database.path)) as connection:
@@ -397,7 +402,7 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
     )
     execution_probe.gate.set()
     assert await WorkflowRunner(workspace).run(
-        "streaming", continue_from_step_id=stream_id
+        "streaming", continue_from_step_id=stream_id, execution_id=record.id
     ) == {"count": 2}
     assert (await database.get_step(stream_id)).outcome == m.StepCompleted(
         result={"count": 2}
@@ -407,13 +412,10 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
 async def test_nested_children_persist_and_replay(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
-    assert (
-        await WorkflowRunner(workspace).run(
-            "children", "deep_parent", workflow_id="root"
-        )
-        == 4
-    )
-    database = SQLiteHistory(workspace / "data/history.sqlite3")
+    runner = WorkflowRunner(workspace)
+    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
+    database = SQLiteHistory(workspace / "data" / record.history_path)
 
     def completion() -> str:
         with closing(sqlite3.connect(database.path)) as connection:
@@ -430,6 +432,7 @@ async def test_nested_children_persist_and_replay(
             "children",
             "deep_parent",
             continue_from_step_id=await asyncio.to_thread(completion),
+            execution_id=record.id,
         )
         == 4
     )
