@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
+from dataclasses import dataclass
 import typing
 from uuid import uuid4
 
@@ -46,15 +47,26 @@ class HandlerRuntime(typing.Protocol):
 R = typing.TypeVar("R", bound=context.OperationRequest, contravariant=True)
 
 
+@dataclass(frozen=True)
+class DeferredResponse:
+    step: models.WorkflowStep
+    invoke: Callable[[], Awaitable[context.OperationResponse]]
+
+
+HandlerResponse: typing.TypeAlias = typing.Union[
+    context.OperationResponse, DeferredResponse
+]
+
+
 class OperationHandler(typing.Protocol[R]):
-    async def execute(self, request: R) -> context.OperationResponse: ...
+    async def execute(self, request: R) -> HandlerResponse: ...
 
 
 class HandlerRegistry:
     def __init__(self) -> None:
         self._handlers: dict[
             str,
-            Callable[[context.OperationRequest], Awaitable[context.OperationResponse]],
+            Callable[[context.OperationRequest], Awaitable[HandlerResponse]],
         ] = {}
 
     def register(self, request_type: type[R], handler: OperationHandler[R]) -> None:
@@ -65,16 +77,14 @@ class HandlerRegistry:
 
         async def dispatch(
             request: context.OperationRequest,
-        ) -> context.OperationResponse:
+        ) -> HandlerResponse:
             if not isinstance(request, request_type):
                 raise TypeError(f"invalid request type for {kind}")
             return await handler.execute(request)
 
         self._handlers[kind] = dispatch
 
-    async def dispatch(
-        self, request: context.OperationRequest
-    ) -> context.OperationResponse:
+    async def dispatch(self, request: context.OperationRequest) -> HandlerResponse:
         return await self._handlers[request.kind](request)
 
 
@@ -82,12 +92,20 @@ class ActivityHandler:
     def __init__(self, runtime: HandlerRuntime) -> None:
         self.runtime = runtime
 
-    async def execute(
-        self, request: context.ActivityRequest
-    ) -> context.ActivityResponse:
+    async def execute(self, request: context.ActivityRequest) -> DeferredResponse:
         step = await self.runtime.recorded(request.operation)
         if step is None:
             step = await self.runtime.append(request.operation, models.StepPending())
+        selected = step
+
+        async def invoke() -> context.OperationResponse:
+            return await self._resolve(request, selected)
+
+        return DeferredResponse(step, invoke)
+
+    async def _resolve(
+        self, request: context.ActivityRequest, step: models.WorkflowStep
+    ) -> context.ActivityResponse:
         if step.outcome.kind == "pending":
             try:
                 outcome: models.StepOutcome = models.StepCompleted(
@@ -108,15 +126,25 @@ class StreamingActivityHandler:
 
     async def execute(
         self, request: context.StreamingActivityRequest
-    ) -> context.ActivityResponse:
-        """Replace one activity snapshot per yield and finalize only after exhaustion."""
+    ) -> DeferredResponse:
         step = await self.runtime.recorded(request.operation)
-        if step is not None and step.outcome.kind in ("completed", "failed"):
-            return context.ActivityResponse(step.outcome)
-        if step is not None and step.outcome.kind != "streaming":
-            raise ReplayMismatchError("streaming activity has an invalid outcome")
         if step is None:
             step = await self.runtime.append(request.operation, models.StepStreaming())
+        selected = step
+
+        async def invoke() -> context.OperationResponse:
+            return await self._resolve(request, selected)
+
+        return DeferredResponse(step, invoke)
+
+    async def _resolve(
+        self, request: context.StreamingActivityRequest, step: models.WorkflowStep
+    ) -> context.ActivityResponse:
+        """Replace one activity snapshot per yield and finalize only after exhaustion."""
+        if step.outcome.kind in ("completed", "failed"):
+            return context.ActivityResponse(step.outcome)
+        if step.outcome.kind != "streaming":
+            raise ReplayMismatchError("streaming activity has an invalid outcome")
         final_result: pydantic.JsonValue = None
         final_seen = False
         stream = request.invoke(self.runtime.activity_context(step))
@@ -212,16 +240,28 @@ class JoinHandler:
         operation = require_spawn(spawn)
         return await self.runtime.history.get_workflow(operation.child_workflow_id)
 
-    async def execute(self, request: context.JoinRequest) -> context.JoinResponse:
+    async def execute(self, request: context.JoinRequest) -> DeferredResponse:
         operation = request.operation
         step = await self.runtime.recorded(operation)
         if step is None:
+            step = await self.runtime.append(operation, models.StepWaiting())
+        selected = step
+
+        async def wait() -> context.OperationResponse:
+            return await self._resolve(operation, selected)
+
+        return DeferredResponse(step, wait)
+
+    async def _resolve(
+        self, operation: models.WorkflowJoinOperation, step: models.WorkflowStep
+    ) -> context.JoinResponse:
+        if step.outcome.kind == "waiting":
             children = [
                 await self.child_for_spawn(spawn_id)
                 for spawn_id in operation.spawn_step_ids
             ]
             completions = await asyncio.gather(
-                *(self.runtime.start_child(child) for child in children)
+                *(asyncio.shield(self.runtime.start_child(child)) for child in children)
             )
             references = [
                 models.ChildWorkflowCompletion(
@@ -231,9 +271,10 @@ class JoinHandler:
                     operation.spawn_step_ids, completions, strict=True
                 )
             ]
-            step = await self.runtime.append(
-                operation, models.StepJoined(child_completions=references)
+            step = step.model_copy(
+                update={"outcome": models.StepJoined(child_completions=references)}
             )
+            await self.runtime.update(step)
         if step.outcome.kind == "failed":
             return context.JoinResponse([], error=step.outcome.error)
         if step.outcome.kind != "joined":

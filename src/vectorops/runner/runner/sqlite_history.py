@@ -46,7 +46,18 @@ class SQLiteHistory:
             return
         async with self._initialization_lock:
             if not self._ready:
-                await _offload(self._initialize)
+                async with asyncio.timeout(30):
+                    while True:
+                        try:
+                            await _offload(self._initialize)
+                            break
+                        except sqlite3.OperationalError as exc:
+                            if exc.sqlite_errorcode not in (
+                                sqlite3.SQLITE_BUSY,
+                                sqlite3.SQLITE_LOCKED,
+                            ):
+                                raise
+                            await asyncio.sleep(0.01)
                 self._ready = True
 
     def _initialize(self) -> None:
@@ -56,7 +67,8 @@ class SQLiteHistory:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
                 raise ValueError(f"unsupported history schema version: {version}")
-            connection.executescript("""
+            connection.executescript(
+                """
                 BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS workflows (
                     id TEXT PRIMARY KEY,
@@ -80,7 +92,8 @@ class SQLiteHistory:
                 );
                 PRAGMA user_version = 1;
                 COMMIT;
-                """)
+                """
+            )
 
     async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         await self._prepare()
@@ -212,7 +225,10 @@ class SQLiteHistory:
                     previous = self._step(connection, step.previous_step_id)
                     if previous.workflow_id != step.workflow_id:
                         raise ValueError("predecessor belongs to another workflow")
-                    if previous.outcome.kind in ("streaming", "pending"):
+                    if (
+                        previous.outcome.kind in ("streaming", "pending")
+                        and not previous.deferred_delivery
+                    ):
                         raise ValueError(
                             "unfinished activity steps cannot have descendants"
                         )
@@ -237,20 +253,22 @@ class SQLiteHistory:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 previous = self._step(connection, step.id)
-                if previous.outcome.kind not in ("streaming", "pending"):
+                if previous.outcome.kind not in ("streaming", "pending", "waiting"):
                     raise ValueError("terminal steps cannot be updated")
                 if (
                     previous.workflow_id,
                     previous.previous_step_id,
                     previous.operation,
-                ) != (step.workflow_id, step.previous_step_id, step.operation):
+                    previous.deferred_delivery,
+                ) != (
+                    step.workflow_id,
+                    step.previous_step_id,
+                    step.operation,
+                    step.deferred_delivery,
+                ):
                     raise ValueError("step identity and links cannot change")
                 connection.execute(
                     "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
-                )
-                connection.execute(
-                    "INSERT INTO workflow_heads VALUES (?, ?) ON CONFLICT(workflow_id) DO UPDATE SET step_id = excluded.step_id",
-                    (step.workflow_id, step.id),
                 )
 
         await self._run(update)
@@ -272,7 +290,11 @@ class SQLiteHistory:
                     step = self._step(connection, current)
                     if step.workflow_id != workflow_id:
                         raise ValueError("replay step belongs to another workflow")
-                    if depth and step.outcome.kind in ("streaming", "pending"):
+                    if (
+                        depth
+                        and step.outcome.kind in ("streaming", "pending")
+                        and not step.deferred_delivery
+                    ):
                         raise ValueError("unfinished activity must be the replay head")
                     try:
                         connection.execute(

@@ -61,7 +61,7 @@ class MemoryHistory:
         if self.fail_update:
             raise OSError("stream state storage failed")
         existing = self.steps[step.id]
-        if existing.outcome.kind not in ("streaming", "pending"):
+        if existing.outcome.kind not in ("streaming", "pending", "waiting"):
             raise ValueError("terminal steps cannot be updated")
         if (existing.workflow_id, existing.previous_step_id, existing.operation) != (
             step.workflow_id,

@@ -100,13 +100,19 @@ class CachedHistory:
         async with self._lock:
             self._check()
             previous = await self._get_step(step.id)
-            if previous.outcome.kind not in ("streaming", "pending"):
+            if previous.outcome.kind not in ("streaming", "pending", "waiting"):
                 raise ValueError("terminal steps cannot be updated")
             if (
                 previous.workflow_id,
                 previous.previous_step_id,
                 previous.operation,
-            ) != (step.workflow_id, step.previous_step_id, step.operation):
+                previous.deferred_delivery,
+            ) != (
+                step.workflow_id,
+                step.previous_step_id,
+                step.operation,
+                step.deferred_delivery,
+            ):
                 raise ValueError("step identity and links cannot change")
             snapshot = step.model_copy(deep=True)
             if snapshot.outcome.kind == "streaming":

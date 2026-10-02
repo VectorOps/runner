@@ -30,29 +30,41 @@ Workspace roots can remain undecorated async functions or use the same decorator
 Importable library functions are resolved by the executor through `python:<module>:<function>` references.
 Raw async helpers remain ordinary Python calls and do not create child histories.
 
-## Concurrent children
+## Concurrent activities and children
 
 ```python
-from vectorops.runner.api import composition
-from pydantic import JsonValue
+import asyncio
 
 
-async def parent(ctx: WorkflowExecutionContext) -> list[JsonValue]:
-    first = await child.start("alpha")
-    second = await child.start("beta")
-    return await composition.gather_workflows([first, second])
+async def parent(ctx: WorkflowExecutionContext) -> list[str]:
+    return list(await asyncio.gather(child("alpha"), child("beta")))
 ```
 
-Starts are ordered in parent history while child execution runs concurrently.
-Gather returns results in invocation order and propagates recorded child failures as `ActivityError`.
-For outcome collection, retain the lower-level `ctx.join_workflows(..., failure_policy="collect")` API.
-Concurrent `asyncio.gather(child(...), child(...))` is not supported because parent operation submissions must remain sequential.
+Use standard `asyncio.gather`, `create_task`, `wait`, and `TaskGroup` to coordinate activities, streaming activities, and child calls, including mixed calls.
+Child workflows can fan out recursively; the single root workflow per execution does not limit concurrent descendants.
+Requests reserve durable invocation records in submission order, then execute independently without blocking acceptance of other requests.
+Completion updates the invocation record without moving the history head backward.
+Before returning a result or raising a recorded error, the dispatcher appends a `workflow.resume` record referencing the invocation.
+Replay uses these records to deliver results in the original order, so concurrent branches can schedule further work after each await.
+Asyncio owns result aggregation and exception handling, including `gather(..., return_exceptions=True)`.
+Parent shutdown cancels owned activities, children, and pending waits; unfinished invocations remain recoverable in history.
+Cancelling a child-call waiter cancels that wait, not the underlying child; the child remains owned by the parent until parent shutdown.
+There are no custom start or gather helpers; decorated workflow calls are ordinary awaitables.
+Keep external I/O, nondeterministic values, and wall-clock timing inside activities.
+Only engine-managed invocation results have durable delivery ordering; raw asyncio timers, external events, and arbitrary background tasks are not durable workflow primitives.
+Interrupted activities may execute again with the same step identity, so side effects must use implementation-owned idempotency.
+
+One persistent dispatcher owns request acceptance and replay consumption.
+Deferred activities and joins resolve independently, while a session supervisor treats storage and replay failures as fatal rather than catchable operation outcomes.
+History remains streamed during replay, with only active invocations and one lookahead record retained in memory.
+Older records without `deferred_delivery` retain their original immediate-delivery replay behavior; new records set it to `true` for activities and joins.
 
 ## Streaming step events
 
 Pass an optional synchronous `event_sink` callback to `WorkflowRunner` to observe executor step snapshots.
 Events include execution identity and a complete step record, with kinds `step.created`, `step.updated`, `step.completed`, and `step.failed`.
-Activity creation and updates reference the same step ID; updates are not additional history steps.
+Activity creation and updates reference the same step ID; progress updates are not additional history steps.
+Result delivery adds a separate `workflow.resume` step without duplicating the result payload.
 Nested activity events reach the same execution sink.
 
 The executor emits events after history accepts a write.

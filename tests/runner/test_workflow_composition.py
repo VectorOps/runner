@@ -20,6 +20,7 @@ async def test_direct_await_records_spawn_join_and_returns_result(
     assert [step.operation.kind for step in root] == [
         "workflow.spawn",
         "workflow.join",
+        "workflow.resume",
         "workflow.complete",
     ]
     child = next(
@@ -33,12 +34,14 @@ async def test_direct_await_records_spawn_join_and_returns_result(
     assert execution_probe.calls == [3]
 
 
-async def test_explicit_start_and_gather_run_children_concurrently(
+async def test_standard_gather_runs_children_concurrently(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     task = asyncio.create_task(runner.run("composed", "parallel"))
-    assert await asyncio.wait_for(execution_probe.started.get(), 2) == 2
-    assert await asyncio.wait_for(execution_probe.started.get(), 2) == 1
+    assert {
+        await asyncio.wait_for(execution_probe.started.get(), 2),
+        await asyncio.wait_for(execution_probe.started.get(), 2),
+    } == {1, 2}
     assert execution_probe.peak_active == 2
     execution_probe.gate.set()
     assert await asyncio.wait_for(task, 2) == [4, 2]
@@ -52,7 +55,7 @@ async def test_explicit_start_and_gather_run_children_concurrently(
         "composed", "parallel", continue_from_step_id=history.heads[root.id]
     ) == [4, 2]
     assert history.appended == appended
-    assert execution_probe.calls == [2, 1]
+    assert sorted(execution_probe.calls) == [1, 2]
 
 
 async def test_imported_library_child_has_resolvable_reference(
@@ -115,10 +118,6 @@ async def test_undecorated_helper_stays_in_parent_scope(
 async def test_child_call_requires_workflow_context() -> None:
     with pytest.raises(RuntimeError, match="active workflow"):
         await library_child()
-    with pytest.raises(RuntimeError, match="active workflow"):
-        await library_child.start()
-    with pytest.raises(RuntimeError, match="active workflow"):
-        await c.gather_workflows([])
 
 
 def test_persistent_workflow_rejects_closures_and_invalid_signatures() -> None:

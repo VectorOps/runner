@@ -37,6 +37,22 @@ class ChildExecutor(typing.Protocol):
 class _PendingRequest:
     request: context.OperationRequest
     response: asyncio.Future[context.OperationResponse]
+    task: typing.Optional[asyncio.Task[None]] = None
+
+    def cancel_wait(self, response: asyncio.Future[context.OperationResponse]) -> None:
+        if response.cancelled() and self.task is not None:
+            self.task.cancel()
+
+    def deliver(self, response: context.OperationResponse) -> None:
+        if not self.response.done():
+            self.response.set_result(response)
+
+
+@dataclass
+class _Resolution:
+    pending: _PendingRequest
+    deferred: handlers.DeferredResponse
+    result: asyncio.Future[context.OperationResponse]
 
 
 class ExecutionSession:
@@ -58,8 +74,16 @@ class ExecutionSession:
         self.child_heads = child_heads
         self.replay_head = continue_from_step_id
         self.head: typing.Optional[str] = None
-        self.queue: asyncio.Queue[_PendingRequest] = asyncio.Queue(maxsize=1)
-        self.busy = False
+        self.queue: asyncio.Queue[typing.Union[_PendingRequest, _Resolution]] = (
+            asyncio.Queue()
+        )
+        self.resolutions: dict[str, _Resolution] = {}
+        self.buffered: typing.Optional[models.WorkflowStep] = None
+        self.ordered_replay = False
+        self.live = asyncio.Event()
+        if continue_from_step_id is None:
+            self.live.set()
+        self.waiters: set[asyncio.Task[None]] = set()
         self.closed = False
         self.children: dict[str, asyncio.Task[models.WorkflowStep]] = {}
         self.replay: typing.Optional[AsyncGenerator[models.WorkflowStep, None]] = None
@@ -80,17 +104,10 @@ class ExecutionSession:
     ) -> context.OperationResponse:
         if self.closed:
             raise RuntimeError("workflow session is closed")
-        if self.busy:
-            raise RuntimeError("parallel operations in one workflow are not supported")
-        self.busy = True
-        response: asyncio.Future[context.OperationResponse] = (
-            asyncio.get_running_loop().create_future()
-        )
-        try:
-            await self.queue.put(_PendingRequest(request, response))
-            return await response
-        finally:
-            self.busy = False
+        pending = _PendingRequest(request, asyncio.get_running_loop().create_future())
+        pending.response.add_done_callback(pending.cancel_wait)
+        self.queue.put_nowait(pending)
+        return await pending.response
 
     async def _path(self) -> AsyncGenerator[models.WorkflowStep, None]:
         if self.replay_head is not None:
@@ -112,57 +129,161 @@ class ExecutionSession:
             return await invoke()
 
         task = asyncio.create_task(run_workflow())
-        pending: typing.Optional[_PendingRequest] = None
-        getter: typing.Optional[asyncio.Task[_PendingRequest]] = None
+        fatal: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+        dispatcher = asyncio.create_task(self._dispatch(fatal))
         try:
-            while not task.done():
-                getter = asyncio.create_task(self.queue.get())
-                await asyncio.wait((task, getter), return_when=asyncio.FIRST_COMPLETED)
-                if getter.done():
-                    pending = getter.result()
-                    response = await self.handlers.dispatch(pending.request)
-                    if not pending.response.done():
-                        pending.response.set_result(response)
-                    pending = None
-                else:
-                    getter.cancel()
-                    await asyncio.gather(getter, return_exceptions=True)
-                getter = None
-            try:
-                result = task.result()
-                outcome: models.StepOutcome = models.StepCompleted(result=result)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                outcome = self.failure(exc)
-            recorded = await self.recorded(models.WorkflowCompleteOperation())
-            if recorded is not None:
-                if recorded.outcome != outcome:
-                    raise ReplayMismatchError("workflow completion differs from replay")
-                completion = recorded
-            else:
-                completion = await self.append(
-                    models.WorkflowCompleteOperation(), outcome
-                )
-            if await self.recorded(None) is not None:
-                raise ReplayMismatchError("workflow returned before consuming history")
-            return completion
+            await asyncio.wait((task, fatal), return_when=asyncio.FIRST_COMPLETED)
+            if fatal.done():
+                raise fatal.result()
+            self.closed = True
+            await self._stop_operations(dispatcher)
+            if fatal.done():
+                raise fatal.result()
+            return await self._complete(task)
         finally:
             self.closed = True
             task.cancel()
-            if getter is not None:
-                getter.cancel()
+            await self._stop_operations(dispatcher)
+            await asyncio.gather(task, return_exceptions=True)
+            fatal.cancel()
+            await replay.aclose()
+
+    async def _dispatch(self, fatal: asyncio.Future[Exception]) -> None:
+        """Serialize history writes and replay deliveries, never operation execution."""
+        pending: typing.Optional[_PendingRequest] = None
+        try:
+            while True:
+                if self.ordered_replay:
+                    step = await self._peek()
+                    if step is not None and isinstance(
+                        step.operation, models.WorkflowResumeOperation
+                    ):
+                        resolution = self.resolutions.get(step.operation.step_id)
+                        if resolution is None:
+                            raise ReplayMismatchError(
+                                "resume references an inactive invocation"
+                            )
+                        if resolution.deferred.step.outcome.kind in (
+                            "pending",
+                            "streaming",
+                            "waiting",
+                        ):
+                            raise ReplayMismatchError(
+                                "resume references an unfinished invocation"
+                            )
+                        await self.recorded(step.operation)
+                        await self._deliver(resolution, replay=True)
+                        continue
+                item = await self.queue.get()
+                if isinstance(item, _Resolution):
+                    if not self.replaying:
+                        await self._deliver(item)
+                    continue
+                pending = item
+                if pending.response.cancelled():
+                    pending = None
+                    continue
+                response = await self.handlers.dispatch(pending.request)
+                if pending.response.cancelled():
+                    pending = None
+                    continue
+                if isinstance(response, handlers.DeferredResponse):
+                    resolution = _Resolution(
+                        pending, response, asyncio.get_running_loop().create_future()
+                    )
+                    self.resolutions[response.step.id] = resolution
+                    waiter = asyncio.create_task(self._resolve(resolution, fatal))
+                    pending.task = waiter
+                    self.waiters.add(waiter)
+                    waiter.add_done_callback(self.waiters.discard)
+                    if not response.step.deferred_delivery:
+                        await self._deliver(resolution, replay=True)
+                else:
+                    pending.deliver(response)
+                pending = None
+        except Exception as exc:
+            if not fatal.done():
+                fatal.set_result(exc)
+        finally:
             if pending is not None:
                 pending.response.cancel()
-            while not self.queue.empty():
-                self.queue.get_nowait().response.cancel()
-            for child in self.children.values():
-                child.cancel()
-            tasks = [task, *self.children.values()]
-            if getter is not None:
-                await asyncio.gather(getter, return_exceptions=True)
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await replay.aclose()
+
+    async def _resolve(
+        self,
+        resolution: _Resolution,
+        fatal: asyncio.Future[Exception],
+    ) -> None:
+        try:
+            if (
+                resolution.deferred.step.deferred_delivery
+                and resolution.deferred.step.outcome.kind
+                in ("pending", "streaming", "waiting")
+            ):
+                await self.live.wait()
+            response = await resolution.deferred.invoke()
+            resolution.result.set_result(response)
+            self.queue.put_nowait(resolution)
+        except Exception as exc:
+            if not fatal.done():
+                fatal.set_result(exc)
+        finally:
+            if not resolution.result.done():
+                resolution.result.cancel()
+                resolution.pending.response.cancel()
+
+    async def _deliver(self, resolution: _Resolution, *, replay: bool = False) -> None:
+        """Persist delivery before waking the caller, independently of completion time."""
+        step_id = resolution.deferred.step.id
+        if step_id not in self.resolutions:
+            return
+        if resolution.pending.response.cancelled():
+            self.resolutions.pop(step_id)
+            return
+        response = await asyncio.shield(resolution.result)
+        if not replay and resolution.deferred.step.deferred_delivery:
+            await self.append(
+                models.WorkflowResumeOperation(step_id=step_id), models.StepCompleted()
+            )
+        resolution.pending.deliver(response)
+        self.resolutions.pop(step_id)
+        await asyncio.sleep(0)
+
+    async def _stop_operations(self, dispatcher: asyncio.Task[None]) -> None:
+        dispatcher.cancel()
+        await asyncio.gather(dispatcher, return_exceptions=True)
+        tasks = [*self.waiters, *self.children.values()]
+        for task in tasks:
+            task.cancel()
+        for resolution in self.resolutions.values():
+            resolution.pending.response.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        while not self.queue.empty():
+            item = self.queue.get_nowait()
+            if isinstance(item, _PendingRequest):
+                item.response.cancel()
+        self.waiters.clear()
+        self.resolutions.clear()
+
+    async def _complete(
+        self, task: asyncio.Task[pydantic.JsonValue]
+    ) -> models.WorkflowStep:
+        """Validate replay completion or append the workflow's terminal outcome."""
+        try:
+            outcome: models.StepOutcome = models.StepCompleted(result=task.result())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            outcome = self.failure(exc)
+        recorded = await self.recorded(models.WorkflowCompleteOperation())
+        if recorded is not None:
+            if recorded.outcome != outcome:
+                raise ReplayMismatchError("workflow completion differs from replay")
+            completion = recorded
+        else:
+            completion = await self.append(models.WorkflowCompleteOperation(), outcome)
+        if await self.recorded(None) is not None:
+            raise ReplayMismatchError("workflow returned before consuming history")
+        return completion
 
     @staticmethod
     def failure(exc: Exception) -> models.StepFailed:
@@ -176,6 +297,21 @@ class ExecutionSession:
     async def recorded(
         self, operation: typing.Optional[models.WorkflowOperation]
     ) -> typing.Optional[models.WorkflowStep]:
+        step = await self._peek()
+        self.buffered = None
+        if step is None:
+            return None
+        if operation is not None and step.operation != operation:
+            raise ReplayMismatchError("operation differs from recorded history")
+        self.ordered_replay = self.ordered_replay or step.deferred_delivery
+        self.head = step.id
+        if self.reporter is not None:
+            self.reporter.record(self.workflow.id, step.id)
+        return step
+
+    async def _peek(self) -> typing.Optional[models.WorkflowStep]:
+        if self.buffered is not None:
+            return self.buffered
         if not self.replaying or self.replay is None:
             return None
         step = await anext(self.replay, None)
@@ -183,19 +319,20 @@ class ExecutionSession:
             self.replaying = False
             if self.head != self.replay_head:
                 raise ReplayMismatchError("replay path did not reach the selected head")
+            self.live.set()
+            for resolution in self.resolutions.values():
+                if resolution.result.done():
+                    self.queue.put_nowait(resolution)
             return None
         if step.workflow_id != self.workflow.id or step.previous_step_id != self.head:
             raise ReplayMismatchError("invalid workflow or predecessor in replay path")
-        if operation is not None and step.operation != operation:
-            raise ReplayMismatchError("operation differs from recorded history")
         if (
-            step.outcome.kind in ("streaming", "pending")
+            not step.deferred_delivery
+            and step.outcome.kind in ("streaming", "pending")
             and step.id != self.replay_head
         ):
             raise ReplayMismatchError("unfinished activity must be the replay head")
-        self.head = step.id
-        if self.reporter is not None:
-            self.reporter.record(self.workflow.id, step.id)
+        self.buffered = step
         return step
 
     async def append(
@@ -207,6 +344,9 @@ class ExecutionSession:
             previous_step_id=self.head,
             operation=operation,
             outcome=outcome,
+            deferred_delivery=isinstance(
+                operation, (models.StepOperation, models.WorkflowJoinOperation)
+            ),
         )
         await self.history.append_step(step)
         self._emit(step, created=True)
@@ -231,12 +371,13 @@ class ExecutionSession:
         return task
 
     async def update(self, step: models.WorkflowStep) -> None:
-        if step.id != self.head or step.workflow_id != self.workflow.id:
-            raise ValueError("only the active activity step can be updated")
+        if step.workflow_id != self.workflow.id:
+            raise ValueError("step belongs to another workflow")
         await self.history.update_step(step)
         self._emit(step)
         if self.reporter is not None:
-            self.reporter.record(self.workflow.id, step.id)
+            if self.head is not None:
+                self.reporter.record(self.workflow.id, self.head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
         return ActivityExecutionContext(self.execution_id, self.workflow.id, step.id)

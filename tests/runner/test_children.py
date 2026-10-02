@@ -20,8 +20,10 @@ async def test_parallel_children_preserve_invocation_order(
             workflow_id="root",
         )
     )
-    assert await asyncio.wait_for(execution_probe.started.get(), 2) == 2
-    assert await asyncio.wait_for(execution_probe.started.get(), 2) == 1
+    assert {
+        await asyncio.wait_for(execution_probe.started.get(), 2),
+        await asyncio.wait_for(execution_probe.started.get(), 2),
+    } == {1, 2}
     assert execution_probe.peak_active == 2
     execution_probe.gate.set()
     assert await asyncio.wait_for(task, 2) == [4, 2]
@@ -30,6 +32,7 @@ async def test_parallel_children_preserve_invocation_order(
         "workflow.spawn",
         "workflow.spawn",
         "workflow.join",
+        "workflow.resume",
         "workflow.complete",
     ]
     assert path[2].outcome.kind == "joined"
@@ -182,7 +185,7 @@ async def test_deep_partial_recovery_forks_each_level_without_replaying_effects(
     assert all(
         history.steps[step_id] == step for step_id, step in original_steps.items()
     )
-    assert len(history.steps) == len(original_steps) + 6
+    assert len(history.steps) == len(original_steps) + 10
 
     fork_paths = {
         "root": history.path(history.heads["root"]),
@@ -237,6 +240,7 @@ async def test_parent_cancellation_cleans_children(
         await asyncio.wait_for(task, 2)
     assert execution_probe.active == 0
     assert all(
-        step.operation.kind == "workflow.spawn" or step.outcome.kind == "pending"
+        step.operation.kind == "workflow.spawn"
+        or step.outcome.kind in ("pending", "waiting")
         for step in history.steps.values()
     )

@@ -14,10 +14,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.context import (
-    ChildWorkflowHandle,
-    WorkflowExecutionContext,
-)
+from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner import streaming
 
@@ -160,12 +157,6 @@ class WorkflowDefinition(typing.Generic[P, T]):
     name: str
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
-        handle = await self.start(*args, **kwargs)
-        results = await gather_workflows([handle])
-        return typing.cast(T, results[0])
-
-    async def start(self, *args: P.args, **kwargs: P.kwargs) -> ChildWorkflowHandle:
-        """Establish a durable child invocation without awaiting its completion."""
         context = _CURRENT_CONTEXT.get()
         if context is None:
             raise RuntimeError("child workflows require an active workflow context")
@@ -184,9 +175,14 @@ class WorkflowDefinition(typing.Generic[P, T]):
             if self.func.__module__.startswith("_runner_workflow_"):
                 raise ValueError("workflow source must remain inside the workspace")
             target = f"python:{self.func.__module__}"
-        return await context.spawn_workflow(
+        handle = await context.spawn_workflow(
             target, self.func.__qualname__, input=configuration.input
         )
+        outcomes = await context.join_workflows([handle])
+        outcome = outcomes[0]
+        if outcome.kind == "failed":
+            raise ActivityError(outcome.error)
+        return typing.cast(T, outcome.result)
 
 
 def workflow(*, name: typing.Optional[str] = None) -> Callable[
@@ -230,19 +226,3 @@ def workflow(*, name: typing.Optional[str] = None) -> Callable[
         )
 
     return decorate
-
-
-async def gather_workflows(
-    handles: list[ChildWorkflowHandle],
-) -> list[pydantic.JsonValue]:
-    """Join explicitly started children in invocation order and return their results."""
-    context = _CURRENT_CONTEXT.get()
-    if context is None:
-        raise RuntimeError("joining workflows requires an active workflow context")
-    outcomes = await context.join_workflows(handles)
-    results: list[pydantic.JsonValue] = []
-    for outcome in outcomes:
-        if outcome.kind == "failed":
-            raise ActivityError(outcome.error)
-        results.append(outcome.result)
-    return results

@@ -33,6 +33,7 @@ async def test_registry_dispatch_and_duplicate_registration() -> None:
             models.StepOperation(kind="activity", name="work"), invoke
         )
     )
+    assert not isinstance(response, handlers.DeferredResponse)
     assert response.kind == "activity"
     assert response.outcome.kind == "completed"
     assert response.outcome.result == 9

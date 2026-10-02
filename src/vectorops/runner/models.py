@@ -10,6 +10,7 @@ _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
     "workflow.spawn",
     "workflow.join",
     "workflow.complete",
+    "workflow.resume",
 )
 
 
@@ -74,11 +75,23 @@ class WorkflowCompleteOperation(_JsonModel):
     kind: typing.Literal["workflow.complete"] = "workflow.complete"
 
 
+class WorkflowResumeOperation(_JsonModel):
+    """Deliver an invocation's persisted outcome at this position in history."""
+
+    kind: typing.Literal["workflow.resume"] = "workflow.resume"
+    step_id: str = pydantic.Field(min_length=1)
+
+
 def _operation_tag(operation: object) -> str:
     """Dispatch typed workflow operations while preserving arbitrary activity kinds."""
     if isinstance(
         operation,
-        (WorkflowSpawnOperation, WorkflowJoinOperation, WorkflowCompleteOperation),
+        (
+            WorkflowSpawnOperation,
+            WorkflowJoinOperation,
+            WorkflowCompleteOperation,
+            WorkflowResumeOperation,
+        ),
     ):
         return operation.kind
     if isinstance(operation, dict):
@@ -94,6 +107,7 @@ WorkflowOperation: typing.TypeAlias = typing.Annotated[
         typing.Annotated[WorkflowSpawnOperation, pydantic.Tag("workflow.spawn")],
         typing.Annotated[WorkflowJoinOperation, pydantic.Tag("workflow.join")],
         typing.Annotated[WorkflowCompleteOperation, pydantic.Tag("workflow.complete")],
+        typing.Annotated[WorkflowResumeOperation, pydantic.Tag("workflow.resume")],
     ],
     pydantic.Discriminator(_operation_tag),
 ]
@@ -133,6 +147,12 @@ class StepPending(_JsonModel):
     kind: typing.Literal["pending"] = "pending"
 
 
+class StepWaiting(_JsonModel):
+    """Reserved history position of a join awaiting child completions."""
+
+    kind: typing.Literal["waiting"] = "waiting"
+
+
 class ChildWorkflowCompletion(_JsonModel):
     """Bind a spawned child to the exact terminal step observed by a join."""
 
@@ -159,7 +179,9 @@ class StepJoined(_JsonModel):
 
 
 StepOutcome: typing.TypeAlias = typing.Annotated[
-    typing.Union[StepCompleted, StepFailed, StepJoined, StepStreaming, StepPending],
+    typing.Union[
+        StepCompleted, StepFailed, StepJoined, StepStreaming, StepPending, StepWaiting
+    ],
     pydantic.Field(discriminator="kind"),
 ]
 
@@ -172,12 +194,26 @@ class WorkflowStep(_JsonModel):
     previous_step_id: typing.Optional[str] = pydantic.Field(default=None, min_length=1)
     operation: WorkflowOperation
     outcome: StepOutcome
+    deferred_delivery: bool = False
 
     @pydantic.model_validator(mode="after")
     def validate_relationships(self) -> typing.Self:
         """Validate local links and outcome shape without loading referenced histories."""
         if self.previous_step_id == self.id:
             raise ValueError("a step cannot be its own predecessor")
+        if self.deferred_delivery and not isinstance(
+            self.operation, (StepOperation, WorkflowJoinOperation)
+        ):
+            raise ValueError("deferred delivery requires an activity or join")
+        if isinstance(self.operation, WorkflowResumeOperation):
+            if self.operation.step_id == self.id:
+                raise ValueError("a resume cannot reference itself")
+            if self.outcome != StepCompleted():
+                raise ValueError("a resume requires an empty completed outcome")
+        if self.outcome.kind == "waiting" and not isinstance(
+            self.operation, WorkflowJoinOperation
+        ):
+            raise ValueError("waiting state requires a workflow join operation")
         if self.outcome.kind in ("streaming", "pending") and not isinstance(
             self.operation, StepOperation
         ):
@@ -201,8 +237,8 @@ class WorkflowStep(_JsonModel):
                     for item in self.outcome.child_completions
                 ):
                     raise ValueError("a join cannot reference itself as a completion")
-            elif not isinstance(self.outcome, StepFailed):
-                raise ValueError("a join requires a joined or failed outcome")
+            elif self.outcome.kind not in ("failed", "waiting"):
+                raise ValueError("a join requires a joined, waiting, or failed outcome")
         elif isinstance(self.outcome, StepJoined):
             raise ValueError("a joined outcome requires a workflow join operation")
         return self

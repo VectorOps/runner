@@ -35,7 +35,8 @@ async def test_repeated_join_reuses_child_completion(
 ) -> None:
     assert await runner.run("edge_cases", "repeated_join", workflow_id="root") == 4
     path = history.path(history.heads["root"])
-    assert path[1].outcome == path[2].outcome
+    joins = [step for step in path if step.operation.kind == "workflow.join"]
+    assert joins[0].outcome == joins[1].outcome
     assert execution_probe.calls == [2]
     assert (
         await runner.run(
@@ -84,7 +85,7 @@ async def test_concurrent_root_sessions_isolate_activity_context(
     assert results == [12, 22]
     for workflow_id in ("a", "b"):
         path = history.path(history.heads[workflow_id])
-        assert len(path) == 3
+        assert len(path) == 5
         assert all(step.workflow_id == workflow_id for step in path)
 
 

@@ -11,6 +11,7 @@ Current implementation status and suggested next development horizon.
 - Workspace setup supports `workflows/`, `data/`, and optional directory overrides in `config.toml`.
 - The executor loads named async callables from workspace Python files with path validation.
 - Executor sessions drive workflow operation requests through registered typed handlers.
+- A persistent FIFO dispatcher owns request acceptance and replay ordering while a single supervisor handles fatal errors and cleanup.
 - Local activity decorators bind arguments, apply defaults, and validate JSON-compatible inputs and results.
 - Ordinary and streaming activities receive an explicit first-argument context with execution, workflow, and step identities.
 - Activity identities are persisted before invocation and reused during interrupted recovery for implementation-owned idempotency.
@@ -33,7 +34,8 @@ Current implementation status and suggested next development horizon.
 - Replay streams selected history from the root and returns recorded outcomes without repeating activities.
 - Continuation appends new descendants while preserving existing branches.
 - Child workflows execute concurrently or sequentially with independent sessions and histories.
-- Decorated async workflows support direct child awaits and explicit start/gather composition using function-derived persistent targets.
+- Decorated async workflows compose with standard asyncio gather, tasks, waits, and task groups using function-derived persistent targets.
+- Durable waiting joins preserve request order while children complete independently without regressing history heads.
 - Executor step-event hooks expose accepted snapshots for future UI listeners without making progress part of workflow results.
 - Joins reference exact child completion records and propagate or collect failures in invocation order.
 - Explicit child replay heads support partial recovery and forks across multiple nesting levels.

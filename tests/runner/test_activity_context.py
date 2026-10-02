@@ -23,7 +23,7 @@ async def test_context_matches_durable_step_and_is_excluded_from_inputs(
     await runner.run("activities", input={"value": 3}, workflow_id="root")
     records = history.path(history.heads["root"])
     assert [ctx.step_id for ctx in execution_probe.contexts] == [
-        step.id for step in records[:2]
+        step.id for step in records if isinstance(step.operation, models.StepOperation)
     ]
     assert all(
         ctx.workflow_id == "root" and ctx.execution_id is None
@@ -34,7 +34,7 @@ async def test_context_matches_durable_step_and_is_excluded_from_inputs(
     await runner.run("activities", continue_from_step_id=records[-1].id)
     assert execution_probe.contexts == before
     await runner.run("activities", continue_from_step_id=records[0].id)
-    assert execution_probe.contexts[-1].step_id != records[1].id
+    assert execution_probe.contexts[-1].step_id != records[2].id
 
 
 @pytest.mark.parametrize(
@@ -113,7 +113,7 @@ async def test_terminal_update_failure_leaves_recoverable_identity(
     assert execution_probe.contexts[1] == first
 
 
-async def test_pending_activity_cannot_have_replayed_descendants(
+async def test_pending_activity_cannot_have_recorded_delivery(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
     await runner.run("activities", workflow_id="root")
@@ -122,7 +122,7 @@ async def test_pending_activity_cannot_have_replayed_descendants(
         path[0].model_copy(update={"outcome": models.StepPending()}),
         *path[1:],
     ]
-    with pytest.raises(ReplayMismatchError, match="replay head"):
+    with pytest.raises(ReplayMismatchError, match="unfinished invocation"):
         await runner.run("activities", continue_from_step_id=path[-1].id)
 
 

@@ -1,5 +1,5 @@
 from collections.abc import AsyncGenerator
-import typing
+import asyncio
 
 from tests.fixtures import probe
 from tests.fixtures.library_workflows import child as library_child
@@ -19,11 +19,12 @@ async def calculate(
         probe.current.peak_active = max(probe.current.peak_active, probe.current.active)
         probe.current.started.put_nowait(value)
         try:
-            await probe.current.gate.wait()
+            await probe.current.gates.get(value, probe.current.gate).wait()
         finally:
             probe.current.active -= 1
     if value < 0:
         raise ValueError("negative child")
+    probe.current.finished.put_nowait(value)
     return value * 2
 
 
@@ -55,9 +56,7 @@ async def workflow(ctx: WorkflowExecutionContext, value: int = 3) -> int:
 
 
 async def parallel(ctx: WorkflowExecutionContext) -> list[int]:
-    first = await child.start(2, block=True)
-    second = await child.start(1, block=True)
-    return typing.cast(list[int], await c.gather_workflows([first, second]))
+    return list(await asyncio.gather(child(2, block=True), child(1, block=True)))
 
 
 async def library(ctx: WorkflowExecutionContext) -> int:
@@ -80,3 +79,100 @@ async def inline(ctx: WorkflowExecutionContext) -> int:
         return await calculate(4)
 
     return await helper(ctx)
+
+
+async def gathered(ctx: WorkflowExecutionContext, block: bool = True) -> list[int]:
+    return list(await asyncio.gather(child(2, block=block), child(1, block=block)))
+
+
+async def tasked(ctx: WorkflowExecutionContext) -> list[int]:
+    first = asyncio.create_task(child(2, block=True))
+    second = asyncio.create_task(child(1, block=True))
+    await asyncio.wait([first, second])
+    return [first.result(), second.result()]
+
+
+async def grouped(ctx: WorkflowExecutionContext) -> list[int]:
+    async with asyncio.TaskGroup() as group:
+        first = group.create_task(child(2, block=True))
+        second = group.create_task(child(1, block=True))
+    return [first.result(), second.result()]
+
+
+async def collected(ctx: WorkflowExecutionContext) -> list[str]:
+    results = await asyncio.gather(child(-1), child(2), return_exceptions=True)
+    return [str(result) for result in results]
+
+
+async def streamed_gather(ctx: WorkflowExecutionContext) -> list[int]:
+    return list(await asyncio.gather(streaming_child(2), streaming_child(1)))
+
+
+async def fail_fast(ctx: WorkflowExecutionContext) -> list[int]:
+    return list(await asyncio.gather(child(-1), child(2, block=True)))
+
+
+async def many_children(ctx: WorkflowExecutionContext) -> list[int]:
+    return list(await asyncio.gather(*(child(value) for value in range(20))))
+
+
+async def cancelled_wait(ctx: WorkflowExecutionContext) -> str:
+    task = asyncio.create_task(child(2, block=True))
+    await probe.current.started.get()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    return "wait cancelled"
+
+
+async def abandoned_call(ctx: WorkflowExecutionContext) -> str:
+    asyncio.create_task(child(2, block=True))
+    await probe.current.started.get()
+    return "parent completed"
+
+
+async def branches(ctx: WorkflowExecutionContext, mode: str = "children") -> list[int]:
+    async def branch(value: int) -> int:
+        if mode == "activities" or (mode == "mixed" and value == 1):
+            result = await calculate(value, block=True)
+            return await calculate(result + 10)
+        result = await child(value, block=True)
+        return await child(result + 10)
+
+    return list(await asyncio.gather(branch(1), branch(2)))
+
+
+@c.workflow()
+async def fanout(ctx: WorkflowExecutionContext, depth: int = 2, value: int = 1) -> int:
+    if depth == 0:
+        return await calculate(value, block=True)
+    results = await asyncio.gather(
+        fanout(depth - 1, value * 2), fanout(depth - 1, value * 2 + 1)
+    )
+    return await calculate(sum(results))
+
+
+async def parallel_activities(ctx: WorkflowExecutionContext) -> list[int]:
+    return list(await asyncio.gather(calculate(1, True), calculate(2, True)))
+
+
+async def mixed_streaming(ctx: WorkflowExecutionContext) -> list[int]:
+    return list(await asyncio.gather(generate(1), calculate(2), streaming_child(3)))
+
+
+async def first_completed(ctx: WorkflowExecutionContext) -> int:
+    tasks = [asyncio.create_task(child(value, block=True)) for value in (1, 2)]
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    result = next(iter(done)).result()
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    return await calculate(result)
+
+
+async def group_failure(ctx: WorkflowExecutionContext) -> None:
+    async with asyncio.TaskGroup() as group:
+        group.create_task(child(-1))
+        group.create_task(child(2, block=True))

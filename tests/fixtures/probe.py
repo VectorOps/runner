@@ -14,6 +14,8 @@ class ExecutionProbe:
         self.peak_active = 0
         self.cancelled = 0
         self.gate = asyncio.Event()
+        self.gates: dict[int, asyncio.Event] = {}
+        self.finished: asyncio.Queue[int] = asyncio.Queue()
         self.started: asyncio.Queue[int] = asyncio.Queue()
         self.before_call: Optional[Callable[[], None]] = None
 
