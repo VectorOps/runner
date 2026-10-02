@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
+from functools import partial
 import typing
 from uuid import uuid4
 
@@ -53,6 +54,19 @@ class DeferredResponse:
     invoke: Callable[[], Awaitable[context.OperationResponse]]
 
 
+async def prepare_response(
+    runtime: HandlerRuntime,
+    operation: models.WorkflowOperation,
+    initial: models.StepOutcome,
+    resolve: Callable[[models.WorkflowStep], Awaitable[context.OperationResponse]],
+) -> DeferredResponse:
+    """Reserve or replay the invocation before creating its deferred execution."""
+    step = await runtime.recorded(operation)
+    if step is None:
+        step = await runtime.append(operation, initial)
+    return DeferredResponse(step, partial(resolve, step))
+
+
 HandlerResponse: typing.TypeAlias = typing.Union[
     context.OperationResponse, DeferredResponse
 ]
@@ -93,15 +107,12 @@ class ActivityHandler:
         self.runtime = runtime
 
     async def execute(self, request: context.ActivityRequest) -> DeferredResponse:
-        step = await self.runtime.recorded(request.operation)
-        if step is None:
-            step = await self.runtime.append(request.operation, models.StepPending())
-        selected = step
-
-        async def invoke() -> context.OperationResponse:
-            return await self._resolve(request, selected)
-
-        return DeferredResponse(step, invoke)
+        return await prepare_response(
+            self.runtime,
+            request.operation,
+            models.StepPending(),
+            partial(self._resolve, request),
+        )
 
     async def _resolve(
         self, request: context.ActivityRequest, step: models.WorkflowStep
@@ -127,15 +138,12 @@ class StreamingActivityHandler:
     async def execute(
         self, request: context.StreamingActivityRequest
     ) -> DeferredResponse:
-        step = await self.runtime.recorded(request.operation)
-        if step is None:
-            step = await self.runtime.append(request.operation, models.StepStreaming())
-        selected = step
-
-        async def invoke() -> context.OperationResponse:
-            return await self._resolve(request, selected)
-
-        return DeferredResponse(step, invoke)
+        return await prepare_response(
+            self.runtime,
+            request.operation,
+            models.StepStreaming(),
+            partial(self._resolve, request),
+        )
 
     async def _resolve(
         self, request: context.StreamingActivityRequest, step: models.WorkflowStep
@@ -241,16 +249,12 @@ class JoinHandler:
         return await self.runtime.history.get_workflow(operation.child_workflow_id)
 
     async def execute(self, request: context.JoinRequest) -> DeferredResponse:
-        operation = request.operation
-        step = await self.runtime.recorded(operation)
-        if step is None:
-            step = await self.runtime.append(operation, models.StepWaiting())
-        selected = step
-
-        async def wait() -> context.OperationResponse:
-            return await self._resolve(operation, selected)
-
-        return DeferredResponse(step, wait)
+        return await prepare_response(
+            self.runtime,
+            request.operation,
+            models.StepWaiting(),
+            partial(self._resolve, request.operation),
+        )
 
     async def _resolve(
         self, operation: models.WorkflowJoinOperation, step: models.WorkflowStep

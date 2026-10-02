@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
+from functools import partial
 import typing
 import logging
 from uuid import uuid4
@@ -34,10 +35,12 @@ class ChildExecutor(typing.Protocol):
 
 
 @dataclass
-class _PendingRequest:
+class _Invocation:
     request: context.OperationRequest
     response: asyncio.Future[context.OperationResponse]
-    task: typing.Optional[asyncio.Task[None]] = None
+    step: typing.Optional[models.WorkflowStep] = None
+    task: typing.Optional[asyncio.Task[context.OperationResponse]] = None
+    delivery_queued: bool = False
 
     def cancel_wait(self, response: asyncio.Future[context.OperationResponse]) -> None:
         if response.cancelled() and self.task is not None:
@@ -46,13 +49,6 @@ class _PendingRequest:
     def deliver(self, response: context.OperationResponse) -> None:
         if not self.response.done():
             self.response.set_result(response)
-
-
-@dataclass
-class _Resolution:
-    pending: _PendingRequest
-    deferred: handlers.DeferredResponse
-    result: asyncio.Future[context.OperationResponse]
 
 
 class ExecutionSession:
@@ -74,16 +70,13 @@ class ExecutionSession:
         self.child_heads = child_heads
         self.replay_head = continue_from_step_id
         self.head: typing.Optional[str] = None
-        self.queue: asyncio.Queue[typing.Union[_PendingRequest, _Resolution]] = (
-            asyncio.Queue()
-        )
-        self.resolutions: dict[str, _Resolution] = {}
+        self.queue: asyncio.Queue[typing.Union[_Invocation, str]] = asyncio.Queue()
+        self.invocations: dict[str, _Invocation] = {}
         self.buffered: typing.Optional[models.WorkflowStep] = None
         self.ordered_replay = False
         self.live = asyncio.Event()
         if continue_from_step_id is None:
             self.live.set()
-        self.waiters: set[asyncio.Task[None]] = set()
         self.closed = False
         self.children: dict[str, asyncio.Task[models.WorkflowStep]] = {}
         self.replay: typing.Optional[AsyncGenerator[models.WorkflowStep, None]] = None
@@ -104,7 +97,7 @@ class ExecutionSession:
     ) -> context.OperationResponse:
         if self.closed:
             raise RuntimeError("workflow session is closed")
-        pending = _PendingRequest(request, asyncio.get_running_loop().create_future())
+        pending = _Invocation(request, asyncio.get_running_loop().create_future())
         pending.response.add_done_callback(pending.cancel_wait)
         self.queue.put_nowait(pending)
         return await pending.response
@@ -129,41 +122,42 @@ class ExecutionSession:
             return await invoke()
 
         task = asyncio.create_task(run_workflow())
-        fatal: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+        fatal: asyncio.Future[BaseException] = (
+            asyncio.get_running_loop().create_future()
+        )
         dispatcher = asyncio.create_task(self._dispatch(fatal))
         try:
-            await asyncio.wait((task, fatal), return_when=asyncio.FIRST_COMPLETED)
-            if fatal.done():
-                raise fatal.result()
-            self.closed = True
-            await self._stop_operations(dispatcher)
+            try:
+                await asyncio.wait((task, fatal), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                self.closed = True
+                task.cancel()
+                await self._stop_operations(dispatcher)
+                await asyncio.gather(task, return_exceptions=True)
             if fatal.done():
                 raise fatal.result()
             return await self._complete(task)
         finally:
-            self.closed = True
-            task.cancel()
-            await self._stop_operations(dispatcher)
-            await asyncio.gather(task, return_exceptions=True)
             fatal.cancel()
             await replay.aclose()
 
-    async def _dispatch(self, fatal: asyncio.Future[Exception]) -> None:
+    async def _dispatch(self, fatal: asyncio.Future[BaseException]) -> None:
         """Serialize history writes and replay deliveries, never operation execution."""
-        pending: typing.Optional[_PendingRequest] = None
+        pending: typing.Optional[_Invocation] = None
         try:
             while True:
                 if self.ordered_replay:
                     step = await self._peek()
+                    self._start_live()
                     if step is not None and isinstance(
                         step.operation, models.WorkflowResumeOperation
                     ):
-                        resolution = self.resolutions.get(step.operation.step_id)
-                        if resolution is None:
+                        invocation = self.invocations.get(step.operation.step_id)
+                        if invocation is None or invocation.step is None:
                             raise ReplayMismatchError(
                                 "resume references an inactive invocation"
                             )
-                        if resolution.deferred.step.outcome.kind in (
+                        if invocation.step.outcome.kind in (
                             "pending",
                             "streaming",
                             "waiting",
@@ -172,32 +166,33 @@ class ExecutionSession:
                                 "resume references an unfinished invocation"
                             )
                         await self.recorded(step.operation)
-                        await self._deliver(resolution, replay=True)
+                        await self._deliver(invocation, replay=True)
                         continue
                 item = await self.queue.get()
-                if isinstance(item, _Resolution):
+                if isinstance(item, str):
                     if not self.replaying:
-                        await self._deliver(item)
+                        invocation = self.invocations.get(item)
+                        if invocation is not None:
+                            await self._deliver(invocation)
                     continue
                 pending = item
                 if pending.response.cancelled():
                     pending = None
                     continue
                 response = await self.handlers.dispatch(pending.request)
+                self._start_live()
                 if pending.response.cancelled():
                     pending = None
                     continue
                 if isinstance(response, handlers.DeferredResponse):
-                    resolution = _Resolution(
-                        pending, response, asyncio.get_running_loop().create_future()
+                    pending.step = response.step
+                    self.invocations[response.step.id] = pending
+                    pending.task = asyncio.create_task(self._resolve(response))
+                    pending.task.add_done_callback(
+                        partial(self._resolved, pending, fatal)
                     )
-                    self.resolutions[response.step.id] = resolution
-                    waiter = asyncio.create_task(self._resolve(resolution, fatal))
-                    pending.task = waiter
-                    self.waiters.add(waiter)
-                    waiter.add_done_callback(self.waiters.discard)
                     if not response.step.deferred_delivery:
-                        await self._deliver(resolution, replay=True)
+                        await self._deliver(pending, replay=True)
                 else:
                     pending.deliver(response)
                 pending = None
@@ -209,60 +204,89 @@ class ExecutionSession:
                 pending.response.cancel()
 
     async def _resolve(
+        self, deferred: handlers.DeferredResponse
+    ) -> context.OperationResponse:
+        if deferred.step.deferred_delivery and deferred.step.outcome.kind in (
+            "pending",
+            "streaming",
+            "waiting",
+        ):
+            await self.live.wait()
+        return await deferred.invoke()
+
+    def _resolved(
         self,
-        resolution: _Resolution,
-        fatal: asyncio.Future[Exception],
+        invocation: _Invocation,
+        fatal: asyncio.Future[BaseException],
+        task: asyncio.Task[context.OperationResponse],
     ) -> None:
-        try:
-            if (
-                resolution.deferred.step.deferred_delivery
-                and resolution.deferred.step.outcome.kind
-                in ("pending", "streaming", "waiting")
-            ):
-                await self.live.wait()
-            response = await resolution.deferred.invoke()
-            resolution.result.set_result(response)
-            self.queue.put_nowait(resolution)
-        except Exception as exc:
+        if task.cancelled():
+            invocation.response.cancel()
+        elif (exc := task.exception()) is not None:
             if not fatal.done():
                 fatal.set_result(exc)
-        finally:
-            if not resolution.result.done():
-                resolution.result.cancel()
-                resolution.pending.response.cancel()
+            invocation.response.cancel()
+        else:
+            self._queue_delivery(invocation)
 
-    async def _deliver(self, resolution: _Resolution, *, replay: bool = False) -> None:
+    def _queue_delivery(self, invocation: _Invocation) -> None:
+        task, step = invocation.task, invocation.step
+        if (
+            not self.closed
+            and self.live.is_set()
+            and not invocation.delivery_queued
+            and task is not None
+            and task.done()
+            and step is not None
+            and step.id in self.invocations
+        ):
+            invocation.delivery_queued = True
+            self.queue.put_nowait(step.id)
+
+    def _start_live(self) -> None:
+        """Release unfinished work and enqueue completed calls once replay is exhausted."""
+        if self.replaying or self.live.is_set():
+            return
+        self.live.set()
+        for invocation in self.invocations.values():
+            self._queue_delivery(invocation)
+
+    async def _deliver(self, invocation: _Invocation, *, replay: bool = False) -> None:
         """Persist delivery before waking the caller, independently of completion time."""
-        step_id = resolution.deferred.step.id
-        if step_id not in self.resolutions:
+        step, task = invocation.step, invocation.task
+        assert step is not None and task is not None
+        if invocation.response.cancelled():
+            if task.done():
+                self.invocations.pop(step.id)
             return
-        if resolution.pending.response.cancelled():
-            self.resolutions.pop(step_id)
-            return
-        response = await asyncio.shield(resolution.result)
-        if not replay and resolution.deferred.step.deferred_delivery:
+        response = await asyncio.shield(task)
+        if not replay and step.deferred_delivery:
             await self.append(
-                models.WorkflowResumeOperation(step_id=step_id), models.StepCompleted()
+                models.WorkflowResumeOperation(step_id=step.id), models.StepCompleted()
             )
-        resolution.pending.deliver(response)
-        self.resolutions.pop(step_id)
+        invocation.deliver(response)
+        self.invocations.pop(step.id)
         await asyncio.sleep(0)
 
     async def _stop_operations(self, dispatcher: asyncio.Task[None]) -> None:
         dispatcher.cancel()
         await asyncio.gather(dispatcher, return_exceptions=True)
-        tasks = [*self.waiters, *self.children.values()]
+        operations = [
+            invocation.task
+            for invocation in self.invocations.values()
+            if invocation.task is not None
+        ]
+        tasks = [*operations, *self.children.values()]
         for task in tasks:
             task.cancel()
-        for resolution in self.resolutions.values():
-            resolution.pending.response.cancel()
+        for invocation in self.invocations.values():
+            invocation.response.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         while not self.queue.empty():
             item = self.queue.get_nowait()
-            if isinstance(item, _PendingRequest):
+            if isinstance(item, _Invocation):
                 item.response.cancel()
-        self.waiters.clear()
-        self.resolutions.clear()
+        self.invocations.clear()
 
     async def _complete(
         self, task: asyncio.Task[pydantic.JsonValue]
@@ -319,10 +343,6 @@ class ExecutionSession:
             self.replaying = False
             if self.head != self.replay_head:
                 raise ReplayMismatchError("replay path did not reach the selected head")
-            self.live.set()
-            for resolution in self.resolutions.values():
-                if resolution.result.done():
-                    self.queue.put_nowait(resolution)
             return None
         if step.workflow_id != self.workflow.id or step.previous_step_id != self.head:
             raise ReplayMismatchError("invalid workflow or predecessor in replay path")

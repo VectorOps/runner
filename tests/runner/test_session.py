@@ -129,3 +129,134 @@ async def test_replay_does_not_prefetch_or_materialize_history() -> None:
     assert history.appended == 1
     assert history.closed
     assert session.queue.empty()
+
+
+class PausedReplayHistory(MemoryHistory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.at_end = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def replay_path(
+        self, workflow_id: str, head_step_id: str
+    ) -> AsyncGenerator[models.WorkflowStep, None]:
+        try:
+            for step in self.path(head_step_id):
+                yield step
+            self.at_end.set()
+            await self.release.wait()
+        finally:
+            self.closed_paths += 1
+
+
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_replay_exhaustion_delivers_ready_invocations_once(
+    cancel_caller: bool,
+) -> None:
+    history = PausedReplayHistory()
+    workflow = models.Workflow(id="w", definition_ref="file:workflow")
+    await history.save_workflow(workflow)
+    operations = [models.StepOperation(kind="activity", name=str(i)) for i in range(2)]
+    for index, operation in enumerate(operations):
+        await history.append_step(
+            models.WorkflowStep(
+                id=str(index),
+                workflow_id="w",
+                previous_step_id=None if index == 0 else "0",
+                operation=operation,
+                outcome=models.StepCompleted(result=index),
+                deferred_delivery=True,
+            )
+        )
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id="1", child_heads={}
+    )
+    callers: list[asyncio.Task[context.OperationResponse]] = []
+
+    async def forbidden(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        raise AssertionError("completed activities must not execute")
+
+    async def invoke() -> int:
+        callers.extend(
+            asyncio.create_task(
+                session.submit(context.ActivityRequest(operation, forbidden))
+            )
+            for operation in operations
+        )
+        results = await asyncio.gather(*callers, return_exceptions=True)
+        return sum(isinstance(result, context.ActivityResponse) for result in results)
+
+    before = set(asyncio.all_tasks())
+    run = asyncio.create_task(session.run(invoke))
+    try:
+        await asyncio.wait_for(history.at_end.wait(), 2)
+        workers = [
+            item.task for item in session.invocations.values() if item.task is not None
+        ]
+        await asyncio.wait_for(asyncio.gather(*workers), 2)
+        assert not session.live.is_set()
+        assert session.queue.empty()
+        assert not any(caller.done() for caller in callers)
+        if cancel_caller:
+            callers[0].cancel()
+            await asyncio.gather(callers[0], return_exceptions=True)
+        history.release.set()
+        completion = await asyncio.wait_for(run, 2)
+    finally:
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+    assert completion.outcome == models.StepCompleted(result=1 if cancel_caller else 2)
+    delivered = [
+        step.operation.step_id
+        for step in history.path(completion.id)
+        if isinstance(step.operation, models.WorkflowResumeOperation)
+    ]
+    assert delivered == (["1"] if cancel_caller else ["0", "1"])
+    assert not session.invocations
+    assert session.queue.empty()
+    assert history.closed_paths == 1
+    assert not set(asyncio.all_tasks()) - before
+
+
+async def test_cancellation_during_replay_never_starts_unfinished_activity() -> None:
+    history = PausedReplayHistory()
+    workflow = models.Workflow(id="w", definition_ref="file:workflow")
+    operation = models.StepOperation(kind="activity", name="blocked")
+    await history.save_workflow(workflow)
+    await history.append_step(
+        models.WorkflowStep(
+            id="pending",
+            workflow_id="w",
+            operation=operation,
+            outcome=models.StepPending(),
+            deferred_delivery=True,
+        )
+    )
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id="pending", child_heads={}
+    )
+    executed = False
+
+    async def activity(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        nonlocal executed
+        executed = True
+        return None
+
+    async def invoke() -> pydantic.JsonValue:
+        await session.submit(context.ActivityRequest(operation, activity))
+        return None
+
+    before = set(asyncio.all_tasks())
+    run = asyncio.create_task(session.run(invoke))
+    try:
+        await asyncio.wait_for(history.at_end.wait(), 2)
+    finally:
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 2)
+    assert not executed
+    assert not session.invocations
+    assert session.queue.empty()
+    assert history.closed_paths == 1
+    assert list(history.steps) == ["pending"]
+    assert not set(asyncio.all_tasks()) - before
