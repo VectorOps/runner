@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.mypy_cache/
 *.py[cod]
 *.egg-info/
 .vocode/data/
