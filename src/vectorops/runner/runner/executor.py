@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from collections.abc import Mapping
 import importlib.util
 import inspect
 from pathlib import Path
@@ -14,27 +15,52 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner.session import ExecutionSession
 
 WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]]
 
 
 class WorkflowExecutor:
-    def __init__(self, project: RunnerProject) -> None:
+    def __init__(self, project: RunnerProject, history: WorkflowHistory) -> None:
         self.project = project
+        self.history = history
 
     async def execute(
         self,
-        workflow_name: str,
-        callable_name: str,
-        context: WorkflowExecutionContext,
-    ) -> pydantic.JsonValue:
-        """Resolve the entry point, bind workflow inputs, and validate its result."""
+        configuration: models.Workflow,
+        *,
+        continue_from_step_id: typing.Optional[str] = None,
+        child_heads: typing.Optional[Mapping[str, str]] = None,
+    ) -> models.WorkflowStep:
+        """Run a session and return its exact workflow completion record."""
+        workflow_name, separator, callable_name = (
+            configuration.definition_ref.rpartition(":")
+        )
+        if not separator:
+            raise ValueError("workflow definition must identify a file and callable")
         workflow = await self.load(workflow_name, callable_name)
-        inspect.signature(workflow).bind(context, **context.workflow.input)
-        result = await workflow(context, **context.workflow.input)
-        return models.StepCompleted(result=result).result
+        session = ExecutionSession(
+            self.history,
+            configuration,
+            self.execute,
+            continue_from_step_id=continue_from_step_id,
+            child_heads={} if child_heads is None else child_heads,
+        )
+        context = WorkflowExecutionContext(self.project, configuration, session)
+        inspect.signature(workflow).bind(context, **configuration.input)
+
+        async def invoke() -> pydantic.JsonValue:
+            token = composition._CURRENT_CONTEXT.set(context)
+            try:
+                return await workflow(context, **configuration.input)
+            finally:
+                composition._CURRENT_CONTEXT.reset(token)
+
+        return await session.run(invoke)
 
     async def load(self, workflow_name: str, callable_name: str) -> WorkflowCallable:
         """Import trusted workflow code without blocking the event loop."""
