@@ -9,8 +9,8 @@ from collections.abc import AsyncIterator
 import typing
 
 from vectorops.runner.runner.cached_history import CachedHistory
-from vectorops.runner.runner import state
-from vectorops.runner.runner.state_store import RunnerStateStore
+from vectorops.runner.runner import execution_state as state
+from vectorops.runner.runner.sqlite_history import SQLiteHistory
 
 
 class CheckpointReporter(typing.Protocol):
@@ -20,7 +20,7 @@ class CheckpointReporter(typing.Protocol):
 class ExecutionCheckpointer:
     def __init__(
         self,
-        store: RunnerStateStore,
+        store: SQLiteHistory,
         history: CachedHistory,
         record: state.ExecutionRecord,
         *,
@@ -70,10 +70,7 @@ class ExecutionCheckpointer:
                     "completion_step_id": completion_id,
                 }
             )
-            manifest = await self.store.load()
-            records = dict(manifest.executions)
-            records[self.execution.id] = self.execution
-            await self.store.save(state.RunnerState(executions=records))
+            await self.store.save_execution(self.execution)
             self._dirty = self.heads != heads
 
     async def _periodic(self) -> None:

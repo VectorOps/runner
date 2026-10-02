@@ -13,10 +13,10 @@ async def main(path: Path) -> None:
         runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
     )
     while True:
-        manifest = await runner.project_state()
-        if runner.last_execution_id is not None:
-            execution = manifest.executions.get(runner.last_execution_id)
-            if execution is not None and execution.checkpoint.heads:
+        pointer = await runner.project_state()
+        if pointer.last_execution_id is not None:
+            execution = await runner.execution_state(pointer.last_execution_id)
+            if execution.checkpoint.heads:
                 print(execution.id, flush=True)
                 break
         await asyncio.sleep(0.01)

@@ -6,7 +6,6 @@ import asyncio
 import fcntl
 from pathlib import Path
 import os
-import shutil
 import tempfile
 import typing
 
@@ -85,20 +84,3 @@ class RunnerStateStore:
             descriptor = self._descriptor
             self._descriptor = None
             await asyncio.to_thread(os.close, descriptor)
-
-    async def remove(self, execution_id: str) -> None:
-        """Delete only terminal execution history, then remove its registry entry."""
-        if self._descriptor is None:
-            raise RuntimeError("project writer ownership is required")
-        manifest = await self.load()
-        record = manifest.executions[execution_id]
-        if record.status == "running":
-            raise ValueError("active execution history cannot be removed")
-        directory = self.data_path / "executions" / record.id
-        if directory.exists():
-            if not directory.resolve().is_relative_to(self.data_path.resolve()):
-                raise ValueError("execution directory escapes project data")
-            await asyncio.to_thread(shutil.rmtree, directory)
-        records = dict(manifest.executions)
-        del records[execution_id]
-        await self.save(state.RunnerState(executions=records))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import shutil
 import typing
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
+from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner.state_store import RunnerStateStore
 
 
@@ -46,7 +48,6 @@ class WorkflowRunner:
         project = await RunnerProject.open(self.path)
         if self.history is None:
             async with RunnerStateStore(project.data_path) as store:
-                manifest = await store.load()
                 if execution_id is None:
                     if continue_from_step_id is not None:
                         raise ValueError(
@@ -54,10 +55,9 @@ class WorkflowRunner:
                         )
                     execution_id = uuid4().hex
                     root_id = workflow_id if workflow_id is not None else uuid4().hex
-                    record = state.ExecutionRecord(
+                    record = execution_models.ExecutionRecord(
                         id=execution_id,
                         root_workflow_id=root_id,
-                        history_path=f"executions/{execution_id}/history.sqlite3",
                     )
                     configuration = models.Workflow(
                         id=root_id,
@@ -65,7 +65,8 @@ class WorkflowRunner:
                         input={} if input is None else input,
                     )
                 else:
-                    record = manifest.executions[execution_id]
+                    database = await self._database(project, execution_id)
+                    record = await database.get_execution()
                     if (
                         workflow_id is not None
                         and workflow_id != record.root_workflow_id
@@ -76,7 +77,9 @@ class WorkflowRunner:
                     workflow_id = record.root_workflow_id
                     configuration = None
                 self.last_execution_id = execution_id
-                history_path = project.data_path / record.history_path
+                history_path = (
+                    project.data_path / "executions" / execution_id / "history.sqlite3"
+                )
                 resolved = await asyncio.to_thread(history_path.resolve)
                 if not resolved.is_relative_to(project.data_path):
                     raise ValueError("execution history escapes project data")
@@ -85,6 +88,7 @@ class WorkflowRunner:
                 ):
                     raise FileNotFoundError("execution history is missing")
                 async with CachedHistory(SQLiteHistory(history_path)) as history:
+                    database = SQLiteHistory(history_path)
                     if configuration is not None:
                         await history.save_workflow(configuration)
                     else:
@@ -120,12 +124,16 @@ class WorkflowRunner:
                     record = record.model_copy(
                         update={
                             "status": "running",
-                            "checkpoint": state.ExecutionCheckpoint(heads=heads),
+                            "checkpoint": execution_models.ExecutionCheckpoint(
+                                heads=heads
+                            ),
                             "completion_step_id": None,
                         }
                     )
-                    checkpointer = ExecutionCheckpointer(store, history, record)
+                    checkpointer = ExecutionCheckpointer(database, history, record)
+                    await database.save_execution(record, replace_heads=True)
                     await checkpointer.persist()
+                    await store.save(state.RunnerState(last_execution_id=execution_id))
                     try:
                         async with checkpointer.tracking():
                             result = await self._run(
@@ -203,25 +211,53 @@ class WorkflowRunner:
         project = await RunnerProject.open(self.path)
         return await RunnerStateStore(project.data_path).load()
 
-    async def recovery_candidates(self) -> list[state.ExecutionRecord]:
-        manifest = await self.project_state()
-        return [
-            record
-            for record in manifest.executions.values()
-            if record.status == "running"
-        ]
+    async def _database(
+        self, project: RunnerProject, execution_id: str
+    ) -> SQLiteHistory:
+        state.RunnerState(last_execution_id=execution_id)
+        path = project.data_path / "executions" / execution_id / "history.sqlite3"
+        resolved = await asyncio.to_thread(path.resolve)
+        if not resolved.is_relative_to(project.data_path):
+            raise ValueError("execution history escapes project data")
+        if not await asyncio.to_thread(path.is_file):
+            raise FileNotFoundError("execution history is missing")
+        return SQLiteHistory(path)
 
-    async def resume(self, execution_id: str) -> pydantic.JsonValue:
+    async def execution_state(
+        self, execution_id: str
+    ) -> execution_models.ExecutionRecord:
         project = await RunnerProject.open(self.path)
-        manifest = await RunnerStateStore(project.data_path).load()
-        record = manifest.executions[execution_id]
-        configuration = await SQLiteHistory(
-            project.data_path / record.history_path
-        ).get_workflow(record.root_workflow_id)
+        return await (await self._database(project, execution_id)).get_execution()
+
+    async def recovery_candidates(self) -> list[execution_models.ExecutionRecord]:
+        pointer = await self.project_state()
+        if pointer.last_execution_id is None:
+            return []
+        record = await self.execution_state(pointer.last_execution_id)
+        return [record] if record.status == "running" else []
+
+    async def resume(
+        self, execution_id: typing.Optional[str] = None
+    ) -> pydantic.JsonValue:
+        project = await RunnerProject.open(self.path)
+        if execution_id is None:
+            execution_id = (await self.project_state()).last_execution_id
+        if execution_id is None:
+            raise ValueError("no last execution is recorded")
+        database = await self._database(project, execution_id)
+        record = await database.get_execution()
+        configuration = await database.get_workflow(record.root_workflow_id)
         workflow_name, _, callable_name = configuration.definition_ref.rpartition(":")
         return await self.run(workflow_name, callable_name, execution_id=execution_id)
 
     async def remove_execution(self, execution_id: str) -> None:
         project = await RunnerProject.open(self.path)
         async with RunnerStateStore(project.data_path) as store:
-            await store.remove(execution_id)
+            database = await self._database(project, execution_id)
+            record = await database.get_execution()
+            if record.status == "running":
+                raise ValueError("active execution history cannot be removed")
+            pointer = await store.load()
+            if pointer.last_execution_id == execution_id:
+                await store.save(state.RunnerState())
+            await asyncio.to_thread(shutil.rmtree, database.path.parent)

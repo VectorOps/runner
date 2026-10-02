@@ -16,8 +16,10 @@ Current implementation status and suggested next development horizon.
 - Completed streams replay without reinvocation, and interrupted streams restart under the same step identity.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
 - Each execution retains its root and child workflow histories in `data/executions/<execution_id>/history.sqlite3`.
-- Runner-owned `data/runner-state.json` atomically persists the execution registry, lifecycle statuses, and recovery checkpoints.
-- Periodic checkpoints flush buffered history before publishing root and child heads for restart recovery.
+- Runner-owned `data/runner-state.json` stores only the last execution identity for restart discovery.
+- Each history database contains execution identity, lifecycle status, root configuration, and selected root and child heads.
+- Durable step writes advance selected heads transactionally, independently of global runner state.
+- Periodic execution checkpoints flush buffered snapshots and persist recovery metadata inside the history database.
 - Explicit resume uses recorded execution configuration and checkpoint heads without automatically rerunning interrupted workflows.
 - Exclusive project writer ownership prevents concurrent processes from conflicting over global state.
 - Explicit cleanup removes terminal execution histories while preserving active executions and unrelated records.
@@ -36,7 +38,6 @@ Current implementation status and suggested next development horizon.
 
 ## Suggested next horizon
 
-- Define reconciliation of durable history written after the last checkpoint without selecting unrelated fork heads.
 - Add configurable retention policies for completed execution histories.
 - Define interruption and idempotency policies for external effects whose results were not recorded.
 - Add a minimal CLI to run, resume, fork, and inspect workflows.

@@ -10,6 +10,7 @@ import sqlite3
 import typing
 
 from vectorops.runner import models
+from vectorops.runner.runner import execution_state as state
 
 T = typing.TypeVar("T")
 
@@ -69,6 +70,14 @@ class SQLiteHistory:
                 );
                 CREATE INDEX IF NOT EXISTS steps_workflow ON steps(workflow_id);
                 CREATE INDEX IF NOT EXISTS steps_previous ON steps(previous_step_id);
+                CREATE TABLE IF NOT EXISTS execution (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_heads (
+                    workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+                    step_id TEXT NOT NULL REFERENCES steps(id)
+                );
                 PRAGMA user_version = 1;
                 COMMIT;
                 """)
@@ -124,6 +133,71 @@ class SQLiteHistory:
             lambda connection: self._workflow(connection, workflow_id)
         )
 
+    async def save_execution(
+        self, execution: state.ExecutionRecord, *, replace_heads: bool = False
+    ) -> None:
+        def save(connection: sqlite3.Connection) -> None:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._workflow(connection, execution.root_workflow_id)
+                existing = connection.execute(
+                    "SELECT payload FROM execution WHERE singleton = 1"
+                ).fetchone()
+                if existing is not None:
+                    previous = state.ExecutionRecord.model_validate_json(existing[0])
+                    if (previous.id, previous.root_workflow_id) != (
+                        execution.id,
+                        execution.root_workflow_id,
+                    ):
+                        raise ValueError("execution identity cannot change")
+                for workflow_id, step_id in execution.checkpoint.heads.items():
+                    if self._step(connection, step_id).workflow_id != workflow_id:
+                        raise ValueError("checkpoint head belongs to another workflow")
+                connection.execute(
+                    "INSERT INTO execution VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET payload = excluded.payload",
+                    (execution.model_dump_json(),),
+                )
+                if existing is None or replace_heads:
+                    connection.execute("DELETE FROM workflow_heads")
+                    connection.executemany(
+                        "INSERT INTO workflow_heads VALUES (?, ?)",
+                        execution.checkpoint.heads.items(),
+                    )
+
+        await self._run(save)
+
+    async def get_execution(self) -> state.ExecutionRecord:
+        def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
+            with connection:
+                connection.execute("BEGIN")
+                row = connection.execute(
+                    "SELECT payload FROM execution WHERE singleton = 1"
+                ).fetchone()
+                if row is None:
+                    raise KeyError("execution state")
+                execution = state.ExecutionRecord.model_validate_json(row[0])
+                heads = dict(
+                    connection.execute(
+                        "SELECT workflow_id, step_id FROM workflow_heads"
+                    )
+                )
+                root_head = heads.get(execution.root_workflow_id)
+                completion_id = None
+                if (
+                    root_head is not None
+                    and self._step(connection, root_head).operation.kind
+                    == "workflow.complete"
+                ):
+                    completion_id = root_head
+                return execution.model_copy(
+                    update={
+                        "checkpoint": state.ExecutionCheckpoint(heads=heads),
+                        "completion_step_id": completion_id,
+                    }
+                )
+
+        return await self._run(read)
+
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))
 
@@ -149,6 +223,10 @@ class SQLiteHistory:
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ValueError("duplicate step ID") from exc
+                connection.execute(
+                    "INSERT INTO workflow_heads VALUES (?, ?) ON CONFLICT(workflow_id) DO UPDATE SET step_id = excluded.step_id",
+                    (step.workflow_id, step.id),
+                )
 
         await self._run(append)
 
@@ -169,6 +247,10 @@ class SQLiteHistory:
                     raise ValueError("step identity and links cannot change")
                 connection.execute(
                     "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
+                )
+                connection.execute(
+                    "INSERT INTO workflow_heads VALUES (?, ?) ON CONFLICT(workflow_id) DO UPDATE SET step_id = excluded.step_id",
+                    (step.workflow_id, step.id),
                 )
 
         await self._run(update)

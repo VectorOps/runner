@@ -340,8 +340,12 @@ async def test_default_database_follows_configured_data_directory(
     runner = WorkflowRunner(workspace)
     assert await runner.run("activities") == 2
     manifest = await runner.project_state()
-    record = manifest.executions[str(runner.last_execution_id)]
-    assert (workspace / "state" / record.history_path).is_file()
+    assert (
+        workspace
+        / "state/executions"
+        / str(manifest.last_execution_id)
+        / "history.sqlite3"
+    ).is_file()
     assert not (workspace / "data/history.sqlite3").exists()
 
 
@@ -350,8 +354,10 @@ async def test_default_runner_persists_and_replays_after_restart(
 ) -> None:
     runner = WorkflowRunner(workspace)
     assert await runner.run("activities", workflow_id="root") == 2
-    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
-    database = SQLiteHistory(workspace / "data" / record.history_path)
+    record = await runner.execution_state(str(runner.last_execution_id))
+    database = SQLiteHistory(
+        workspace / "data/executions" / record.id / "history.sqlite3"
+    )
 
     def head() -> str:
         with closing(sqlite3.connect(database.path)) as connection:
@@ -384,8 +390,10 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
-    database = SQLiteHistory(workspace / "data" / record.history_path)
+    record = await runner.execution_state(str(runner.last_execution_id))
+    database = SQLiteHistory(
+        workspace / "data/executions" / record.id / "history.sqlite3"
+    )
 
     def head() -> str:
         with closing(sqlite3.connect(database.path)) as connection:
@@ -414,8 +422,10 @@ async def test_nested_children_persist_and_replay(
 ) -> None:
     runner = WorkflowRunner(workspace)
     assert await runner.run("children", "deep_parent", workflow_id="root") == 4
-    record = (await runner.project_state()).executions[str(runner.last_execution_id)]
-    database = SQLiteHistory(workspace / "data" / record.history_path)
+    record = await runner.execution_state(str(runner.last_execution_id))
+    database = SQLiteHistory(
+        workspace / "data/executions" / record.id / "history.sqlite3"
+    )
 
     def completion() -> str:
         with closing(sqlite3.connect(database.path)) as connection:

@@ -1,35 +1,205 @@
 import asyncio
-import sys
 from pathlib import Path
 import json
+import sys
 
 import pydantic
 import pytest
 
 from tests.fixtures.probe import ExecutionProbe
 from vectorops.runner import models
-from vectorops.runner.runner import state
-from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
+from vectorops.runner.runner import execution_state, state
 from vectorops.runner.runner.cached_history import CachedHistory
+from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
+from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.workflow import WorkflowRunner
-from vectorops.runner.runner.errors import ActivityError
 
 
-async def test_failed_execution_status_and_terminal_reference(
+def database(workspace: Path, execution_id: str) -> SQLiteHistory:
+    return SQLiteHistory(
+        workspace / "data/executions" / execution_id / "history.sqlite3"
+    )
+
+
+def test_global_state_contains_only_last_execution_pointer() -> None:
+    pointer = state.RunnerState(last_execution_id="execution")
+    assert pointer.model_dump() == {
+        "schema_version": 1,
+        "last_execution_id": "execution",
+    }
+    assert state.RunnerState.model_validate_json(pointer.model_dump_json()) == pointer
+    with pytest.raises(pydantic.ValidationError):
+        state.RunnerState.model_validate({"executions": {}})
+    with pytest.raises(pydantic.ValidationError):
+        state.RunnerState(last_execution_id="../escape")
+
+
+@pytest.mark.parametrize(
+    "patch", [{"id": "../escape"}, {"status": "unknown"}, {"root_workflow_id": ""}]
+)
+def test_execution_state_validation(patch: dict[str, object]) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        execution_state.ExecutionRecord.model_validate(
+            {"id": "execution", "root_workflow_id": "root", **patch}
+        )
+    with pytest.raises(pydantic.ValidationError):
+        execution_state.ExecutionCheckpoint(heads={"root": ""})
+
+
+async def test_atomic_pointer_save_and_project_ownership(tmp_path: Path) -> None:
+    store = RunnerStateStore(tmp_path)
+    assert await store.load() == state.RunnerState()
+    with pytest.raises(RuntimeError, match="ownership"):
+        await store.save(state.RunnerState())
+    async with store:
+        await store.save(state.RunnerState(last_execution_id="execution"))
+        assert json.loads(store.path.read_text()) == {
+            "schema_version": 1,
+            "last_execution_id": "execution",
+        }
+        with pytest.raises(RuntimeError, match="another runner"):
+            async with RunnerStateStore(tmp_path):
+                pass
+    async with RunnerStateStore(tmp_path) as reopened:
+        assert (await reopened.load()).last_execution_id == "execution"
+    assert not list(tmp_path.glob(".runner-state-*"))
+
+
+async def test_corrupt_pointer_is_not_silently_reset(tmp_path: Path) -> None:
+    (tmp_path / "runner-state.json").write_text("not json")
+    with pytest.raises(pydantic.ValidationError):
+        await RunnerStateStore(tmp_path).load()
+
+
+async def test_executions_are_isolated_and_old_history_survives(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    await runner.run("activities", workflow_id="root")
+    first_id = str(runner.last_execution_id)
+    first = await runner.execution_state(first_id)
+    original = await database(workspace, first_id).get_step(
+        str(first.completion_step_id)
+    )
+    await runner.run("activities", workflow_id="root")
+    second_id = str(runner.last_execution_id)
+    assert first_id != second_id
+    assert (await runner.project_state()).last_execution_id == second_id
+    assert (await runner.execution_state(first_id)).status == "completed"
+    assert await database(workspace, first_id).get_step(original.id) == original
+    assert await WorkflowRunner(workspace).resume(first_id) == 2
+    assert execution_probe.calls == [0, 1, 0, 1]
+
+
+async def test_history_resumes_without_global_state(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    execution_id = str(runner.last_execution_id)
+    (workspace / "data/runner-state.json").unlink()
+    reopened = WorkflowRunner(workspace)
+    assert (await reopened.project_state()).last_execution_id is None
+    assert await reopened.resume(execution_id) == 4
+    assert execution_probe.calls == [1, 2]
+    assert (await reopened.project_state()).last_execution_id == execution_id
+
+
+async def test_cancelled_stream_retains_latest_head_in_database(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    task = asyncio.create_task(
+        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+    )
+    await asyncio.wait_for(execution_probe.started.get(), 2)
+    execution_id = str(runner.last_execution_id)
+    assert (await runner.execution_state(execution_id)).status == "running"
+    pointer_before = (workspace / "data/runner-state.json").read_bytes()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    execution = await runner.execution_state(execution_id)
+    assert execution.status == "cancelled"
+    head = execution.checkpoint.heads["root"]
+    assert (
+        await database(workspace, execution_id).get_step(head)
+    ).outcome == models.StepStreaming(state={"index": 0})
+    assert (workspace / "data/runner-state.json").read_bytes() == pointer_before
+    execution_probe.gate.set()
+    assert await WorkflowRunner(workspace).resume() == {"count": 2}
+    assert (await runner.execution_state(execution_id)).status == "completed"
+
+
+async def test_nested_recovery_uses_database_child_heads(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    task = asyncio.create_task(
+        runner.run("children", "parent", input={"values": [1, 2], "block": True})
+    )
+    await asyncio.wait_for(execution_probe.started.get(), 2)
+    await asyncio.wait_for(execution_probe.started.get(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    execution_probe.gate.set()
+    assert await WorkflowRunner(workspace).resume() == [2, 4]
+
+
+async def test_nested_completed_heads_are_self_contained(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    execution = await runner.execution_state(str(runner.last_execution_id))
+    assert len(execution.checkpoint.heads) == 3
+    history = database(workspace, execution.id)
+    for workflow_id, step_id in execution.checkpoint.heads.items():
+        terminal = await history.get_step(step_id)
+        assert terminal.workflow_id == workflow_id
+        assert terminal.operation.kind == "workflow.complete"
+    assert await WorkflowRunner(workspace).resume() == 4
+    assert execution_probe.calls == [1, 2]
+
+
+async def test_failed_execution_status_lives_only_in_database(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
     with pytest.raises(ActivityError):
         await runner.run("activities", "unhandled")
-    execution = (await runner.project_state()).executions[str(runner.last_execution_id)]
+    execution = await runner.execution_state(str(runner.last_execution_id))
     assert execution.status == "failed"
     assert execution.completion_step_id is not None
     assert await runner.recovery_candidates() == []
+    assert set(json.loads((workspace / "data/runner-state.json").read_text())) == {
+        "schema_version",
+        "last_execution_id",
+    }
 
 
-async def test_abrupt_process_exit_retains_recoverable_execution(
+async def test_restart_discovery_reads_status_from_database(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    await runner.run("activities", workflow_id="root")
+    execution_id = str(runner.last_execution_id)
+    history = database(workspace, execution_id)
+    record = await history.get_execution()
+    await history.save_execution(record.model_copy(update={"status": "running"}))
+    reopened = WorkflowRunner(workspace)
+    assert [candidate.id for candidate in await reopened.recovery_candidates()] == [
+        execution_id
+    ]
+    assert execution_probe.calls == [0, 1]
+    assert await reopened.resume() == 2
+    assert execution_probe.calls == [0, 1]
+
+
+async def test_process_crash_recovers_database_head_before_periodic_checkpoint(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     process = await asyncio.create_subprocess_exec(
@@ -55,42 +225,20 @@ async def test_abrupt_process_exit_retains_recoverable_execution(
         execution_id
     ]
     execution_probe.gate.set()
-    assert await runner.resume(execution_id) == {"count": 2}
-    assert (await runner.project_state()).executions[execution_id].status == "completed"
+    assert await runner.resume() == {"count": 2}
+    assert (await runner.execution_state(execution_id)).status == "completed"
 
 
-async def test_nested_cancelled_execution_resumes_with_recorded_child_heads(
-    workspace: Path, execution_probe: ExecutionProbe
-) -> None:
-    runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(
-        runner.run("children", "parent", input={"values": [1, 2], "block": True})
-    )
-    await asyncio.wait_for(execution_probe.started.get(), 2)
-    await asyncio.wait_for(execution_probe.started.get(), 2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    execution_id = str(runner.last_execution_id)
-    execution = (await runner.project_state()).executions[execution_id]
-    assert execution.status == "cancelled"
-    assert execution.root_workflow_id in execution.checkpoint.heads
-    execution_probe.gate.set()
-    assert await WorkflowRunner(workspace).resume(execution_id) == [2, 4]
-
-
-async def test_persistent_fork_keeps_original_completion(
+async def test_fork_preserves_old_history_and_changes_database_head(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
     await runner.run("activities", workflow_id="root")
-    execution = (await runner.project_state()).executions[str(runner.last_execution_id)]
-    database = SQLiteHistory(workspace / "data" / execution.history_path)
+    execution = await runner.execution_state(str(runner.last_execution_id))
+    history = database(workspace, execution.id)
     path = [
         step
-        async for step in database.replay_path(
-            "root", str(execution.completion_step_id)
-        )
+        async for step in history.replay_path("root", str(execution.completion_step_id))
     ]
     assert (
         await runner.run(
@@ -98,196 +246,46 @@ async def test_persistent_fork_keeps_original_completion(
         )
         == 2
     )
-    fork = (await runner.project_state()).executions[execution.id]
+    fork = await history.get_execution()
     assert fork.completion_step_id != execution.completion_step_id
-    assert await database.get_step(path[-1].id) == path[-1]
+    assert await history.get_step(path[-1].id) == path[-1]
     assert execution_probe.calls == [0, 1, 1]
 
 
-async def test_missing_execution_history_is_not_recreated(tmp_path: Path) -> None:
-    async with RunnerStateStore(tmp_path / "data") as store:
-        await store.save(state.RunnerState(executions={"execution": record()}))
-    with pytest.raises(FileNotFoundError):
-        await WorkflowRunner(tmp_path).run("activities", execution_id="execution")
-    assert not (tmp_path / "data" / record().history_path).exists()
-
-
-def record(identifier: str = "execution") -> state.ExecutionRecord:
-    return state.ExecutionRecord(
-        id=identifier,
-        root_workflow_id="root",
-        history_path=f"executions/{identifier}/history.sqlite3",
-    )
-
-
-@pytest.mark.parametrize(
-    "patch",
-    [
-        {"id": "../escape"},
-        {"history_path": "../outside"},
-        {"history_path": "executions/other/history.sqlite3"},
-        {"status": "unknown"},
-    ],
-)
-def test_execution_models_reject_invalid_identity_and_paths(
-    patch: dict[str, object],
-) -> None:
-    with pytest.raises(pydantic.ValidationError):
-        state.ExecutionRecord.model_validate({**record().model_dump(), **patch})
-
-
-def test_runner_manifest_json_roundtrip_and_registry_validation() -> None:
-    manifest = state.RunnerState(executions={"execution": record()})
-    assert state.RunnerState.model_validate_json(manifest.model_dump_json()) == manifest
-    with pytest.raises(pydantic.ValidationError):
-        state.RunnerState(executions={"wrong": record()})
-    with pytest.raises(pydantic.ValidationError):
-        state.ExecutionCheckpoint(heads={"root": ""})
-
-
-async def test_manifest_atomic_save_load_and_ownership(tmp_path: Path) -> None:
-    store = RunnerStateStore(tmp_path)
-    assert await store.load() == state.RunnerState()
-    with pytest.raises(RuntimeError, match="ownership"):
-        await store.save(state.RunnerState())
-    async with store:
-        execution = record()
-        await store.save(state.RunnerState(executions={"execution": execution}))
-        assert (
-            json.loads((tmp_path / "runner-state.json").read_text())["executions"][
-                "execution"
-            ]["status"]
-            == "running"
-        )
-        with pytest.raises(RuntimeError, match="another runner"):
-            async with RunnerStateStore(tmp_path):
-                pass
-    async with RunnerStateStore(tmp_path) as reopened:
-        assert (await reopened.load()).executions["execution"] == execution
-    assert not list(tmp_path.glob(".runner-state-*"))
-
-
-async def test_corrupt_manifest_is_not_silently_reset(tmp_path: Path) -> None:
-    (tmp_path / "runner-state.json").write_text("not json")
-    with pytest.raises(pydantic.ValidationError):
-        await RunnerStateStore(tmp_path).load()
-
-
-async def test_executions_have_distinct_history_and_retain_old_records(
-    workspace: Path, execution_probe: ExecutionProbe
-) -> None:
-    runner = WorkflowRunner(workspace)
-    await runner.run("activities", workflow_id="root")
-    first_id = str(runner.last_execution_id)
-    first = (await runner.project_state()).executions[first_id]
-    original = await SQLiteHistory(workspace / "data" / first.history_path).get_step(
-        str(first.completion_step_id)
-    )
-    await runner.run("activities", workflow_id="root")
-    second_id = str(runner.last_execution_id)
-    manifest = await runner.project_state()
-    assert first_id != second_id
-    assert len(manifest.executions) == 2
-    assert manifest.executions[first_id] == first
-    assert manifest.executions[second_id].history_path != first.history_path
-    assert (
-        await SQLiteHistory(workspace / "data" / first.history_path).get_step(
-            original.id
-        )
-        == original
-    )
-    assert await WorkflowRunner(workspace).resume(first_id) == 2
-    assert execution_probe.calls == [0, 1, 0, 1]
-
-
-async def test_cancelled_execution_checkpoints_latest_stream_and_resumes(
-    workspace: Path, execution_probe: ExecutionProbe
-) -> None:
-    runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
-    )
-    await asyncio.wait_for(execution_probe.started.get(), 2)
-    execution_id = str(runner.last_execution_id)
-    assert (await runner.project_state()).executions[execution_id].status == "running"
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    manifest = await runner.project_state()
-    execution = manifest.executions[execution_id]
-    assert execution.status == "cancelled"
-    head = execution.checkpoint.heads["root"]
-    assert (
-        await SQLiteHistory(workspace / "data" / execution.history_path).get_step(head)
-    ).outcome == models.StepStreaming(state={"index": 0})
-    execution_probe.gate.set()
-    assert await WorkflowRunner(workspace).resume(execution_id) == {"count": 2}
-    assert (await runner.project_state()).executions[execution_id].status == "completed"
-
-
-async def test_restart_discovery_does_not_execute_workflows(
-    workspace: Path, execution_probe: ExecutionProbe
-) -> None:
-    runner = WorkflowRunner(workspace)
-    await runner.run("activities", workflow_id="root")
-    execution_id = str(runner.last_execution_id)
-    async with RunnerStateStore(workspace / "data") as store:
-        manifest = await store.load()
-        interrupted = manifest.executions[execution_id].model_copy(
-            update={"status": "running"}
-        )
-        await store.save(state.RunnerState(executions={execution_id: interrupted}))
-    reopened = WorkflowRunner(workspace)
-    candidates = await reopened.recovery_candidates()
-    assert [candidate.id for candidate in candidates] == [execution_id]
-    assert execution_probe.calls == [0, 1]
-    assert await reopened.resume(execution_id) == 2
-    assert execution_probe.calls == [0, 1]
-
-
-async def test_nested_execution_checkpoint_tracks_child_heads(
-    workspace: Path, execution_probe: ExecutionProbe
-) -> None:
-    runner = WorkflowRunner(workspace)
-    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
-    execution = (await runner.project_state()).executions[str(runner.last_execution_id)]
-    assert len(execution.checkpoint.heads) == 3
-    database = SQLiteHistory(workspace / "data" / execution.history_path)
-    for workflow_id, head in execution.checkpoint.heads.items():
-        terminal = await database.get_step(head)
-        assert terminal.workflow_id == workflow_id
-        assert terminal.operation.kind == "workflow.complete"
-    assert await WorkflowRunner(workspace).resume(execution.id) == 4
-    assert execution_probe.calls == [1, 2]
-
-
-async def test_terminal_cleanup_removes_only_selected_execution(
+async def test_cleanup_leaves_other_histories_and_clears_pointer_only_if_selected(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
     await runner.run("activities")
     first_id = str(runner.last_execution_id)
-    first = (await runner.project_state()).executions[first_id]
     await runner.run("activities")
     second_id = str(runner.last_execution_id)
     await runner.remove_execution(first_id)
-    assert not (workspace / "data" / first.history_path).parent.exists()
-    assert set((await runner.project_state()).executions) == {second_id}
+    assert not database(workspace, first_id).path.parent.exists()
+    assert (await runner.project_state()).last_execution_id == second_id
+    await runner.remove_execution(second_id)
+    assert (await runner.project_state()).last_execution_id is None
 
 
-async def test_running_history_is_not_deleted(tmp_path: Path) -> None:
-    async with RunnerStateStore(tmp_path) as store:
-        await store.save(state.RunnerState(executions={"execution": record()}))
-        with pytest.raises(ValueError, match="active"):
-            await store.remove("execution")
-        assert "execution" in (await store.load()).executions
+async def test_running_history_is_not_deleted(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    await runner.run("activities")
+    execution_id = str(runner.last_execution_id)
+    history = database(workspace, execution_id)
+    await history.save_execution(
+        (await history.get_execution()).model_copy(update={"status": "running"})
+    )
+    with pytest.raises(ValueError, match="active"):
+        await runner.remove_execution(execution_id)
+    assert history.path.exists()
 
 
 async def test_second_runner_cannot_mutate_active_project(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
-    runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(runner.run("activities", "wait"))
+    task = asyncio.create_task(WorkflowRunner(workspace).run("activities", "wait"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     try:
         with pytest.raises(RuntimeError, match="another runner"):
@@ -298,41 +296,84 @@ async def test_second_runner_cannot_mutate_active_project(
             await task
 
 
-async def test_periodic_checkpoint_flushes_history_before_manifest(
+async def test_missing_history_is_not_recreated(tmp_path: Path) -> None:
+    async with RunnerStateStore(tmp_path / "data") as store:
+        await store.save(state.RunnerState(last_execution_id="missing"))
+    with pytest.raises(FileNotFoundError):
+        await WorkflowRunner(tmp_path).resume()
+    assert not database(tmp_path, "missing").path.exists()
+
+
+async def test_periodic_state_flush_stays_inside_history_database(
     tmp_path: Path,
 ) -> None:
-    database = SQLiteHistory(tmp_path / record().history_path)
-    async with (
-        RunnerStateStore(tmp_path) as store,
-        CachedHistory(database, flush_interval=60) as history,
-    ):
+    history_database = SQLiteHistory(tmp_path / "history.sqlite3")
+    record = execution_state.ExecutionRecord(id="execution", root_workflow_id="root")
+    async with CachedHistory(history_database, flush_interval=60) as history:
         await history.save_workflow(
             models.Workflow(id="root", definition_ref="file:workflow")
         )
-        checkpointer = ExecutionCheckpointer(store, history, record(), interval=0.01)
+        checkpointer = ExecutionCheckpointer(
+            history_database, history, record, interval=0.01
+        )
         await checkpointer.persist()
         step = models.WorkflowStep(
             id="step",
             workflow_id="root",
             operation=models.StepOperation(kind="activity", name="work"),
-            outcome=models.StepStreaming(state=0),
+            outcome=models.StepStreaming(),
         )
         await history.append_step(step)
         await history.update_step(
             step.model_copy(update={"outcome": models.StepStreaming(state=7)})
         )
         async with checkpointer.tracking():
-            checkpointer.record("root", step.id)
+            checkpointer.record("root", "step")
             for _ in range(100):
-                manifest = await store.load()
-                if manifest.executions["execution"].checkpoint.heads:
+                if (
+                    await history_database.get_step("step")
+                ).outcome == models.StepStreaming(state=7):
                     break
                 await asyncio.sleep(0.005)
             else:
-                raise AssertionError("checkpoint did not refresh")
-            assert (
-                await SQLiteHistory(database.path).get_step("step")
-            ).outcome == models.StepStreaming(state=7)
+                raise AssertionError("state was not flushed")
+            assert (await history_database.get_execution()).checkpoint.heads == {
+                "root": "step"
+            }
+    assert not (tmp_path / "runner-state.json").exists()
+
+
+async def test_database_heads_advance_atomically_without_checkpoint_refresh(
+    tmp_path: Path,
+) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await history.save_workflow(
+        models.Workflow(id="root", definition_ref="file:workflow")
+    )
+    await history.save_execution(
+        execution_state.ExecutionRecord(id="execution", root_workflow_id="root")
+    )
+    step = models.WorkflowStep(
+        id="step",
+        workflow_id="root",
+        operation=models.StepOperation(kind="activity", name="work"),
+        outcome=models.StepCompleted(result=1),
+    )
+    await history.append_step(step)
+    reopened = SQLiteHistory(history.path)
+    assert (await reopened.get_execution()).checkpoint.heads == {"root": "step"}
+    stale = execution_state.ExecutionRecord(id="execution", root_workflow_id="root")
+    await reopened.save_execution(stale)
+    assert (await reopened.get_execution()).checkpoint.heads == {"root": "step"}
+    with pytest.raises(ValueError, match="identity"):
+        await reopened.save_execution(
+            execution_state.ExecutionRecord(id="other", root_workflow_id="root")
+        )
+
+
+async def test_empty_pointer_cannot_resume(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no last execution"):
+        await WorkflowRunner(tmp_path).resume()
 
 
 async def test_persistent_continuation_requires_execution_identity(
