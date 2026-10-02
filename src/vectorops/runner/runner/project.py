@@ -11,6 +11,16 @@ import typing
 import pydantic
 
 
+class RetentionPolicy(pydantic.BaseModel):
+    """Optional completed-history limits; protected executions always survive."""
+
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+    max_age_days: typing.Optional[int] = pydantic.Field(default=None, ge=0, strict=True)
+    max_completed_executions: typing.Optional[int] = pydantic.Field(
+        default=None, ge=0, strict=True
+    )
+
+
 class RunnerConfig(pydantic.BaseModel):
     """Directory defaults, resolved relative to the workspace root."""
 
@@ -18,6 +28,7 @@ class RunnerConfig(pydantic.BaseModel):
 
     workflows_directory: str = "workflows"
     data_directory: str = "data"
+    retention: RetentionPolicy = pydantic.Field(default_factory=RetentionPolicy)
 
     @pydantic.field_validator("workflows_directory", "data_directory", mode="after")
     @classmethod

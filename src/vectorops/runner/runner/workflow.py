@@ -17,6 +17,7 @@ from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
@@ -154,6 +155,10 @@ class WorkflowRunner:
                         await checkpointer.persist("failed")
                         raise
                     await checkpointer.persist("completed")
+                    await history.flush()
+                    await ExecutionRetention(
+                        project.data_path, project.config.retention
+                    ).apply((await store.load()).last_execution_id)
                     return result
         return await self._run(
             project,

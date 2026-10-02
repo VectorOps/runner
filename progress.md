@@ -23,6 +23,7 @@ Current implementation status and suggested next development horizon.
 - Explicit resume uses recorded execution configuration and checkpoint heads without automatically rerunning interrupted workflows.
 - Exclusive project writer ownership prevents concurrent processes from conflicting over global state.
 - Explicit cleanup removes terminal execution histories while preserving active executions and unrelated records.
+- Optional age and count retention limits prune completed histories after successful execution while protecting the last execution.
 - Transactional streaming updates rewrite one unfinished step while preserving its identity and immutable terminal outcome.
 - SQLite replay uses indexed lookup and database-side path snapshots with bounded Python-side batches.
 - Bounded LRU caches reduce repeated configuration and step lookups during execution.
@@ -38,7 +39,6 @@ Current implementation status and suggested next development horizon.
 
 ## Suggested next horizon
 
-- Add configurable retention policies for completed execution histories.
 - Define interruption and idempotency policies for external effects whose results were not recorded.
 - Add a minimal CLI to run, resume, fork, and inspect workflows.
 - Update the README with runnable authoring, execution-state inspection, and recovery examples.
