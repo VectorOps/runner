@@ -5,12 +5,14 @@ import pydantic
 
 from tests.fixtures import probe
 from vectorops.runner.api.composition import activity
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 
 
 @activity(name="increment", kind="test.increment")
-async def increment(value: int, amount: int = 1) -> int:
+async def increment(ctx: ActivityExecutionContext, value: int, amount: int = 1) -> int:
+    probe.current.contexts.append(ctx)
     if probe.current.before_call is not None:
         probe.current.before_call()
     probe.current.calls.append(value)
@@ -18,12 +20,13 @@ async def increment(value: int, amount: int = 1) -> int:
 
 
 @activity()
-async def fail() -> None:
+async def fail(ctx: ActivityExecutionContext) -> None:
     raise ValueError("activity failed")
 
 
 @activity()
-async def blocked(value: int = 0) -> int:
+async def blocked(ctx: ActivityExecutionContext, value: int = 0) -> int:
+    probe.current.contexts.append(ctx)
     probe.current.active += 1
     probe.current.peak_active = max(probe.current.active, probe.current.peak_active)
     probe.current.started.put_nowait(value)
@@ -38,12 +41,12 @@ async def blocked(value: int = 0) -> int:
 
 
 @activity()
-async def invalid_result() -> pydantic.JsonValue:
+async def invalid_result(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
     return typing.cast(pydantic.JsonValue, object())
 
 
 @activity()
-async def nested_activity() -> int:
+async def nested_activity(ctx: ActivityExecutionContext) -> int:
     return await increment(1)
 
 

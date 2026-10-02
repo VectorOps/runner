@@ -8,6 +8,7 @@ import pytest
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.runner import context
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.session import ExecutionSession
 
 
@@ -34,10 +35,14 @@ async def test_closed_session_rejects_requests(history: MemoryHistory) -> None:
 
     await session.run(invoke)
     assert session.closed
+
+    async def activity_invoke(ctx: ActivityExecutionContext) -> int:
+        return 1
+
     with pytest.raises(RuntimeError, match="closed"):
         await session.submit(
             context.ActivityRequest(
-                models.StepOperation(kind="activity", name="work"), invoke
+                models.StepOperation(kind="activity", name="work"), activity_invoke
             )
         )
 
@@ -97,7 +102,7 @@ async def test_replay_does_not_prefetch_or_materialize_history() -> None:
         child_heads={},
     )
 
-    async def forbidden() -> pydantic.JsonValue:
+    async def forbidden(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         raise AssertionError("replayed activity must not execute")
 
     async def invoke() -> int:

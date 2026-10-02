@@ -100,7 +100,7 @@ class CachedHistory:
         async with self._lock:
             self._check()
             previous = await self._get_step(step.id)
-            if previous.outcome.kind != "streaming":
+            if previous.outcome.kind not in ("streaming", "pending"):
                 raise ValueError("terminal steps cannot be updated")
             if (
                 previous.workflow_id,

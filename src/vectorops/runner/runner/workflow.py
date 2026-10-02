@@ -147,6 +147,7 @@ class WorkflowRunner:
                                 continue_from_step_id=root_head,
                                 child_heads=heads,
                                 reporter=checkpointer,
+                                execution_id=execution_id,
                             )
                     except asyncio.CancelledError:
                         await checkpointer.persist("cancelled")
@@ -183,6 +184,7 @@ class WorkflowRunner:
         continue_from_step_id: typing.Optional[str],
         child_heads: typing.Optional[dict[str, str]],
         reporter: typing.Optional[ExecutionCheckpointer] = None,
+        execution_id: typing.Optional[str] = None,
     ) -> pydantic.JsonValue:
         if continue_from_step_id is not None:
             if not continue_from_step_id:
@@ -201,7 +203,9 @@ class WorkflowRunner:
                 definition_ref=f"{workflow_name}:{callable_name}",
                 input={} if input is None else input,
             )
-        completion = await WorkflowExecutor(project, history, reporter).execute(
+        completion = await WorkflowExecutor(
+            project, history, reporter, execution_id
+        ).execute(
             configuration,
             continue_from_step_id=continue_from_step_id,
             child_heads=child_heads,

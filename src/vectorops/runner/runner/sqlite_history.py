@@ -212,9 +212,9 @@ class SQLiteHistory:
                     previous = self._step(connection, step.previous_step_id)
                     if previous.workflow_id != step.workflow_id:
                         raise ValueError("predecessor belongs to another workflow")
-                    if previous.outcome.kind == "streaming":
+                    if previous.outcome.kind in ("streaming", "pending"):
                         raise ValueError(
-                            "unfinished streaming steps cannot have descendants"
+                            "unfinished activity steps cannot have descendants"
                         )
                 try:
                     connection.execute(
@@ -237,7 +237,7 @@ class SQLiteHistory:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 previous = self._step(connection, step.id)
-                if previous.outcome.kind != "streaming":
+                if previous.outcome.kind not in ("streaming", "pending"):
                     raise ValueError("terminal steps cannot be updated")
                 if (
                     previous.workflow_id,
@@ -272,10 +272,8 @@ class SQLiteHistory:
                     step = self._step(connection, current)
                     if step.workflow_id != workflow_id:
                         raise ValueError("replay step belongs to another workflow")
-                    if depth and step.outcome.kind == "streaming":
-                        raise ValueError(
-                            "unfinished streaming activity must be the replay head"
-                        )
+                    if depth and step.outcome.kind in ("streaming", "pending"):
+                        raise ValueError("unfinished activity must be the replay head")
                     try:
                         connection.execute(
                             "INSERT INTO replay VALUES (?, ?, ?)",

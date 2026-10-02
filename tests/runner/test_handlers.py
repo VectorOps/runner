@@ -3,6 +3,7 @@ import pytest
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.runner import context, handlers
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -12,7 +13,11 @@ class ActivityHandlerStub:
         self, request: context.ActivityRequest
     ) -> context.ActivityResponse:
         return context.ActivityResponse(
-            models.StepCompleted(result=await request.invoke())
+            models.StepCompleted(
+                result=await request.invoke(
+                    ActivityExecutionContext(None, "workflow", "step")
+                )
+            )
         )
 
 
@@ -20,7 +25,7 @@ async def test_registry_dispatch_and_duplicate_registration() -> None:
     registry = handlers.HandlerRegistry()
     registry.register(context.ActivityRequest, ActivityHandlerStub())
 
-    async def invoke() -> int:
+    async def invoke(ctx: ActivityExecutionContext) -> int:
         return 9
 
     response = await registry.dispatch(

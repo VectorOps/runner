@@ -4,6 +4,7 @@ import pytest
 
 from vectorops.runner import models
 from vectorops.runner.runner import context
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.project import RunnerConfig, RunnerProject
 
@@ -30,7 +31,7 @@ def make_context(
     )
 
 
-async def invoke() -> int:
+async def invoke(ctx: ActivityExecutionContext) -> int:
     return 1
 
 

@@ -16,11 +16,11 @@ class WorkflowHistory(Protocol):
     async def get_step(self, step_id: str) -> models.WorkflowStep: ...
 
     async def append_step(self, step: models.WorkflowStep) -> None:
-        """Append an immutable record before its outcome is delivered to workflow code."""
+        """Persist a new step, including unfinished identity, before invoking effects."""
         ...
 
     async def update_step(self, step: models.WorkflowStep) -> None:
-        """Replace an unfinished streaming record, preserving its identity and links.
+        """Replace a pending or streaming record, preserving its identity and links.
 
         Keep only the latest snapshot and reject updates to terminal records.
         """

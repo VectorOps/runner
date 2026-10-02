@@ -12,6 +12,7 @@ import typing
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner import streaming
 
@@ -24,7 +25,7 @@ _CURRENT_CONTEXT: ContextVar[typing.Optional[WorkflowExecutionContext]] = Contex
 
 @dataclass(frozen=True)
 class ActivityDefinition(typing.Generic[P, T]):
-    func: Callable[P, Awaitable[T]]
+    func: Callable[typing.Concatenate[ActivityExecutionContext, P], Awaitable[T]]
     name: str
     kind: str = "activity"
 
@@ -32,28 +33,34 @@ class ActivityDefinition(typing.Generic[P, T]):
         context = _CURRENT_CONTEXT.get()
         if context is None:
             raise RuntimeError("activities require an active workflow context")
-        bound = inspect.signature(self.func).bind(*args, **kwargs)
+        bound = inspect.signature(self.func).bind(None, *args, **kwargs)
         bound.apply_defaults()
+        arguments = dict(bound.arguments)
+        arguments.pop(next(iter(arguments)))
         operation = models.StepOperation(
-            kind=self.kind, name=self.name, input=dict(bound.arguments)
+            kind=self.kind, name=self.name, input=arguments
         )
 
-        async def invoke() -> pydantic.JsonValue:
+        async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
             token = _CURRENT_CONTEXT.set(None)
             try:
-                return await self.func(*args, **kwargs)
+                return await self.func(ctx, *args, **kwargs)
             finally:
                 _CURRENT_CONTEXT.reset(token)
 
         return typing.cast(T, await context.run_activity(operation, invoke))
 
 
-def activity(
-    *, name: typing.Optional[str] = None, kind: str = "activity"
-) -> Callable[[Callable[P, Awaitable[T]]], ActivityDefinition[P, T]]:
-    def decorate(func: Callable[P, Awaitable[T]]) -> ActivityDefinition[P, T]:
+def activity(*, name: typing.Optional[str] = None, kind: str = "activity") -> Callable[
+    [Callable[typing.Concatenate[ActivityExecutionContext, P], Awaitable[T]]],
+    ActivityDefinition[P, T],
+]:
+    def decorate(
+        func: Callable[typing.Concatenate[ActivityExecutionContext, P], Awaitable[T]],
+    ) -> ActivityDefinition[P, T]:
         if not inspect.iscoroutinefunction(func):
             raise TypeError("activity implementations must be async functions")
+        _validate_context_parameter(func)
         operation = models.StepOperation(kind=kind, name=name or func.__name__)
         return ActivityDefinition(func=func, name=operation.name, kind=operation.kind)
 
@@ -75,7 +82,8 @@ def final(value: T) -> ActivityFinal[T]:
 @dataclass(frozen=True)
 class StreamableActivityDefinition(typing.Generic[P, T]):
     func: Callable[
-        P, AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None]
+        typing.Concatenate[ActivityExecutionContext, P],
+        AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None],
     ]
     name: str
     kind: str = "activity"
@@ -84,16 +92,20 @@ class StreamableActivityDefinition(typing.Generic[P, T]):
         context = _CURRENT_CONTEXT.get()
         if context is None:
             raise RuntimeError("activities require an active workflow context")
-        bound = inspect.signature(self.func).bind(*args, **kwargs)
+        bound = inspect.signature(self.func).bind(None, *args, **kwargs)
         bound.apply_defaults()
+        arguments = dict(bound.arguments)
+        arguments.pop(next(iter(arguments)))
         operation = models.StepOperation(
-            kind=self.kind, name=self.name, input=dict(bound.arguments)
+            kind=self.kind, name=self.name, input=arguments
         )
 
-        async def invoke() -> AsyncGenerator[streaming.StreamItem, None]:
+        async def invoke(
+            ctx: ActivityExecutionContext,
+        ) -> AsyncGenerator[streaming.StreamItem, None]:
             token = _CURRENT_CONTEXT.set(None)
             try:
-                async with aclosing(self.func(*args, **kwargs)) as stream:
+                async with aclosing(self.func(ctx, *args, **kwargs)) as stream:
                     async for item in stream:
                         yield typing.cast(streaming.StreamItem, item)
             finally:
@@ -105,17 +117,33 @@ class StreamableActivityDefinition(typing.Generic[P, T]):
 def streamable_activity(
     *, name: typing.Optional[str] = None, kind: str = "activity"
 ) -> Callable[
-    [Callable[P, AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None]]],
+    [
+        Callable[
+            typing.Concatenate[ActivityExecutionContext, P],
+            AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None],
+        ]
+    ],
     StreamableActivityDefinition[P, T],
 ]:
     def decorate(
         func: Callable[
-            P, AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None]
+            typing.Concatenate[ActivityExecutionContext, P],
+            AsyncGenerator[typing.Union[ActivityDelta, ActivityFinal[T]], None],
         ],
     ) -> StreamableActivityDefinition[P, T]:
         if not inspect.isasyncgenfunction(func):
             raise TypeError("streamable activities must be async generator functions")
+        _validate_context_parameter(func)
         operation = models.StepOperation(kind=kind, name=name or func.__name__)
         return StreamableActivityDefinition(func, operation.name, operation.kind)
 
     return decorate
+
+
+def _validate_context_parameter(func: Callable[..., object]) -> None:
+    parameters = list(inspect.signature(func).parameters.values())
+    if not parameters or parameters[0].kind not in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        raise TypeError("activity implementations require a first context parameter")

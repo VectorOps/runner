@@ -12,6 +12,8 @@ Current implementation status and suggested next development horizon.
 - The executor loads named async callables from workspace Python files with path validation.
 - Executor sessions drive workflow operation requests through registered typed handlers.
 - Local activity decorators bind arguments, apply defaults, and validate JSON-compatible inputs and results.
+- Ordinary and streaming activities receive an explicit first-argument context with execution, workflow, and step identities.
+- Activity identities are persisted before invocation and reused during interrupted recovery for implementation-owned idempotency.
 - Streaming activities yield replacement snapshots and one final result while history retains only the latest step version.
 - Completed streams replay without reinvocation, and interrupted streams restart under the same step identity.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
@@ -39,7 +41,6 @@ Current implementation status and suggested next development horizon.
 
 ## Suggested next horizon
 
-- Define interruption and idempotency policies for external effects whose results were not recorded.
 - Add a minimal CLI to run, resume, fork, and inspect workflows.
 - Update the README with runnable authoring, execution-state inspection, and recovery examples.
 - Keep RPC, parallel activities, retries, timeouts, and compensation outside the current scope.

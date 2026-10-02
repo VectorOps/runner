@@ -9,6 +9,7 @@ from tests.fixtures.history import MemoryHistory
 from tests.fixtures.probe import ExecutionProbe
 from vectorops.runner import models
 from vectorops.runner.api import composition as c
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -180,7 +181,9 @@ async def test_unfinished_stream_cannot_have_replayed_descendants(
 
 async def test_streaming_requires_active_context() -> None:
     @c.streamable_activity()
-    async def example() -> AsyncGenerator[c.ActivityFinal[int], None]:
+    async def example(
+        ctx: ActivityExecutionContext,
+    ) -> AsyncGenerator[c.ActivityFinal[int], None]:
         yield c.final(1)
 
     with pytest.raises(RuntimeError, match="active workflow"):

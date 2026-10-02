@@ -41,7 +41,11 @@ async def test_result_is_recorded_before_next_activity(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     def check() -> None:
-        assert len(history.steps) == len(execution_probe.calls)
+        assert len(history.steps) == len(execution_probe.calls) + 1
+        assert (
+            history.steps[execution_probe.contexts[-1].step_id].outcome.kind
+            == "pending"
+        )
 
     execution_probe.before_call = check
     assert await runner.run("activities") == 2
@@ -217,7 +221,7 @@ async def test_history_failures_are_fatal(
         await runner.run("activities", continue_from_step_id=head)
 
 
-async def test_cancellation_does_not_record_interrupted_activity(
+async def test_cancellation_retains_pending_activity_identity(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     before = set(asyncio.all_tasks())
@@ -226,7 +230,8 @@ async def test_cancellation_does_not_record_interrupted_activity(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
-    assert history.steps == {}
+    assert len(history.steps) == 1
+    assert history.steps[history.heads["root"]].outcome.kind == "pending"
     assert execution_probe.active == 0
     assert execution_probe.cancelled == 1
     assert not set(asyncio.all_tasks()) - before

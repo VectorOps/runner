@@ -5,11 +5,14 @@ import pydantic
 
 from tests.fixtures import probe
 from vectorops.runner.api.composition import activity
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 
 
 @activity()
-async def identity(value: pydantic.JsonValue) -> pydantic.JsonValue:
+async def identity(
+    ctx: ActivityExecutionContext, value: pydantic.JsonValue
+) -> pydantic.JsonValue:
     probe.current.calls.append(1)
     return value
 

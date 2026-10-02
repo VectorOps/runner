@@ -237,5 +237,6 @@ async def test_parent_cancellation_cleans_children(
         await asyncio.wait_for(task, 2)
     assert execution_probe.active == 0
     assert all(
-        step.operation.kind == "workflow.spawn" for step in history.steps.values()
+        step.operation.kind == "workflow.spawn" or step.outcome.kind == "pending"
+        for step in history.steps.values()
     )

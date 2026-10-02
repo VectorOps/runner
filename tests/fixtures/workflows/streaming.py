@@ -5,14 +5,16 @@ import pydantic
 
 from tests.fixtures import probe
 from vectorops.runner.api import composition as c
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 
 
 @c.streamable_activity(name="stream", kind="test.stream")
 async def stream(
-    mode: str = "normal", count: int = 2
+    ctx: ActivityExecutionContext, mode: str = "normal", count: int = 2
 ) -> AsyncGenerator[c.ActivityDelta | c.ActivityFinal[pydantic.JsonValue], None]:
     probe.current.calls.append(count)
+    probe.current.contexts.append(ctx)
     try:
         for index in range(count):
             yield c.delta({"index": index})

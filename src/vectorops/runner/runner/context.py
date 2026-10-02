@@ -10,6 +10,7 @@ import typing
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.streaming import StreamItem
@@ -19,14 +20,14 @@ from vectorops.runner.runner.streaming import StreamItem
 class ActivityRequest:
     kind: typing.ClassVar[typing.Literal["activity"]] = "activity"
     operation: models.StepOperation
-    invoke: Callable[[], Awaitable[pydantic.JsonValue]]
+    invoke: Callable[[ActivityExecutionContext], Awaitable[pydantic.JsonValue]]
 
 
 @dataclass(frozen=True)
 class StreamingActivityRequest:
     kind: typing.ClassVar[typing.Literal["streaming"]] = "streaming"
     operation: models.StepOperation
-    invoke: Callable[[], AsyncGenerator[StreamItem, None]]
+    invoke: Callable[[ActivityExecutionContext], AsyncGenerator[StreamItem, None]]
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ class WorkflowExecutionContext:
     async def run_activity(
         self,
         operation: models.StepOperation,
-        invoke: Callable[[], Awaitable[pydantic.JsonValue]],
+        invoke: Callable[[ActivityExecutionContext], Awaitable[pydantic.JsonValue]],
     ) -> pydantic.JsonValue:
         response = await self.submitter.submit(ActivityRequest(operation, invoke))
         if response.kind != "activity":
@@ -122,7 +123,7 @@ class WorkflowExecutionContext:
     async def run_streaming_activity(
         self,
         operation: models.StepOperation,
-        invoke: Callable[[], AsyncGenerator[StreamItem, None]],
+        invoke: Callable[[ActivityExecutionContext], AsyncGenerator[StreamItem, None]],
     ) -> pydantic.JsonValue:
         response = await self.submitter.submit(
             StreamingActivityRequest(operation, invoke)

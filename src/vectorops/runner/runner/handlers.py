@@ -12,6 +12,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner.runner import context
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
 from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.history import WorkflowHistory
@@ -36,6 +37,10 @@ class HandlerRuntime(typing.Protocol):
     ) -> asyncio.Task[models.WorkflowStep]: ...
 
     def failure(self, exc: Exception) -> models.StepFailed: ...
+
+    def activity_context(
+        self, step: models.WorkflowStep
+    ) -> ActivityExecutionContext: ...
 
 
 R = typing.TypeVar("R", bound=context.OperationRequest, contravariant=True)
@@ -82,13 +87,16 @@ class ActivityHandler:
     ) -> context.ActivityResponse:
         step = await self.runtime.recorded(request.operation)
         if step is None:
+            step = await self.runtime.append(request.operation, models.StepPending())
+        if step.outcome.kind == "pending":
             try:
                 outcome: models.StepOutcome = models.StepCompleted(
-                    result=await request.invoke()
+                    result=await request.invoke(self.runtime.activity_context(step))
                 )
             except Exception as exc:
                 outcome = self.runtime.failure(exc)
-            step = await self.runtime.append(request.operation, outcome)
+            step = step.model_copy(update={"outcome": outcome})
+            await self.runtime.update(step)
         if step.outcome.kind not in ("completed", "failed"):
             raise ReplayMismatchError("activity has an invalid outcome")
         return context.ActivityResponse(step.outcome)
@@ -111,7 +119,7 @@ class StreamingActivityHandler:
             step = await self.runtime.append(request.operation, models.StepStreaming())
         final_result: pydantic.JsonValue = None
         final_seen = False
-        stream = request.invoke()
+        stream = request.invoke(self.runtime.activity_context(step))
         async with aclosing(stream):
             while True:
                 try:

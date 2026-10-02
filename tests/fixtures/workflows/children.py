@@ -4,12 +4,14 @@ import pydantic
 
 from tests.fixtures import probe
 from vectorops.runner.api.composition import activity
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 
 
 @activity()
-async def work(value: int, block: bool = False) -> int:
+async def work(ctx: ActivityExecutionContext, value: int, block: bool = False) -> int:
+    probe.current.contexts.append(ctx)
     probe.current.calls.append(value)
     if block:
         probe.current.active += 1

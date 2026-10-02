@@ -31,10 +31,12 @@ class WorkflowExecutor:
         project: RunnerProject,
         history: WorkflowHistory,
         reporter: typing.Optional[CheckpointReporter] = None,
+        execution_id: typing.Optional[str] = None,
     ) -> None:
         self.project = project
         self.history = history
         self.reporter = reporter
+        self.execution_id = execution_id
 
     async def execute(
         self,
@@ -57,6 +59,7 @@ class WorkflowExecutor:
             continue_from_step_id=continue_from_step_id,
             child_heads={} if child_heads is None else child_heads,
             reporter=self.reporter,
+            execution_id=self.execution_id,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)
