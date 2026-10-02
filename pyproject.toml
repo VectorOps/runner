@@ -1,0 +1,52 @@
+[project]
+name = "vectorops-runner"
+version = "0.1.0"
+description = "VectorOps Runner"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "aiohttp>=3.13.4",
+    "connect",
+    "cryptography>=44.0.0",
+    "keyring>=25.0.0",
+    "pydantic>=2.7.0",
+]
+
+[tool.uv.sources]
+connect = { path = "../connect", editable = true }
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.uv]
+package = true
+exclude-newer = "1 week"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vectorops.runner*"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11.0,<2",
+    "pytest>=8.0.0,<9",
+    "pytest-asyncio>=0.23.0,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.13"
+packages = ["vectorops.runner"]
+mypy_path = "src"
+explicit_package_bases = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
