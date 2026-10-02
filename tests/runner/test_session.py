@@ -64,6 +64,9 @@ class GeneratedHistory:
     async def append_step(self, step: models.WorkflowStep) -> None:
         self.appended += 1
 
+    async def update_step(self, step: models.WorkflowStep) -> None:
+        raise AssertionError("completed replay records cannot be updated")
+
     async def replay_path(
         self, workflow_id: str, head_step_id: str
     ) -> AsyncGenerator[models.WorkflowStep, None]:

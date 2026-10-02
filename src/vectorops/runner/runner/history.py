@@ -19,6 +19,13 @@ class WorkflowHistory(Protocol):
         """Append an immutable record before its outcome is delivered to workflow code."""
         ...
 
+    async def update_step(self, step: models.WorkflowStep) -> None:
+        """Replace an unfinished streaming record, preserving its identity and links.
+
+        Keep only the latest snapshot and reject updates to terminal records.
+        """
+        ...
+
     def replay_path(
         self, workflow_id: str, head_step_id: str
     ) -> AsyncGenerator[models.WorkflowStep, None]:

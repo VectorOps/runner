@@ -59,6 +59,9 @@ class ExecutionSession:
         self.replaying = continue_from_step_id is not None
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
+        self.handlers.register(
+            context.StreamingActivityRequest, handlers.StreamingActivityHandler(self)
+        )
         self.handlers.register(context.SpawnRequest, handlers.SpawnHandler(self))
         self.handlers.register(context.JoinRequest, handlers.JoinHandler(self))
 
@@ -175,6 +178,10 @@ class ExecutionSession:
             raise ReplayMismatchError("invalid workflow or predecessor in replay path")
         if operation is not None and step.operation != operation:
             raise ReplayMismatchError("operation differs from recorded history")
+        if step.outcome.kind == "streaming" and step.id != self.replay_head:
+            raise ReplayMismatchError(
+                "unfinished streaming activity must be the replay head"
+            )
         self.head = step.id
         return step
 
@@ -206,3 +213,8 @@ class ExecutionSession:
             )
             self.children[workflow.id] = task
         return task
+
+    async def update(self, step: models.WorkflowStep) -> None:
+        if step.id != self.head or step.workflow_id != self.workflow.id:
+            raise ValueError("only the active streaming step can be updated")
+        await self.history.update_step(step)

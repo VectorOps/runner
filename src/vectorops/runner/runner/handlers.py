@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 import typing
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner.runner import context
+from vectorops.runner.runner import streaming
 from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.history import WorkflowHistory
 
@@ -26,6 +28,8 @@ class HandlerRuntime(typing.Protocol):
     async def append(
         self, operation: models.WorkflowOperation, outcome: models.StepOutcome
     ) -> models.WorkflowStep: ...
+
+    async def update(self, step: models.WorkflowStep) -> None: ...
 
     def start_child(
         self, workflow: models.Workflow
@@ -85,9 +89,68 @@ class ActivityHandler:
             except Exception as exc:
                 outcome = self.runtime.failure(exc)
             step = await self.runtime.append(request.operation, outcome)
-        if step.outcome.kind == "joined":
+        if step.outcome.kind not in ("completed", "failed"):
             raise ReplayMismatchError("activity has an invalid outcome")
         return context.ActivityResponse(step.outcome)
+
+
+class StreamingActivityHandler:
+    def __init__(self, runtime: HandlerRuntime) -> None:
+        self.runtime = runtime
+
+    async def execute(
+        self, request: context.StreamingActivityRequest
+    ) -> context.ActivityResponse:
+        """Replace one activity snapshot per yield and finalize only after exhaustion."""
+        step = await self.runtime.recorded(request.operation)
+        if step is not None and step.outcome.kind in ("completed", "failed"):
+            return context.ActivityResponse(step.outcome)
+        if step is not None and step.outcome.kind != "streaming":
+            raise ReplayMismatchError("streaming activity has an invalid outcome")
+        if step is None:
+            step = await self.runtime.append(request.operation, models.StepStreaming())
+        final_result: pydantic.JsonValue = None
+        final_seen = False
+        stream = request.invoke()
+        async with aclosing(stream):
+            while True:
+                try:
+                    item = await anext(stream)
+                    if not isinstance(
+                        item, (streaming.ActivityDelta, streaming.ActivityFinal)
+                    ):
+                        raise TypeError("streamable activity yielded unsupported item")
+                    if final_seen:
+                        raise ValueError("streamable activity yielded after final()")
+                    if item.kind == "delta":
+                        snapshot = models.StepStreaming(state=item.value)
+                    elif item.kind == "final":
+                        final_result = models.StepCompleted(result=item.value).result
+                        final_seen = True
+                        snapshot = models.StepStreaming(state=final_result)
+                    else:
+                        raise TypeError("streamable activity yielded unsupported item")
+                except StopAsyncIteration:
+                    if final_seen:
+                        break
+                    outcome = self.runtime.failure(
+                        ValueError("streamable activity completed without final()")
+                    )
+                    await self.runtime.update(
+                        step.model_copy(update={"outcome": outcome})
+                    )
+                    return context.ActivityResponse(outcome)
+                except Exception as exc:
+                    outcome = self.runtime.failure(exc)
+                    await self.runtime.update(
+                        step.model_copy(update={"outcome": outcome})
+                    )
+                    return context.ActivityResponse(outcome)
+                step = step.model_copy(update={"outcome": snapshot})
+                await self.runtime.update(step)
+        completed = models.StepCompleted(result=final_result)
+        await self.runtime.update(step.model_copy(update={"outcome": completed}))
+        return context.ActivityResponse(completed)
 
 
 class SpawnHandler:
@@ -181,7 +244,7 @@ class JoinHandler:
                 )
             except pydantic.ValidationError as exc:
                 raise ReplayMismatchError("expected a workflow completion") from exc
-            if completion.outcome.kind == "joined":
+            if completion.outcome.kind not in ("completed", "failed"):
                 raise ReplayMismatchError("join references an invalid child completion")
             outcomes.append(completion.outcome)
         if operation.failure_policy == "propagate":

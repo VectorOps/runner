@@ -120,6 +120,13 @@ class StepFailed(_JsonModel):
     error: StepError
 
 
+class StepStreaming(_JsonModel):
+    """Latest replacement state of an unfinished streaming activity."""
+
+    kind: typing.Literal["streaming"] = "streaming"
+    state: pydantic.JsonValue = None
+
+
 class ChildWorkflowCompletion(_JsonModel):
     """Bind a spawned child to the exact terminal step observed by a join."""
 
@@ -146,13 +153,13 @@ class StepJoined(_JsonModel):
 
 
 StepOutcome: typing.TypeAlias = typing.Annotated[
-    typing.Union[StepCompleted, StepFailed, StepJoined],
+    typing.Union[StepCompleted, StepFailed, StepJoined, StepStreaming],
     pydantic.Field(discriminator="kind"),
 ]
 
 
 class WorkflowStep(_JsonModel):
-    """A finished operation linked to its predecessor without embedding history."""
+    """An operation linked to its predecessor without embedding history."""
 
     id: str = pydantic.Field(min_length=1)
     workflow_id: str = pydantic.Field(min_length=1)
@@ -165,6 +172,10 @@ class WorkflowStep(_JsonModel):
         """Validate local links and outcome shape without loading referenced histories."""
         if self.previous_step_id == self.id:
             raise ValueError("a step cannot be its own predecessor")
+        if self.outcome.kind == "streaming" and not isinstance(
+            self.operation, StepOperation
+        ):
+            raise ValueError("streaming state requires an activity operation")
         if isinstance(self.operation, WorkflowSpawnOperation):
             if self.operation.child_workflow_id == self.workflow_id:
                 raise ValueError("a child invocation must have a distinct workflow ID")

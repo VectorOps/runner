@@ -16,6 +16,8 @@ class MemoryHistory:
         self.closed_paths = 0
         self.fail_append = False
         self.fail_save = False
+        self.fail_update = False
+        self.updated = 0
         self.replay_override: Optional[list[models.WorkflowStep]] = None
         self.replay_error: Optional[Exception] = None
 
@@ -54,6 +56,23 @@ class MemoryHistory:
             path.append(step)
             current = step.previous_step_id
         return list(reversed(path))
+
+    async def update_step(self, step: models.WorkflowStep) -> None:
+        if self.fail_update:
+            raise OSError("stream state storage failed")
+        existing = self.steps[step.id]
+        if existing.outcome.kind != "streaming":
+            raise ValueError("terminal steps cannot be updated")
+        if (existing.workflow_id, existing.previous_step_id, existing.operation) != (
+            step.workflow_id,
+            step.previous_step_id,
+            step.operation,
+        ):
+            raise ValueError("step identity and links cannot change")
+        self.steps[step.id] = models.WorkflowStep.model_validate_json(
+            step.model_dump_json()
+        )
+        self.updated += 1
 
     async def replay_path(
         self, workflow_id: str, head_step_id: str

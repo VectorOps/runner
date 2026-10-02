@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 import typing
@@ -12,6 +12,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner.streaming import StreamItem
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,13 @@ class ActivityRequest:
     kind: typing.ClassVar[typing.Literal["activity"]] = "activity"
     operation: models.StepOperation
     invoke: Callable[[], Awaitable[pydantic.JsonValue]]
+
+
+@dataclass(frozen=True)
+class StreamingActivityRequest:
+    kind: typing.ClassVar[typing.Literal["streaming"]] = "streaming"
+    operation: models.StepOperation
+    invoke: Callable[[], AsyncGenerator[StreamItem, None]]
 
 
 @dataclass(frozen=True)
@@ -43,7 +51,7 @@ class ChildWorkflowHandle:
 
 
 OperationRequest: typing.TypeAlias = typing.Union[
-    ActivityRequest, SpawnRequest, JoinRequest
+    ActivityRequest, StreamingActivityRequest, SpawnRequest, JoinRequest
 ]
 
 
@@ -110,6 +118,20 @@ class WorkflowExecutionContext:
         if response.kind != "spawn":
             raise RuntimeError("executor returned an invalid spawn response")
         return response.handle
+
+    async def run_streaming_activity(
+        self,
+        operation: models.StepOperation,
+        invoke: Callable[[], AsyncGenerator[StreamItem, None]],
+    ) -> pydantic.JsonValue:
+        response = await self.submitter.submit(
+            StreamingActivityRequest(operation, invoke)
+        )
+        if response.kind != "activity":
+            raise RuntimeError("executor returned an invalid activity response")
+        if response.outcome.kind == "failed":
+            raise ActivityError(response.outcome.error)
+        return response.outcome.result
 
     async def join_workflows(
         self,
