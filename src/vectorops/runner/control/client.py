@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pydantic
 
+from vectorops.runner import diagnostics
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
@@ -141,6 +142,16 @@ class RunnerClient:
 
     async def info(self) -> pydantic.JsonValue:
         return await self.request("runner.info")
+
+    async def logs(self) -> diagnostics.LogListing:
+        return diagnostics.LogListing.model_validate(await self.request("logs.list"))
+
+    async def download_logs(
+        self, query: diagnostics.LogDownload
+    ) -> diagnostics.LogChunk:
+        return diagnostics.LogChunk.model_validate(
+            await self.request("logs.download", query.model_dump(mode="json"))
+        )
 
     async def executions(
         self, params: typing.Optional[p.ExecutionList] = None

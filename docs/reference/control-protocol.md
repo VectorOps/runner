@@ -94,6 +94,8 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `history.query` | History query below | Ordered history items and `next_cursor` |
 | `events.subscribe` | Optional `execution_id`, optional `kinds` list | `subscription_id` |
 | `events.unsubscribe` | `subscription_id` | Null |
+| `logs.list` | None | Retained log filenames/sizes and dropped/write-error counters |
+| `logs.download` | `file`, `offset`, `limit`, optional `end` | Base64 bytes, `next_offset`, `end`, `eof` |
 
 There is no workflow catalog. `file` must identify a `.py` file within the workspace after symlink resolution. The callable must be an async workflow entry point. Import/callable/execution failures are reported through execution lifecycle events after acceptance. Existing runner references remain supported internally; the protocol does not accept Python objects or module imports in place of filenames.
 
@@ -134,4 +136,5 @@ Cursors freeze the insertion boundary of a selection, not mutable record values.
 
 ## Related
 
+- [Structured diagnostic logging](../config/logging.md)
 - [Daemon and SSH usage](../usage/daemon.md)

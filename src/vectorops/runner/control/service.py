@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pydantic
 
+from vectorops.runner import diagnostics
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
@@ -33,18 +34,29 @@ class RunnerService:
         self._lock = asyncio.Lock()
         self._listeners: set[EventSink] = set()
         self._suspending = False
+        self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
 
     async def __aenter__(self) -> typing.Self:
         project = await RunnerProject.open(self.path)
         self.path = project.root
         self._store = RunnerStateStore(project.data_path)
         await self._store.__aenter__()
+        self._logs = diagnostics.DiagnosticLog(
+            project.data_path, project.config.logging
+        )
+        try:
+            await self._logs.__aenter__()
+        except BaseException:
+            await self._store.__aexit__()
+            raise
+        self._logs.emit("runner.started")
         self._requests = RequestStore(project.data_path / "control.sqlite3")
         self._runner = WorkflowRunner(
             project.root,
             event_sink=self._step,
             state_store=self._store,
             mailbox_sink=self._emit,
+            diagnostic_log=self._logs,
         )
         try:
             for candidate in await self.runner.recovery_candidates():
@@ -52,6 +64,7 @@ class RunnerService:
                 self._active = p.Active(execution_id=candidate.id)
                 self._task = asyncio.create_task(self._execute(accepted, None, None))
         except BaseException:
+            await self._logs.aclose()
             await self._store.__aexit__()
             self._runner = None
             raise
@@ -77,10 +90,21 @@ class RunnerService:
                     await self._task
                     raise
         finally:
-            if self._store is not None:
-                await self._store.__aexit__()
-            self._runner = None
-            self._task = None
+            try:
+                if self._logs is not None:
+                    self._logs.emit("runner.stopped")
+                    await self._logs.aclose()
+            finally:
+                if self._store is not None:
+                    await self._store.__aexit__()
+                self._runner = None
+                self._task = None
+
+    @property
+    def logs(self) -> diagnostics.DiagnosticLog:
+        if self._logs is None:
+            raise RuntimeError("service is not open")
+        return self._logs
 
     @property
     def runner(self) -> WorkflowRunner:
@@ -95,6 +119,20 @@ class RunnerService:
         self._listeners.discard(listener)
 
     def _emit(self, event: dict[str, pydantic.JsonValue]) -> None:
+        kind = event.get("kind")
+        execution_id = event.get("execution_id")
+        if isinstance(kind, str) and kind.startswith(("execution.", "mailbox.")):
+            with diagnostics.bind(
+                execution_id=execution_id if isinstance(execution_id, str) else None
+            ):
+                self.logs.emit(
+                    kind,
+                    level=(
+                        diagnostics.Level.ERROR
+                        if kind == "execution.failed"
+                        else diagnostics.Level.INFO
+                    ),
+                )
         for listener in tuple(self._listeners):
             listener(event)
 
@@ -141,6 +179,10 @@ class RunnerService:
             status = "suspended" if self._suspending else "cancelled"
         except Exception as exc:
             status, error = "failed", str(exc)
+            with diagnostics.bind(execution_id=accepted.execution_id):
+                self.logs.emit(
+                    "execution.error", level=diagnostics.Level.ERROR, error=exc
+                )
         finally:
             self._active = None
             self._emit(
@@ -187,6 +229,13 @@ class RunnerService:
     async def dispatch(
         self, method: str, params: dict[str, pydantic.JsonValue]
     ) -> pydantic.JsonValue:
+        if method == "logs.list":
+            p.Empty.model_validate(params)
+            return p.json_value(await self.logs.listing())
+        if method == "logs.download":
+            return p.json_value(
+                await self.logs.download(diagnostics.LogDownload.model_validate(params))
+            )
         if method == "runner.info":
             p.Empty.model_validate(params)
             return {

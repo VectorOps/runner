@@ -17,6 +17,7 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner import diagnostics
 from vectorops.runner.api import composition
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
@@ -122,7 +123,31 @@ class WorkflowExecutor:
             finally:
                 composition._CURRENT_CONTEXT.reset(token)
 
-        return await session.run(invoke)
+        with diagnostics.bind(
+            execution_id=self.execution_id, workflow_id=configuration.id
+        ):
+            diagnostics.log(
+                "workflow.started", fields={"replay": continue_from_step_id is not None}
+            )
+            try:
+                completion = await session.run(invoke)
+            except asyncio.CancelledError:
+                diagnostics.log("workflow.cancelled")
+                raise
+            except Exception as exc:
+                diagnostics.log(
+                    "workflow.failed", level=diagnostics.Level.ERROR, error=exc
+                )
+                raise
+            diagnostics.log(
+                "workflow." + completion.outcome.kind,
+                level=(
+                    diagnostics.Level.ERROR
+                    if completion.outcome.kind == "failed"
+                    else diagnostics.Level.INFO
+                ),
+            )
+            return completion
 
     async def load(self, workflow_name: str, callable_name: str) -> WorkflowCallable:
         """Import trusted workflow code without blocking the event loop."""

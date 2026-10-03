@@ -10,6 +10,8 @@ import typing
 
 import pydantic
 
+from vectorops.runner import diagnostics
+
 
 class RetentionPolicy(pydantic.BaseModel):
     """Optional completed-history limits; protected executions always survive."""
@@ -29,6 +31,9 @@ class RunnerConfig(pydantic.BaseModel):
     workflows_directory: str = "workflows"
     data_directory: str = "data"
     retention: RetentionPolicy = pydantic.Field(default_factory=RetentionPolicy)
+    logging: diagnostics.LogConfig = pydantic.Field(
+        default_factory=diagnostics.LogConfig
+    )
 
     @pydantic.field_validator("workflows_directory", "data_directory", mode="after")
     @classmethod

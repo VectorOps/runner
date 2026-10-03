@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import typing
 
+from vectorops.runner import diagnostics
 from vectorops.runner.runner.execution_state import ExecutionRecord
 from vectorops.runner.runner.project import RetentionPolicy
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
@@ -62,6 +63,9 @@ class ExecutionRetention:
         try:
             directories = await asyncio.to_thread(self._directories)
         except OSError as exc:
+            diagnostics.log(
+                "retention.scan_failed", level=diagnostics.Level.WARNING, error=exc
+            )
             _LOGGER.warning("Could not scan execution histories: %s", exc)
             return []
         for directory in directories:
@@ -76,6 +80,11 @@ class ExecutionRetention:
                     raise ValueError("completion timestamp must be timezone-aware")
                 histories.append(_CompletedHistory(directory, execution, completed_at))
             except (KeyError, ValueError, sqlite3.Error, OSError) as exc:
+                diagnostics.log(
+                    "retention.history_unreadable",
+                    level=diagnostics.Level.WARNING,
+                    error=exc,
+                )
                 _LOGGER.warning(
                     "Preserving unreadable execution history %s: %s", directory, exc
                 )
@@ -114,6 +123,12 @@ class ExecutionRetention:
                 await asyncio.to_thread(shutil.rmtree, item.directory)
                 deleted.append(item.execution.id)
             except OSError as exc:
+                with diagnostics.bind(execution_id=item.execution.id):
+                    diagnostics.log(
+                        "retention.remove_failed",
+                        level=diagnostics.Level.WARNING,
+                        error=exc,
+                    )
                 _LOGGER.warning(
                     "Could not remove execution history %s: %s", item.directory, exc
                 )

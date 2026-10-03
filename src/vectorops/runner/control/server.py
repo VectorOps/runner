@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pydantic
 
+from vectorops.runner import diagnostics
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.service import RunnerService
 
@@ -83,7 +84,10 @@ class Session:
                     message="requested record or file does not exist",
                 )
             )
-        except Exception:
+        except Exception as exc:
+            self.service.logs.emit(
+                "control.request_failed", level=diagnostics.Level.ERROR, error=exc
+            )
             logging.getLogger(__name__).exception("Control request failed")
             await self.connection.send(
                 p.Error(

@@ -15,6 +15,7 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner import diagnostics
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
 from vectorops.runner.runner.mailbox import Mailbox
@@ -219,7 +220,8 @@ class ExecutionSession:
             "waiting",
         ):
             await self.live.wait()
-        return await deferred.invoke()
+        with diagnostics.bind(step_id=deferred.step.id):
+            return await deferred.invoke()
 
     def _resolved(
         self,
@@ -318,6 +320,7 @@ class ExecutionSession:
 
     @staticmethod
     def failure(exc: Exception) -> models.StepFailed:
+        diagnostics.log("operation.failed", level=diagnostics.Level.ERROR, error=exc)
         error = (
             exc.error
             if isinstance(exc, ActivityError)
@@ -419,8 +422,6 @@ class ExecutionSession:
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:
-        if self.event_sink is None:
-            return
         kind: typing.Literal[
             "step.created", "step.updated", "step.completed", "step.failed"
         ]
@@ -430,6 +431,26 @@ class ExecutionSession:
             kind = "step.failed"
         else:
             kind = "step.created" if created else "step.updated"
+        with diagnostics.bind(
+            execution_id=self.execution_id,
+            workflow_id=step.workflow_id,
+            step_id=step.id,
+        ):
+            diagnostics.log(
+                kind,
+                level=(
+                    diagnostics.Level.ERROR
+                    if kind == "step.failed"
+                    else diagnostics.Level.DEBUG
+                ),
+                fields={
+                    "operation": step.operation.kind,
+                    "outcome": step.outcome.kind,
+                    "revision": step.revision,
+                },
+            )
+        if self.event_sink is None:
+            return
         try:
             self.event_sink(
                 StepEvent(
@@ -438,5 +459,8 @@ class ExecutionSession:
                     step=step.model_copy(deep=True),
                 )
             )
-        except Exception:
+        except Exception as exc:
+            diagnostics.log(
+                "step.sink_failed", level=diagnostics.Level.ERROR, error=exc
+            )
             logging.getLogger(__name__).exception("Step event sink failed")

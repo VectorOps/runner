@@ -13,6 +13,7 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner import diagnostics
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
@@ -39,11 +40,13 @@ class WorkflowRunner:
         event_sink: typing.Optional[StepEventSink] = None,
         state_store: typing.Optional[RunnerStateStore] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
+        diagnostic_log: typing.Optional[diagnostics.DiagnosticLog] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
         self.event_sink = event_sink
         self._state_store = state_store
+        self._diagnostic_log = diagnostic_log
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
         self.last_execution_id: typing.Optional[str] = None
@@ -89,10 +92,18 @@ class WorkflowRunner:
     @asynccontextmanager
     async def _writer(self, project: RunnerProject) -> AsyncIterator[RunnerStateStore]:
         if self._state_store is not None:
-            yield self._state_store
+            if self._diagnostic_log is None:
+                yield self._state_store
+            else:
+                with self._diagnostic_log.activate():
+                    yield self._state_store
         else:
             async with RunnerStateStore(project.data_path) as store:
-                yield store
+                async with diagnostics.DiagnosticLog(
+                    project.data_path, project.config.logging
+                ) as logs:
+                    with logs.activate():
+                        yield store
 
     def suspend_inputs(self) -> bool:
         """Preserve durable waits when shutting down, unlike an explicit stop."""
