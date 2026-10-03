@@ -19,6 +19,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.api import composition
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
@@ -43,6 +44,7 @@ class WorkflowExecutor:
         execution_id: typing.Optional[str] = None,
         event_sink: typing.Optional[StepEventSink] = None,
         mailbox: typing.Optional[Mailbox] = None,
+        authentication: typing.Optional[AuthenticationService] = None,
     ) -> None:
         self.project = project
         self.history = history
@@ -50,6 +52,7 @@ class WorkflowExecutor:
         self.execution_id = execution_id
         self.event_sink = event_sink
         self.mailbox = mailbox
+        self.authentication = authentication
         self._definitions: dict[str, WorkflowEntryPoint] = {}
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
@@ -112,6 +115,7 @@ class WorkflowExecutor:
             event_sink=self.event_sink,
             configure_workflow=self.configure,
             mailbox=self.mailbox,
+            authentication=self.authentication,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)

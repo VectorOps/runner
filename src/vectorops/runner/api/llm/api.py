@@ -128,12 +128,15 @@ class LLM:
 
     def _input(self, request: connect.GenerateRequest) -> dict[str, pydantic.JsonValue]:
         assert self._settings is not None
+        settings = self._settings.model_dump(mode="json")
+        if self._settings.credential_profile is None:
+            settings.pop("credential_profile", None)
         return {
             "instance": self._identity,
             "request_digest": _digest(
                 {
                     "request": request.model_dump(mode="json"),
-                    "settings": self._settings.model_dump(mode="json"),
+                    "settings": settings,
                 }
             ),
         }

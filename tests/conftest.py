@@ -8,6 +8,11 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
 
 
+@pytest.fixture(autouse=True)
+def global_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOPS_RUNNER_CONFIG_DIR", str(tmp_path / "runner-global"))
+
+
 @pytest.fixture
 def history() -> MemoryHistory:
     return MemoryHistory()

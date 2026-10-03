@@ -16,6 +16,9 @@ class GenerationOptions(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     provider: Optional[str] = None
+    credential_profile: Optional[str] = pydantic.Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$"
+    )
     temperature: Optional[float] = pydantic.Field(default=None, ge=0, le=2)
     max_output_tokens: Optional[int] = pydantic.Field(default=None, gt=0)
     reasoning: Optional[connect.ReasoningConfig] = None
@@ -50,6 +53,7 @@ class SettingsOverrides(GenerationOptions):
 class SettingsParameters(typing.TypedDict, total=False):
     model: str
     provider: Optional[str]
+    credential_profile: Optional[str]
     temperature: Optional[float]
     max_output_tokens: Optional[int]
     reasoning: Optional[connect.ReasoningConfig]

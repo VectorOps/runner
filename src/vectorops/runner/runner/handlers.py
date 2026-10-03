@@ -13,6 +13,8 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner import global_config
+from vectorops.runner.authentication.models import CredentialStorageError
 from vectorops.runner.runner import context
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
@@ -124,6 +126,8 @@ class ActivityHandler:
                 outcome: models.StepOutcome = models.StepCompleted(
                     result=await request.invoke(self.runtime.activity_context(step))
                 )
+            except (CredentialStorageError, global_config.ConfigurationError):
+                raise
             except Exception as exc:
                 outcome = self.runtime.failure(exc)
             step = step.model_copy(update={"outcome": outcome})
@@ -186,6 +190,8 @@ class StreamingActivityHandler:
                         step.model_copy(update={"outcome": outcome})
                     )
                     return context.ActivityResponse(outcome)
+                except (CredentialStorageError, global_config.ConfigurationError):
+                    raise
                 except Exception as exc:
                     outcome = self.runtime.failure(exc)
                     await self.runtime.update(

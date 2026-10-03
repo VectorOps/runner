@@ -10,6 +10,9 @@ import typing
 import pydantic
 
 from vectorops.runner.runner.workflow import WorkflowRunner
+from vectorops.runner import global_config
+from vectorops.runner.authentication import models as am
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.control import daemon, provisioning
 
 
@@ -27,6 +30,7 @@ class Arguments(argparse.Namespace):
     host: str
     token_stdin: bool
     token_file: typing.Optional[Path]
+    config_dir: typing.Optional[Path]
 
 
 def _input(value: str) -> dict[str, pydantic.JsonValue]:
@@ -43,12 +47,19 @@ def _input(value: str) -> dict[str, pydantic.JsonValue]:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="vops-runner", description=__doc__)
     result.add_argument(
+        "--config-dir", type=Path, help="runner-global configuration directory"
+    )
+    result.add_argument(
         "--project",
         type=Path,
         default=Path.cwd(),
         help="workspace directory (default: current directory)",
     )
     commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser(
+        "credentials-import",
+        help="import one credential JSON object from stdin without echoing secrets",
+    )
     start = commands.add_parser("start", help="start a new workflow in the foreground")
     start.add_argument(
         "workflow", help="workflow file name relative to workflows/, without .py"
@@ -100,7 +111,7 @@ def parser() -> argparse.ArgumentParser:
         "connect", help="attach and print live events as JSONL"
     )
     for command in (serve, status, stop, connect):
-        tokens = command.add_mutually_exclusive_group(required=True)
+        tokens = command.add_mutually_exclusive_group()
         tokens.add_argument(
             "--token-stdin",
             action="store_true",
@@ -126,22 +137,39 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def dispatch(args: Arguments) -> None:
+    configuration = global_config.GlobalConfiguration(args.config_dir)
+    if args.command == "credentials-import":
+        data = await asyncio.to_thread(sys.stdin.buffer.read, 262145)
+        try:
+            if len(data) > 262144:
+                raise ValueError()
+            credential = am.Credential.model_validate_json(data)
+        except ValueError:
+            raise ValueError("invalid credential input") from None
+        await AuthenticationService(configuration).provision(credential)
+        print(json.dumps({"status": "stored"}))
+        return
     if args.command == "daemon":
         if not (0 if args.daemon_command == "serve" else 1) <= args.port <= 65535:
             raise ValueError("invalid loopback port")
-        token = await provisioning.read_token(
-            token_stdin=args.token_stdin, token_file=args.token_file
-        )
+        token = None
+        if args.token_stdin or args.token_file is not None:
+            token = await provisioning.read_token(
+                token_stdin=args.token_stdin, token_file=args.token_file
+            )
         await daemon.dispatch(
             args.project,
             args.daemon_command,
             token=token,
+            config_dir=args.config_dir,
             port=args.port,
             host=args.host,
             mode=args.mode,
         )
         return
-    runner = WorkflowRunner(args.project)
+    runner = WorkflowRunner(
+        args.project, authentication=AuthenticationService(configuration)
+    )
     if args.command == "start":
         result = await runner.run(
             args.workflow,

@@ -16,6 +16,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner import diagnostics
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
 from vectorops.runner.runner.mailbox import Mailbox
@@ -69,6 +70,7 @@ class ExecutionSession:
             Callable[[models.Workflow], Awaitable[models.Workflow]]
         ] = None,
         mailbox: typing.Optional[Mailbox] = None,
+        authentication: typing.Optional[AuthenticationService] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -92,6 +94,7 @@ class ExecutionSession:
         self.event_sink = event_sink
         self.configure_workflow = configure_workflow
         self.mailbox = mailbox
+        self.authentication = authentication
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -418,7 +421,11 @@ class ExecutionSession:
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
         return ActivityExecutionContext(
-            self.execution_id, self.workflow.id, step.id, self.mailbox
+            self.execution_id,
+            self.workflow.id,
+            step.id,
+            self.mailbox,
+            self.authentication,
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

@@ -1,4 +1,4 @@
-"""Disposable foreground daemons with harness-provided endpoints and tokens."""
+"""Foreground daemons with persistent runner-owned control authentication."""
 
 import asyncio
 import json
@@ -8,6 +8,7 @@ import typing
 
 import pydantic
 
+from vectorops.runner import global_config
 from vectorops.runner.control import auth, client, protocol as p
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
@@ -21,9 +22,19 @@ class Endpoint(p.Model):
     pid: int
 
 
-async def serve(workspace: Path, token: str, port: int = 0) -> None:
+async def serve(
+    workspace: Path,
+    token: typing.Optional[str] = None,
+    port: int = 0,
+    *,
+    config_dir: typing.Optional[Path] = None,
+) -> None:
+    if token is None:
+        token = (
+            await global_config.GlobalConfiguration(config_dir).load()
+        ).control_token
     token = auth.validate_token(token)
-    service = RunnerService(workspace)
+    service = RunnerService(workspace, config_dir=config_dir)
     async with service:
         server = RunnerServer(service, token)
         try:
@@ -47,15 +58,18 @@ async def dispatch(
     workspace: Path,
     command: str,
     *,
-    token: str,
+    token: typing.Optional[str] = None,
+    config_dir: typing.Optional[Path] = None,
     port: int = 0,
     host: str = "127.0.0.1",
     mode: typing.Literal["cancel", "drain"] = "cancel",
 ) -> None:
     if command == "serve":
-        await serve(workspace, token, port)
+        await serve(workspace, token, port, config_dir=config_dir)
         return
-    async with await client.RunnerClient.tcp(port, token, host=host) as connection:
+    async with await client.RunnerClient.tcp(
+        port, token, host=host, config_dir=config_dir
+    ) as connection:
         if command == "status":
             print(
                 json.dumps(

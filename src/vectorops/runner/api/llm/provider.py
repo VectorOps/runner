@@ -1,6 +1,7 @@
 """Provider I/O and complete streaming snapshots, independent of workflow state."""
 
 from collections.abc import AsyncGenerator, Callable
+from contextlib import aclosing
 from typing import Optional, Protocol
 
 import connect
@@ -8,6 +9,8 @@ import pydantic
 
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm.models import LLMResponseError, Settings
+from vectorops.runner.authentication import models as auth_models
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
 
@@ -47,10 +50,31 @@ class ConnectProvider:
         settings: Settings,
         request: connect.GenerateRequest,
     ) -> AsyncGenerator[StreamItem, None]:
+        try:
+            async with aclosing(self._stream(context, settings, request)) as stream:
+                async for item in stream:
+                    yield item
+        except connect.AuthenticationError:
+            raise auth_models.AuthenticationError(
+                "provider rejected authentication"
+            ) from None
+
+    async def _stream(
+        self,
+        context: ActivityExecutionContext,
+        settings: Settings,
+        request: connect.GenerateRequest,
+    ) -> AsyncGenerator[StreamItem, None]:
         """Accumulate provider deltas; only response_end produces a final value."""
         auth = self._auth
         if auth is None:
-            auth = connect.resolve_env_auth(settings.provider, model=settings.model)
+            authentication = context.authentication or AuthenticationService()
+            auth = await authentication.transport(
+                settings.provider,
+                settings.model,
+                settings.credential_profile or "default",
+                context.execution_id,
+            )
         options = connect.RequestOptions(
             timeout=settings.timeout,
             stream_read_timeout=settings.stream_read_timeout,
@@ -65,6 +89,10 @@ class ConnectProvider:
             )
             async for event in stream:
                 if event.type == "error":
+                    if event.error.status_code in (401, 403):
+                        raise auth_models.AuthenticationError(
+                            "provider rejected authentication"
+                        )
                     raise connect.exception_from_error_info(event.error)
                 if event.type == "response_end":
                     validate_response(event.response)

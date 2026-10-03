@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from vectorops.runner import cli
+from vectorops.runner import global_config
 from vectorops.runner.control import client, daemon, protocol as p
 from vectorops.runner.control.provisioning import read_token
 
@@ -137,15 +138,22 @@ async def test_token_file_read_once(tmp_path: Path, ending: str) -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["daemon", "serve"],
         ["daemon", "serve", "--token-stdin", "--token-file", "token"],
         ["daemon", "status", "--token-stdin"],
-        ["daemon", "stop", "--port", "1234"],
     ],
 )
-def test_cli_requires_explicit_provisioning(args: list[str]) -> None:
+def test_cli_rejects_conflicting_tokens_and_missing_port(args: list[str]) -> None:
     with pytest.raises(SystemExit):
         cli.parser().parse_args(args)
+
+
+@pytest.mark.parametrize(
+    "args", [["daemon", "serve"], ["daemon", "stop", "--port", "1234"]]
+)
+def test_cli_allows_persistent_control_token(args: list[str]) -> None:
+    parsed = cli.parser().parse_args(args)
+    assert parsed.token_file is None
+    assert not parsed.token_stdin
 
 
 async def test_invalid_stdin_fails_without_echo(tmp_path: Path) -> None:
@@ -176,3 +184,44 @@ def test_token_repr_is_redacted() -> None:
     packet = p.Authenticate(token=token)
     assert token not in repr(packet)
     assert json.loads(packet.model_dump_json())["token"] == token
+
+
+async def test_daemon_restart_uses_persistent_token_without_provisioning(
+    tmp_path: Path,
+) -> None:
+    configuration = global_config.GlobalConfiguration()
+    previous = None
+    for crash in (True, False):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "vectorops.runner",
+            "--project",
+            str(tmp_path),
+            "daemon",
+            "serve",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            assert process.stdout is not None
+            async with asyncio.timeout(10):
+                endpoint = daemon.Endpoint.model_validate_json(
+                    await process.stdout.readline()
+                )
+            current = await configuration.load()
+            if previous is not None:
+                assert current == previous
+            previous = current
+            async with await client.RunnerClient.tcp(endpoint.port) as connection:
+                assert await connection.current() is None
+                if not crash:
+                    await connection.shutdown()
+            if crash:
+                process.kill()
+            async with asyncio.timeout(10):
+                await process.wait()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()

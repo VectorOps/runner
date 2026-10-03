@@ -37,7 +37,7 @@ async def run():
 
 Every frame is a four-byte unsigned big-endian length followed by UTF-8 JSON. The maximum payload is 8 MiB. Memory and TCP transports use the same framing and validation. TCP binds only to `127.0.0.1`; use SSH forwarding for remote access.
 
-Protocol version 2 uses a harness-provided bearer token. Authentication completes within 10 seconds before any operational packet is accepted. The client sends:
+Protocol version 2 uses a bearer token loaded from runner-global configuration by default, with optional explicit provisioning. Authentication completes within 10 seconds before any operational packet is accepted. The client sends:
 
 ```json
 {"kind":"authenticate","version":2,"token":"<harness-generated-token>"}
@@ -49,13 +49,13 @@ The server compares the token in constant time and acknowledges:
 {"kind":"authenticated","version":2,"instance_id":"runner-instance-id","session_id":"session-id"}
 ```
 
-Generate a fresh token for each daemon using `secrets.token_urlsafe(32)` or equivalent. Tokens contain 43-4096 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `-`); generation must use at least 32 cryptographically random bytes. Length validation does not establish randomness. All authenticated sessions have full controller access. Failed authentication closes the connection without echoing the token. Authentication packets must never be logged.
+The default token is generated once using 32 random bytes and reused across restarts. Explicit tokens contain 43-4096 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `-`) and must use at least 32 cryptographically random bytes. Length validation does not establish randomness. All authenticated sessions have full controller access. Failed authentication closes the connection without echoing the token. Authentication packets must never be logged.
 
 The token is transmitted to the endpoint. Bearer authentication does not independently authenticate the runner, prevent replay of a stolen token, encrypt traffic, or sandbox workflow code. Trust the harness-provided local endpoint or a host-key-verified SSH tunnel. Loopback TCP assumes a trusted local machine; privileged local processes and compromised same-user processes are outside this security boundary. Direct remote connections would require TLS and are not supported.
 
 ### Migration from the initial handshake
 
-Version 2 replaces version 1's HMAC hello/challenge exchange. Old handshake packets are rejected; update clients and daemons together. Pass a text token to `RunnerClient.tcp(port, token)` or `RunnerClient.connect(stream, token)` instead of secret bytes. The runner does not create or read workspace-keyed credentials or discovery records. Existing `~/.vectorops-runner/` files are ignored and are not automatically deleted. The harness owns token provisioning and supplies the endpoint from the daemon's readiness output. Operational request/event shapes are unchanged.
+Version 2 replaces version 1's HMAC hello/challenge exchange. Old handshake packets are rejected; update clients and daemons together. Pass a text token to `RunnerClient.tcp(port, token)` or `RunnerClient.connect(stream, token)` instead of secret bytes, or omit the TCP token for local global-config lookup. Existing `~/.vectorops-runner/` files are ignored. New global secrets live in `~/.config/vops-runner`; endpoint discovery still uses daemon readiness output. Operational request/event shapes are unchanged.
 
 ## Packet families
 
@@ -136,5 +136,6 @@ Cursors freeze the insertion boundary of a selection, not mutable record values.
 
 ## Related
 
+- [Provider authentication RPCs and global configuration](../config/authentication.md)
 - [Structured diagnostic logging](../config/logging.md)
 - [Daemon and SSH usage](../usage/daemon.md)

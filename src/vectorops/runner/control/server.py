@@ -23,6 +23,7 @@ class Session:
         self.outgoing: asyncio.Queue[p.Event] = asyncio.Queue(maxsize=256)
         self.overflow = asyncio.Event()
         self.requests: dict[str, asyncio.Task[None]] = {}
+        self.session_id = uuid4().hex
 
     def event(self, event: dict[str, pydantic.JsonValue]) -> None:
         for identifier, subscription in tuple(self.subscriptions.items()):
@@ -66,7 +67,9 @@ class Session:
                 self.subscriptions.pop(selected.subscription_id, None)
                 result = None
             else:
-                result = await self.service.dispatch(request.method, request.params)
+                result = await self.service.dispatch(
+                    request.method, request.params, session_id=self.session_id
+                )
             await self.connection.send(p.Response(id=request.id, result=result))
         except p.RemoteError as exc:
             await self.connection.send(
@@ -146,6 +149,7 @@ class Session:
             pass
         finally:
             self.service.unlisten(self.event)
+            self.service.authentication.disconnect(self.session_id)
             for task in tasks:
                 task.cancel()
             await self.connection.aclose()

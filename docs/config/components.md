@@ -127,6 +127,7 @@ not work inside an activity; resolve before entering its recorded callback.
 | --- | --- | --- |
 | `model` | Required after merging | Nonblank model name |
 | `provider` | None | Optional provider name |
+| `credential_profile` | None (`default` profile) | Non-secret runner credential profile reference |
 | `temperature` | None | Number from 0 through 2 |
 | `max_output_tokens` | None | Positive integer |
 | `timeout` | None | Positive timeout in seconds |
@@ -201,5 +202,6 @@ directory, logging, and retention settings still use their existing startup rule
 
 ## Related
 
+- [Provider authentication and global secrets](authentication.md)
 - [Workflow authoring](../development/workflows.md)
 - [Structured logging](logging.md)

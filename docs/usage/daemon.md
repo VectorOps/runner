@@ -1,17 +1,17 @@
 # Run and connect to a daemon
 
-Run a disposable workspace daemon provisioned by a harness. The host needs only its loopback endpoint and bearer token, directly or through an SSH tunnel.
+Run a workspace daemon with persistent runner-owned authentication. The host needs its loopback endpoint and bearer token, directly or through an SSH tunnel.
 
 ## Start and inspect
 
 ```bash
-uv run vops-runner --project /path/to/workspace daemon serve --port 43821 --token-file /protected/runner.token
-uv run vops-runner daemon status --port 43821 --token-file /protected/runner.token
-uv run vops-runner daemon connect --port 43821 --token-file /protected/runner.token
-uv run vops-runner daemon stop --port 43821 --token-file /protected/runner.token --mode cancel
+uv run vops-runner --project /path/to/workspace daemon serve --port 43821
+uv run vops-runner daemon status --port 43821
+uv run vops-runner daemon connect --port 43821
+uv run vops-runner daemon stop --port 43821 --mode cancel
 ```
 
-The harness creates the token file first with user-only access (0600 on Unix, a user-only ACL on Windows). Each command requires exactly one of `--token-file PATH` or `--token-stdin`; there is no token argument, environment-variable fallback, or generated persistent credential. The runner does not change or delete the harness's file.
+The runner creates and reuses a persistent control token in its [global configuration](../config/authentication.md). Local clients load it automatically. `--config-dir PATH` or `VOPS_RUNNER_CONFIG_DIR` selects another configuration directory. Optional `--token-file PATH` or `--token-stdin` overrides the token for that process; the options are mutually exclusive. The runner does not change or delete an externally supplied token file.
 
 `serve` reads the token once before opening the listener, then prints one JSON readiness record containing `host`, `port`, `instance_id`, `workspace`, and `pid`, never the token. `--port` selects a fixed port; the default is OS-assigned. Only one daemon or local execution writer can own the workspace at a time. The workspace is required only by the runner, not its clients.
 
@@ -23,7 +23,7 @@ The harness creates the token file first with user-only access (0600 on Unix, a 
 
 ## Provision from a Python harness
 
-Generate a fresh token from 32 random bytes for each daemon and pass it over the child's stdin pipe. Do not put it in environment variables, arguments, or logs.
+For an isolated per-process override, generate a token from 32 random bytes and pass it over the child's stdin pipe. Normal startup needs no override. Do not put tokens in environment variables, arguments, or logs.
 
 ```python
 import asyncio
@@ -64,20 +64,20 @@ asyncio.run(main())
 
 `--token-stdin` reads one bounded line from a pipe or redirected file, not a terminal. Send a newline or close stdin to finish provisioning. Closing stdin afterward does not stop the daemon. `--token-file` reads a bounded ASCII file containing just the token, with an optional final LF or CRLF. Both reject empty, malformed, and oversized tokens without printing their contents. Token files can be removed after readiness; the daemon retains the token in memory until disposal.
 
-Tokens contain 43-4096 URL-safe characters. A token grants full controller access, with no expiry or rotation while a daemon is running. Restart with a newly generated token to rotate it; never reuse a disposed daemon's token for a replacement. The harness is responsible for protecting and cleaning up any token file. No credential or endpoint files are written by the daemon.
+Tokens contain 43-4096 URL-safe characters. A token grants full controller access, with no expiry or rotation while a daemon is running. The default token survives restart. To rotate it, change only `control_token` in global configuration while daemons are stopped, then update remote clients. External token-file protection and cleanup remain the harness's responsibility. No endpoint discovery file is written.
 
-For an already running daemon, use `RunnerClient.tcp(port, token)` directly. In-process `embedded(workspace)` generates a private temporary token internally and uses the same authentication protocol.
+For an already running daemon, use `RunnerClient.tcp(port)` locally or `RunnerClient.tcp(port, token)` with an explicit token. In-process `embedded(workspace)` loads the same persistent configuration and uses the same authentication protocol.
 
 ## Connect through SSH
 
-Provision the remote daemon through the harness's authenticated SSH connection using stdin or a protected token file. Capture its readiness record to learn the remote port, then forward a local loopback port:
+Start the remote daemon through an authenticated SSH connection and obtain its control token securely, or provision a per-process override. Capture its readiness record to learn the remote port, then forward a local loopback port:
 
 ```bash
 ssh -N -T -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:49152:127.0.0.1:43821 user@server
 ```
 
-Replace `43821` with the remote readiness port. Keep normal SSH host-key verification enabled. The host uses `RunnerClient.tcp(49152, token)` with the same harness-generated token.
+Replace `43821` with the remote readiness port. Keep normal SSH host-key verification enabled. The host uses `RunnerClient.tcp(49152, token)` with the remote daemon's token, not its own machine's default token.
 
 Bearer authentication sends the token to the endpoint; it does not independently verify runner identity or encrypt local TCP. Trust the provisioned endpoint and use SSH for remote encryption and server authentication. Automated SSH provisioning is not implemented; forwarding needs no runner-specific relay.
 
@@ -85,5 +85,6 @@ Tunnel failure disconnects the client but leaves execution running. Reconnect, s
 
 ## Related
 
+- [Provider authentication and global secrets](../config/authentication.md)
 - [Control protocol and Python client](../reference/control-protocol.md)
 - [Existing local CLI](cli.md)

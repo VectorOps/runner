@@ -10,6 +10,9 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import diagnostics
+from vectorops.runner import global_config
+from vectorops.runner.authentication import models as am
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
@@ -21,8 +24,12 @@ EventSink: typing.TypeAlias = Callable[[dict[str, pydantic.JsonValue]], None]
 
 
 class RunnerService:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, config_dir: typing.Optional[Path] = None) -> None:
         self.path = path
+        self.configuration = global_config.GlobalConfiguration(config_dir)
+        self.authentication = AuthenticationService(
+            self.configuration, event_sink=self._emit
+        )
         self.instance_id = uuid4().hex
         self.shutdown_requested = asyncio.Event()
         self.shutdown_mode: typing.Literal["cancel", "drain"] = "cancel"
@@ -37,6 +44,7 @@ class RunnerService:
         self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
 
     async def __aenter__(self) -> typing.Self:
+        await self.configuration.load()
         project = await RunnerProject.open(self.path)
         self.path = project.root
         self._store = RunnerStateStore(project.data_path)
@@ -57,6 +65,7 @@ class RunnerService:
             state_store=self._store,
             mailbox_sink=self._emit,
             diagnostic_log=self._logs,
+            authentication=self.authentication,
         )
         try:
             for candidate in await self.runner.recovery_candidates():
@@ -227,8 +236,56 @@ class RunnerService:
             return accepted
 
     async def dispatch(
-        self, method: str, params: dict[str, pydantic.JsonValue]
+        self,
+        method: str,
+        params: dict[str, pydantic.JsonValue],
+        *,
+        session_id: str = "embedded",
     ) -> pydantic.JsonValue:
+        if method.startswith("auth."):
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            try:
+                if method == "auth.list":
+                    p.Empty.model_validate(params)
+                    return {
+                        "requests": [
+                            item.model_dump(mode="json")
+                            for item in self.authentication.pending()
+                        ]
+                    }
+                if method == "auth.claim":
+                    reference = am.Reference.model_validate(params)
+                    return self.authentication.claim(
+                        reference.id, session_id
+                    ).model_dump(mode="json")
+                if method == "auth.ready":
+                    attempt = am.Attempt.model_validate(params)
+                    return {"url": self.authentication.ready(attempt, session_id)}
+                if method == "auth.complete":
+                    await self.authentication.complete(
+                        am.Callback.model_validate(params), session_id
+                    )
+                    return None
+                if method == "auth.cancel":
+                    self.authentication.cancel(am.Reference.model_validate(params).id)
+                    return None
+                if method == "auth.release":
+                    self.authentication.release(
+                        am.Attempt.model_validate(params), session_id
+                    )
+                    return None
+                if method == "auth.provision":
+                    await self.authentication.provision(
+                        am.Credential.model_validate(params)
+                    )
+                    return None
+            except pydantic.ValidationError:
+                raise p.RemoteError(
+                    "invalid_argument", "invalid authentication parameters"
+                ) from None
+            except am.AuthenticationError as exc:
+                raise p.RemoteError("authentication_error", str(exc)) from None
         if method == "logs.list":
             p.Empty.model_validate(params)
             return p.json_value(await self.logs.listing())

@@ -22,6 +22,8 @@ uv run vops-runner --help
 
 Use `vops-runner` to start, resume, inspect, and export executions. See the [CLI guide](docs/usage/cli.md) for a runnable workflow and recovery examples. `uv run python -m vectorops.runner` provides the same commands.
 
+Daemons automatically reuse user-level control secrets. See [provider authentication](docs/config/authentication.md) for durable API keys, runner-managed OAuth refresh, and remote-host browser coordination.
+
 ## Current scope
 
 The design in `docs/design.md` describes three major roles:

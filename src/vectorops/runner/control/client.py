@@ -4,13 +4,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-import secrets
 import typing
 from uuid import uuid4
 
 import pydantic
 
 from vectorops.runner import diagnostics
+from vectorops.runner import global_config
+from vectorops.runner.authentication import models as am
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
@@ -38,10 +39,19 @@ class RunnerClient:
 
     @classmethod
     async def tcp(
-        cls, port: int, token: str, *, host: str = "127.0.0.1"
+        cls,
+        port: int,
+        token: typing.Optional[str] = None,
+        *,
+        host: str = "127.0.0.1",
+        config_dir: typing.Optional[Path] = None,
     ) -> typing.Self:
         if host not in ("127.0.0.1", "::1"):
             raise ValueError("unencrypted runner TCP requires a loopback endpoint")
+        if token is None:
+            token = (
+                await global_config.GlobalConfiguration(config_dir).load()
+            ).control_token
         reader, writer = await asyncio.open_connection(host, port)
         return await cls.connect(transport.TCPStream(reader, writer), token)
 
@@ -217,6 +227,36 @@ class RunnerClient:
     async def unsubscribe(self, subscription_id: str) -> None:
         await self.request("events.unsubscribe", {"subscription_id": subscription_id})
 
+    async def pending_authentication(self) -> list[am.Requirement]:
+        result = await self.request("auth.list")
+        if not isinstance(result, dict):
+            raise ValueError("invalid authentication listing")
+        return pydantic.TypeAdapter(list[am.Requirement]).validate_python(
+            result["requests"]
+        )
+
+    async def claim_authentication(self, identifier: str) -> am.Claim:
+        return am.Claim.model_validate(
+            await self.request("auth.claim", {"id": identifier})
+        )
+
+    async def authentication_ready(self, attempt: am.Attempt) -> str:
+        result = await self.request("auth.ready", attempt.model_dump(mode="json"))
+        if not isinstance(result, dict) or not isinstance(result.get("url"), str):
+            raise ValueError("invalid authorization URL")
+        return typing.cast(str, result["url"])
+
+    async def complete_authentication(self, callback: am.Callback) -> None:
+        await self.request(
+            "auth.complete", callback.model_dump(mode="json"), timeout=120
+        )
+
+    async def cancel_authentication(self, identifier: str) -> None:
+        await self.request("auth.cancel", {"id": identifier})
+
+    async def provision_credentials(self, credential: am.Credential) -> None:
+        await self.request("auth.provision", credential.model_dump(mode="json"))
+
     async def aclose(self) -> None:
         self._reader.cancel()
         await asyncio.gather(self._reader, return_exceptions=True)
@@ -229,9 +269,11 @@ class RunnerClient:
 
 
 @asynccontextmanager
-async def embedded(path: Path) -> AsyncIterator[RunnerClient]:
-    token = secrets.token_urlsafe(32)
-    async with RunnerService(path) as service:
+async def embedded(
+    path: Path, *, config_dir: typing.Optional[Path] = None
+) -> AsyncIterator[RunnerClient]:
+    token = (await global_config.GlobalConfiguration(config_dir).load()).control_token
+    async with RunnerService(path, config_dir=config_dir) as service:
         server = RunnerServer(service, token)
         host, worker = transport.memory_pair()
         server.attach(worker)

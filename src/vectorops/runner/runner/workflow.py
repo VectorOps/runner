@@ -14,6 +14,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner import diagnostics
+from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
@@ -41,12 +42,14 @@ class WorkflowRunner:
         state_store: typing.Optional[RunnerStateStore] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
         diagnostic_log: typing.Optional[diagnostics.DiagnosticLog] = None,
+        authentication: typing.Optional[AuthenticationService] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
         self.event_sink = event_sink
         self._state_store = state_store
         self._diagnostic_log = diagnostic_log
+        self.authentication = authentication or AuthenticationService()
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
         self.last_execution_id: typing.Optional[str] = None
@@ -107,7 +110,9 @@ class WorkflowRunner:
 
     def suspend_inputs(self) -> bool:
         """Preserve durable waits when shutting down, unlike an explicit stop."""
-        waiting = any(owner.waiting for owner in self._mailboxes.values())
+        waiting = self.authentication.waiting or any(
+            owner.waiting for owner in self._mailboxes.values()
+        )
         if waiting:
             for owner in self._mailboxes.values():
                 owner.suspending = True
@@ -349,7 +354,13 @@ class WorkflowRunner:
                 input={} if input is None else input,
             )
         executor = WorkflowExecutor(
-            project, history, reporter, execution_id, self.event_sink, mailbox_owner
+            project,
+            history,
+            reporter,
+            execution_id,
+            self.event_sink,
+            mailbox_owner,
+            self.authentication,
         )
         if continue_from_step_id is None:
             configuration = await executor.configure(configuration)
