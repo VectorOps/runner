@@ -8,6 +8,7 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.project import RunnerConfig, RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 
@@ -16,6 +17,8 @@ async def run(
     history: MemoryHistory,
     invoke: Callable[[], Awaitable[pydantic.JsonValue]],
     head: Optional[str] = None,
+    *,
+    mailbox: Optional[Mailbox] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -28,7 +31,12 @@ async def run(
     workflow = models.Workflow(id="test", definition_ref="test:workflow")
     await history.save_workflow(workflow)
     session = ExecutionSession(
-        history, workflow, child, continue_from_step_id=head, child_heads={}
+        history,
+        workflow,
+        child,
+        continue_from_step_id=head,
+        child_heads={},
+        mailbox=mailbox,
     )
     context = WorkflowExecutionContext(
         RunnerProject(Path.cwd(), RunnerConfig()), workflow, session

@@ -130,11 +130,17 @@ async def test_tool_loop_replays_results_in_order(history: MemoryHistory) -> Non
         value: int
 
     executed: list[int] = []
+    second_finished = asyncio.Event()
 
     async def execute(
         ctx: ActivityExecutionContext, args: Arguments
     ) -> llm.ToolResponse:
+        if args.value == 1:
+            async with asyncio.timeout(2):
+                await second_finished.wait()
         executed.append(args.value)
+        if args.value == 2:
+            second_finished.set()
         return llm.ToolResponse(content=[connect.TextBlock(text=str(args.value))])
 
     backend = FakeProvider(
@@ -161,8 +167,13 @@ async def test_tool_loop_replays_results_in_order(history: MemoryHistory) -> Non
     result = await replay.run(history, workflow)
     assert result.outcome.kind == "completed"
     await replay.run(history, workflow, result.id)
-    assert executed == [1, 2]
+    assert executed == [2, 1]
     assert snapshots[0] == snapshots[1]
+    assert [
+        message.tool_call_id
+        for message in backend.requests[1].messages
+        if message.role == "tool"
+    ] == ["a", "b"]
     assert [message.role for message in backend.requests[1].messages] == [
         "user",
         "assistant",
@@ -547,3 +558,110 @@ async def test_cross_workflow_state_reuse_rejected(history: MemoryHistory) -> No
     await replay.run(history, first)
     result = await replay.run(MemoryHistory(), second)
     assert result.outcome.kind == "completed"
+
+
+async def test_parallel_tool_failure_settles_siblings_before_return(
+    history: MemoryHistory,
+) -> None:
+    class Arguments(pydantic.BaseModel):
+        value: int
+
+    failed = asyncio.Event()
+    completed: list[int] = []
+
+    async def execute(
+        ctx: ActivityExecutionContext, args: Arguments
+    ) -> llm.ToolResponse:
+        if args.value == 1:
+            failed.set()
+            raise RuntimeError("broken tool")
+        await failed.wait()
+        await asyncio.sleep(0)
+        completed.append(args.value)
+        return llm.ToolResponse(content=[connect.TextBlock(text="done")])
+
+    backend = FakeProvider(
+        [
+            connect.AssistantMessage(
+                content=[
+                    connect.ToolCallBlock(
+                        id=str(value), name="test", arguments={"value": value}
+                    )
+                    for value in (1, 2)
+                ],
+                finish_reason="tool_call",
+            )
+        ]
+    )
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", llm.Settings(model="test"), backend=backend)
+        agent.add_user_message("hello")
+        with pytest.raises(ActivityError, match="broken tool"):
+            await agent.run(tools=[llm.Tool("test", "Test", Arguments, execute)])
+        assert completed == [2]
+        assert len(agent.history) == 2
+        return None
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed"
+    second = await replay.run(history, workflow, first.id)
+    assert second.outcome.kind == "completed"
+    assert completed == [2]
+
+
+async def test_parallel_tool_cancellation_restarts_unfinished_calls(
+    history: MemoryHistory,
+) -> None:
+    class Arguments(pydantic.BaseModel):
+        value: int
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    invocations: list[tuple[int, str]] = []
+    closed: list[int] = []
+
+    async def execute(
+        ctx: ActivityExecutionContext, args: Arguments
+    ) -> llm.ToolResponse:
+        invocations.append((args.value, ctx.step_id))
+        if len(invocations) == 2:
+            started.set()
+        try:
+            await release.wait()
+            return llm.ToolResponse(content=[connect.TextBlock(text="done")])
+        finally:
+            closed.append(args.value)
+
+    backend = FakeProvider(
+        [
+            connect.AssistantMessage(
+                content=[
+                    connect.ToolCallBlock(
+                        id=str(value), name="test", arguments={"value": value}
+                    )
+                    for value in (1, 2)
+                ],
+                finish_reason="tool_call",
+            ),
+            answer("done"),
+        ]
+    )
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", llm.Settings(model="test"), backend=backend)
+        agent.add_user_message("hello")
+        await agent.run(tools=[llm.Tool("test", "Test", Arguments, execute)])
+        return len(agent.history)
+
+    task = asyncio.create_task(replay.run(history, workflow))
+    await asyncio.wait_for(started.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sorted(closed) == [1, 2]
+    release.set()
+    result = await replay.run(history, workflow, invocations[-1][1])
+    assert result.outcome == models.StepCompleted(result=5)
+    assert invocations[:2] == invocations[2:]
+    assert len(backend.requests) == 2

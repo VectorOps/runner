@@ -3,8 +3,12 @@
 from .api import LLM as LLM
 from .models import Compaction as Compaction, Settings as Settings
 from .provider import ConnectProvider as ConnectProvider, Provider as Provider
-from .tools import (
-    Tool as Tool,
-    ToolExecutionError as ToolExecutionError,
-    ToolResponse as ToolResponse,
-)
+from . import tools
+
+Tool = tools.Tool
+ToolBinding = tools.ToolBinding
+ToolExecutionError = tools.ToolExecutionError
+ToolResponse = tools.ToolResponse
+ToolApproval = tools.ToolApproval
+ToolApprovalResponse = tools.ToolApprovalResponse
+invoke_tool = tools.invoke_tool

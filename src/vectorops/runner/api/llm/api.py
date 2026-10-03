@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator, Iterator, Sequence
 from contextlib import aclosing, contextmanager
+import asyncio
 import hashlib
 import json
 from typing import Optional
@@ -10,7 +11,7 @@ import connect
 import pydantic
 
 from vectorops.runner.api import composition as c
-from vectorops.runner.api.llm import models, provider, tools
+from vectorops.runner.api.llm import models, provider, tools as tool_api
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
 
@@ -145,9 +146,13 @@ class LLM:
             return await self._generate(tools)
 
     async def run(
-        self, *, tools: Sequence[tools.ToolBinding] = (), max_rounds: int = 100
+        self, *, tools: Sequence[tool_api.ToolBinding] = (), max_rounds: int = 100
     ) -> connect.AssistantMessage:
-        """Generate and execute tools sequentially until a tool-free response arrives."""
+        """Run parallel tool rounds, committing results in model-call order.
+
+        Infrastructure failures propagate after all calls settle; no partial
+        round is appended to the conversation. Recorded successes remain reusable.
+        """
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
         bindings = {tool.definition.name: tool for tool in tools}
@@ -163,47 +168,24 @@ class LLM:
                 ]
                 if not calls:
                     return response
-                for request in calls:
-                    await self._tool(request, bindings.get(request.name))
-        raise models.RoundLimitError(f"LLM exceeded max_rounds={max_rounds}")
-
-    @c.activity_wrapper(kind="llm.tool", version=1)
-    async def _tool(
-        self,
-        call: c.ActivityCall,
-        request: connect.ToolCallBlock,
-        binding: Optional[tools.ToolBinding],
-    ) -> None:
-        async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-            try:
-                if binding is None:
-                    raise tools.ToolExecutionError(f"unknown tool: {request.name}")
-                response = await binding.execute(ctx, request.arguments)
-            except tools.ToolExecutionError as exc:
-                response = tools.ToolResponse(
-                    content=[connect.TextBlock(text=str(exc))], is_error=True
+                results = await asyncio.gather(
+                    *(
+                        tool_api.invoke_tool(
+                            bindings.get(request.name), request, instance=self._identity
+                        )
+                        for request in calls
+                    ),
+                    return_exceptions=True,
                 )
-            return connect.ToolResultMessage(
-                tool_call_id=request.id,
-                tool_name=request.name,
-                content=response.content,
-                is_error=response.is_error,
-            ).model_dump(mode="json")
-
-        result = await call.run(
-            input={
-                "instance": self._identity,
-                "call_digest": _digest(request.model_dump(mode="json")),
-                "tool_digest": (
-                    _digest(binding.definition.model_dump(mode="json"))
-                    if binding
-                    else None
-                ),
-                "tool_version": binding.version if binding else None,
-            },
-            invoke=invoke,
-        )
-        self._messages.append(connect.ToolResultMessage.model_validate(result))
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
+                self._messages.extend(
+                    result
+                    for result in results
+                    if isinstance(result, connect.ToolResultMessage)
+                )
+        raise models.RoundLimitError(f"LLM exceeded max_rounds={max_rounds}")
 
     async def _maybe_compact(self) -> None:
         """Compact an old prefix without splitting assistant/tool exchanges."""
