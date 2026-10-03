@@ -165,6 +165,28 @@ async def test_nested_completed_heads_are_self_contained(
     assert execution_probe.calls == [1, 2]
 
 
+async def test_stop_cascades_to_children_and_can_resume_from_history(
+    workspace: Path, execution_probe: ExecutionProbe
+) -> None:
+    runner = WorkflowRunner(workspace)
+    task = asyncio.create_task(
+        runner.run("children", "parent", input={"values": [1, 2], "block": True})
+    )
+    for _ in range(2):
+        await asyncio.wait_for(execution_probe.started.get(), 2)
+    execution_id = str(runner.last_execution_id)
+    runner.stop()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert execution_probe.active == 0
+    execution = await runner.execution_state(execution_id)
+    assert execution.status == "cancelled"
+    assert len(execution.checkpoint.heads) == 3
+    execution_probe.gate.set()
+    assert await WorkflowRunner(workspace).resume(execution_id) == [2, 4]
+    assert (await runner.execution_state(execution_id)).status == "completed"
+
+
 async def test_failed_execution_status_lives_only_in_database(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:

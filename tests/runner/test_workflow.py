@@ -250,6 +250,49 @@ async def test_parallel_activities_run_without_deadlock(
     assert await asyncio.wait_for(task, 2) == [1, 2]
 
 
+async def test_stop_is_safe_when_idle_and_runner_can_be_reused(
+    runner: WorkflowRunner,
+) -> None:
+    runner.stop()
+    assert await runner.run("activities") == 2
+    runner.stop()
+    assert await runner.run("activities") == 2
+
+
+async def test_stop_cancels_workflow_loop_and_preserves_history(
+    runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
+) -> None:
+    before = set(asyncio.all_tasks())
+    task = asyncio.create_task(runner.run("activities", "loop", workflow_id="root"))
+    await asyncio.wait_for(execution_probe.started.get(), 2)
+    runner.stop()
+    runner.stop()
+    assert execution_probe.active == 1
+    assert not task.done()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert execution_probe.active == 0
+    assert execution_probe.cancelled == 1
+    assert len(history.steps) == 1
+    assert history.steps[history.heads["root"]].outcome.kind == "pending"
+    assert not set(asyncio.all_tasks()) - before
+    runner.stop()
+
+
+async def test_stop_cancels_all_concurrent_root_executions(
+    runner: WorkflowRunner, execution_probe: ExecutionProbe
+) -> None:
+    tasks = [asyncio.create_task(runner.run("activities", "wait")) for _ in range(2)]
+    for _ in tasks:
+        await asyncio.wait_for(execution_probe.started.get(), 2)
+    runner.stop()
+    for task in tasks:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    assert execution_probe.active == 0
+    assert execution_probe.cancelled == 2
+
+
 async def test_long_history_is_consumed_incrementally(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:

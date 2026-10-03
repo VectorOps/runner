@@ -38,6 +38,7 @@ class WorkflowRunner:
         self.history = history
         self.event_sink = event_sink
         self.last_execution_id: typing.Optional[str] = None
+        self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
 
     async def run(
         self,
@@ -52,6 +53,42 @@ class WorkflowRunner:
         new_execution_id: typing.Optional[str] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
+        task = asyncio.create_task(
+            self._execute(
+                workflow_name,
+                callable_name,
+                input=input,
+                workflow_id=workflow_id,
+                continue_from_step_id=continue_from_step_id,
+                child_heads=child_heads,
+                execution_id=execution_id,
+                new_execution_id=new_execution_id,
+            )
+        )
+        self._executions.add(task)
+        try:
+            return await task
+        finally:
+            self._executions.discard(task)
+
+    def stop(self) -> None:
+        """Cancel active executions without waiting for cascading cleanup."""
+        for task in tuple(self._executions):
+            if not task.done() and not task.cancelling():
+                task.cancel()
+
+    async def _execute(
+        self,
+        workflow_name: str,
+        callable_name: str,
+        *,
+        input: typing.Optional[dict[str, pydantic.JsonValue]],
+        workflow_id: typing.Optional[str],
+        continue_from_step_id: typing.Optional[str],
+        child_heads: typing.Optional[dict[str, str]],
+        execution_id: typing.Optional[str],
+        new_execution_id: typing.Optional[str],
+    ) -> pydantic.JsonValue:
         project = await RunnerProject.open(self.path)
         if new_execution_id is not None and (
             execution_id is not None or self.history is not None

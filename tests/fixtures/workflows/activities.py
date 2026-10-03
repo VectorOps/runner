@@ -86,6 +86,11 @@ async def wait(ctx: WorkflowExecutionContext) -> int:
     return await blocked()
 
 
+async def loop(ctx: WorkflowExecutionContext) -> None:
+    while True:
+        await blocked()
+
+
 async def invalid(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     return await invalid_result()
 
