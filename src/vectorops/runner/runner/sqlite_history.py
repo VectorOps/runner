@@ -13,6 +13,7 @@ from vectorops.runner import models
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
+from vectorops.runner.runner import mailbox
 
 T = typing.TypeVar("T")
 
@@ -91,6 +92,10 @@ class SQLiteHistory:
                 CREATE TABLE IF NOT EXISTS workflow_heads (
                     workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
                     step_id TEXT NOT NULL REFERENCES steps(id)
+                );
+                CREATE TABLE IF NOT EXISTS input_requests (
+                    request_id TEXT PRIMARY KEY REFERENCES steps(id),
+                    payload TEXT NOT NULL
                 );
                 PRAGMA user_version = 1;
                 COMMIT;
@@ -360,6 +365,153 @@ class SQLiteHistory:
 
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))
+
+    @staticmethod
+    def _input(connection: sqlite3.Connection, request_id: str) -> mailbox.InputRequest:
+        row = connection.execute(
+            "SELECT payload FROM input_requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(request_id)
+        return mailbox.InputRequest.model_validate_json(row[0])
+
+    async def register_input(
+        self, request_id: str, spec: mailbox.InputSpec
+    ) -> mailbox.InputRequest:
+        """Register only against an existing pending activity, never an inbox."""
+
+        def register(connection: sqlite3.Connection) -> mailbox.InputRequest:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                step = self._step(connection, request_id)
+                execution = self._execution(connection)
+                if execution.status != "running":
+                    raise mailbox.MailboxConflict("execution is not running")
+                if (
+                    step.operation.kind != mailbox.KIND
+                    or step.outcome.kind != "pending"
+                ):
+                    raise mailbox.MailboxConflict("step is not an input wait")
+                try:
+                    existing = self._input(connection, request_id)
+                except KeyError:
+                    existing = None
+                if existing is not None:
+                    if (
+                        mailbox.InputSpec.model_validate(
+                            existing.model_dump(
+                                include=set(mailbox.InputSpec.model_fields)
+                            )
+                        )
+                        != spec
+                    ):
+                        raise mailbox.MailboxConflict("input request contract changed")
+                    return existing
+                request = mailbox.InputRequest(
+                    **spec.model_dump(),
+                    request_id=request_id,
+                    execution_id=execution.id,
+                    workflow_id=step.workflow_id,
+                )
+                connection.execute(
+                    "INSERT INTO input_requests VALUES (?, ?)",
+                    (request_id, request.model_dump_json()),
+                )
+                return request
+
+        return await self._run(register)
+
+    async def get_input(self, request_id: str) -> mailbox.InputRequest:
+        return await self._run(lambda connection: self._input(connection, request_id))
+
+    async def list_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
+        def read(connection: sqlite3.Connection) -> mailbox.RequestPage:
+            with connection:
+                connection.execute("BEGIN")
+                execution = self._execution(connection)
+                if execution.id != query.execution_id:
+                    raise ValueError("execution identity mismatch")
+                clauses = ["json_extract(payload, '$.status') = 'pending'"]
+                values: list[typing.Union[str, int]] = []
+                for field, value in (
+                    ("workflow_id", query.workflow_id),
+                    ("channel", query.channel),
+                ):
+                    if value is not None:
+                        clauses.append(f"json_extract(payload, '$.{field}') = ?")
+                        values.append(value)
+                if query.after is not None:
+                    clauses.append("request_id > ?")
+                    values.append(query.after)
+                rows = connection.execute(
+                    "SELECT payload FROM input_requests WHERE "
+                    + " AND ".join(clauses)
+                    + " ORDER BY request_id LIMIT ?",
+                    [*values, query.limit + 1],
+                ).fetchall()
+                requests = [
+                    mailbox.InputRequest.model_validate_json(row[0]) for row in rows
+                ]
+                return mailbox.RequestPage(
+                    requests=requests[: query.limit],
+                    next_after=(
+                        requests[query.limit - 1].request_id
+                        if len(requests) > query.limit
+                        else None
+                    ),
+                )
+
+        return await self._run(read)
+
+    async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
+        """Commit the winning response and its retry receipt in one transaction."""
+
+        def respond(connection: sqlite3.Connection) -> mailbox.InputRequest:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                request = self._input(connection, answer.request_id)
+                if request.execution_id != answer.execution_id:
+                    raise mailbox.MailboxConflict("execution identity mismatch")
+                if request.status == "answered":
+                    if (
+                        request.idempotency_key == answer.idempotency_key
+                        and request.response == answer.response
+                    ):
+                        return request
+                    raise mailbox.MailboxConflict("input request is already answered")
+                if (
+                    request.status != "pending"
+                    or self._execution(connection).status != "running"
+                ):
+                    raise mailbox.MailboxConflict("input request is closed")
+                request.validate_response(answer.response)
+                request = request.model_copy(
+                    update={
+                        "status": "answered",
+                        "response": answer.response,
+                        "idempotency_key": answer.idempotency_key,
+                        "answered_at": state.timestamp(),
+                    }
+                )
+                connection.execute(
+                    "UPDATE input_requests SET payload = ? WHERE request_id = ?",
+                    (request.model_dump_json(), request.request_id),
+                )
+                return request
+
+        return await self._run(respond)
+
+    async def cancel_inputs(self, request_id: typing.Optional[str] = None) -> None:
+        def cancel(connection: sqlite3.Connection) -> None:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
+                    "WHERE json_extract(payload, '$.status') = 'pending' AND (? IS NULL OR request_id = ?)",
+                    (request_id, request_id),
+                )
+
+        await self._run(cancel)
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         payload = step.model_dump_json()

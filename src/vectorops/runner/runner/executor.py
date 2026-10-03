@@ -25,6 +25,7 @@ from vectorops.runner.runner.events import StepEventSink
 from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
+from vectorops.runner.runner.mailbox import Mailbox
 
 WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]]
 WorkflowEntryPoint: typing.TypeAlias = typing.Union[
@@ -40,12 +41,14 @@ class WorkflowExecutor:
         reporter: typing.Optional[CheckpointReporter] = None,
         execution_id: typing.Optional[str] = None,
         event_sink: typing.Optional[StepEventSink] = None,
+        mailbox: typing.Optional[Mailbox] = None,
     ) -> None:
         self.project = project
         self.history = history
         self.reporter = reporter
         self.execution_id = execution_id
         self.event_sink = event_sink
+        self.mailbox = mailbox
         self._definitions: dict[str, WorkflowEntryPoint] = {}
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
@@ -107,6 +110,7 @@ class WorkflowExecutor:
             execution_id=self.execution_id,
             event_sink=self.event_sink,
             configure_workflow=self.configure,
+            mailbox=self.mailbox,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)

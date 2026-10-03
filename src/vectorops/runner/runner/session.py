@@ -17,6 +17,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
+from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
@@ -66,6 +67,7 @@ class ExecutionSession:
         configure_workflow: typing.Optional[
             Callable[[models.Workflow], Awaitable[models.Workflow]]
         ] = None,
+        mailbox: typing.Optional[Mailbox] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -88,6 +90,7 @@ class ExecutionSession:
         self.execution_id = execution_id
         self.event_sink = event_sink
         self.configure_workflow = configure_workflow
+        self.mailbox = mailbox
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -411,7 +414,9 @@ class ExecutionSession:
                 self.reporter.record(self.workflow.id, self.head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
-        return ActivityExecutionContext(self.execution_id, self.workflow.id, step.id)
+        return ActivityExecutionContext(
+            self.execution_id, self.workflow.id, step.id, self.mailbox
+        )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:
         if self.event_sink is None:

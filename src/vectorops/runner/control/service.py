@@ -11,7 +11,7 @@ import pydantic
 
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
-from vectorops.runner.runner import events, history_query
+from vectorops.runner.runner import events, history_query, mailbox
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -32,6 +32,7 @@ class RunnerService:
         self._active: typing.Optional[p.Active] = None
         self._lock = asyncio.Lock()
         self._listeners: set[EventSink] = set()
+        self._suspending = False
 
     async def __aenter__(self) -> typing.Self:
         project = await RunnerProject.open(self.path)
@@ -40,8 +41,20 @@ class RunnerService:
         await self._store.__aenter__()
         self._requests = RequestStore(project.data_path / "control.sqlite3")
         self._runner = WorkflowRunner(
-            project.root, event_sink=self._step, state_store=self._store
+            project.root,
+            event_sink=self._step,
+            state_store=self._store,
+            mailbox_sink=self._emit,
         )
+        try:
+            for candidate in await self.runner.recovery_candidates():
+                accepted = p.Accepted(execution_id=candidate.id)
+                self._active = p.Active(execution_id=candidate.id)
+                self._task = asyncio.create_task(self._execute(accepted, None, None))
+        except BaseException:
+            await self._store.__aexit__()
+            self._runner = None
+            raise
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -53,7 +66,10 @@ class RunnerService:
         try:
             if self._task is not None:
                 if self.shutdown_mode == "cancel" and self._active is not None:
-                    self._stop()
+                    if self._active.status != "stopping":
+                        self._suspending = self.runner.suspend_inputs()
+                    if not self._suspending:
+                        self._stop()
                 try:
                     await asyncio.shield(self._task)
                 except asyncio.CancelledError:
@@ -122,7 +138,7 @@ class RunnerService:
             else:
                 await self.runner.resume(accepted.execution_id)
         except asyncio.CancelledError:
-            status = "cancelled"
+            status = "suspended" if self._suspending else "cancelled"
         except Exception as exc:
             status, error = "failed", str(exc)
         finally:
@@ -227,4 +243,25 @@ class RunnerService:
         if method == "history.query":
             query = history_query.HistoryQuery.model_validate(params)
             return p.json_value(await self.runner.query_history(query))
+        if method == "mailbox.list":
+            return p.json_value(
+                await self.runner.pending_inputs(
+                    mailbox.RequestQuery.model_validate(params)
+                )
+            )
+        if method == "mailbox.get":
+            return p.json_value(
+                await self.runner.input_request(
+                    mailbox.RequestRef.model_validate(params)
+                )
+            )
+        if method == "mailbox.respond":
+            answer = mailbox.Answer.model_validate(params)
+            async with self._lock:
+                if self.shutdown_requested.is_set():
+                    raise p.RemoteError("runner_stopping", "runner is shutting down")
+                try:
+                    return p.json_value(await self.runner.answer_input(answer))
+                except mailbox.MailboxConflict as exc:
+                    raise p.RemoteError("mailbox_conflict", str(exc)) from exc
         raise p.RemoteError("unsupported_method", "unknown method: " + method)

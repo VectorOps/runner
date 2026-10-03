@@ -26,6 +26,7 @@ from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query
+from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.state_store import RunnerStateStore
 
 
@@ -37,11 +38,14 @@ class WorkflowRunner:
         *,
         event_sink: typing.Optional[StepEventSink] = None,
         state_store: typing.Optional[RunnerStateStore] = None,
+        mailbox_sink: typing.Optional[mailbox.EventSink] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
         self.event_sink = event_sink
         self._state_store = state_store
+        self.mailbox_sink = mailbox_sink
+        self._mailboxes: dict[str, mailbox.Mailbox] = {}
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
 
@@ -89,6 +93,36 @@ class WorkflowRunner:
         else:
             async with RunnerStateStore(project.data_path) as store:
                 yield store
+
+    def suspend_inputs(self) -> bool:
+        """Preserve durable waits when shutting down, unlike an explicit stop."""
+        waiting = any(owner.waiting for owner in self._mailboxes.values())
+        if waiting:
+            for owner in self._mailboxes.values():
+                owner.suspending = True
+            self.stop()
+        return waiting
+
+    async def pending_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
+        return await (await self._selected_database(query.execution_id)).list_inputs(
+            query
+        )
+
+    async def input_request(
+        self, reference: mailbox.RequestRef
+    ) -> mailbox.InputRequest:
+        return await (await self._selected_database(reference.execution_id)).get_input(
+            reference.request_id
+        )
+
+    async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
+        owner = self._mailboxes.get(answer.execution_id)
+        if owner is not None:
+            return await owner.answer(answer)
+        project = await RunnerProject.open(self.path)
+        async with self._writer(project):
+            database = await self._database(project, answer.execution_id)
+            return await mailbox.Mailbox(database, self.mailbox_sink).answer(answer)
 
     async def _execute(
         self,
@@ -199,6 +233,16 @@ class WorkflowRunner:
                             raise ValueError(
                                 "continuation must target the root workflow"
                             )
+                        if root_head != record.checkpoint.heads.get(
+                            record.root_workflow_id
+                        ):
+                            pending = await database.list_inputs(
+                                mailbox.RequestQuery(execution_id=execution_id, limit=1)
+                            )
+                            if pending.requests:
+                                raise ValueError(
+                                    "cannot rewind an execution with pending input requests"
+                                )
                         heads[record.root_workflow_id] = root_head
                     record = record.model_copy(
                         update={
@@ -213,6 +257,8 @@ class WorkflowRunner:
                     await database.save_execution(record, replace_heads=True)
                     await checkpointer.persist()
                     await store.save(state.RunnerState(last_execution_id=execution_id))
+                    owner = mailbox.Mailbox(database, self.mailbox_sink)
+                    self._mailboxes[execution_id] = owner
                     try:
                         async with checkpointer.tracking():
                             result = await self._run(
@@ -226,13 +272,22 @@ class WorkflowRunner:
                                 child_heads=heads,
                                 reporter=checkpointer,
                                 execution_id=execution_id,
+                                mailbox_owner=owner,
                             )
                     except asyncio.CancelledError:
-                        await checkpointer.persist("cancelled")
+                        if owner.suspending:
+                            await checkpointer.persist("running")
+                        else:
+                            await database.cancel_inputs()
+                            await checkpointer.persist("cancelled")
                         raise
                     except Exception:
+                        await database.cancel_inputs()
                         await checkpointer.persist("failed")
                         raise
+                    finally:
+                        self._mailboxes.pop(execution_id, None)
+                    await database.cancel_inputs()
                     await checkpointer.persist("completed")
                     await history.flush()
                     await ExecutionRetention(
@@ -263,6 +318,7 @@ class WorkflowRunner:
         child_heads: typing.Optional[dict[str, str]],
         reporter: typing.Optional[ExecutionCheckpointer] = None,
         execution_id: typing.Optional[str] = None,
+        mailbox_owner: typing.Optional[mailbox.Mailbox] = None,
     ) -> pydantic.JsonValue:
         if continue_from_step_id is not None:
             if not continue_from_step_id:
@@ -282,7 +338,7 @@ class WorkflowRunner:
                 input={} if input is None else input,
             )
         executor = WorkflowExecutor(
-            project, history, reporter, execution_id, self.event_sink
+            project, history, reporter, execution_id, self.event_sink, mailbox_owner
         )
         if continue_from_step_id is None:
             configuration = await executor.configure(configuration)

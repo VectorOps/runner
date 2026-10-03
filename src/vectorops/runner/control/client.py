@@ -13,7 +13,7 @@ import pydantic
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
-from vectorops.runner.runner import execution_state, history_query
+from vectorops.runner.runner import execution_state, history_query, mailbox
 
 
 class RunnerClient:
@@ -185,6 +185,23 @@ class RunnerClient:
             "events.subscribe", (params or p.Subscribe()).model_dump(mode="json")
         )
         return p.Unsubscribe.model_validate(result).subscription_id
+
+    async def pending_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
+        return mailbox.RequestPage.model_validate(
+            await self.request("mailbox.list", query.model_dump(mode="json"))
+        )
+
+    async def input_request(
+        self, reference: mailbox.RequestRef
+    ) -> mailbox.InputRequest:
+        return mailbox.InputRequest.model_validate(
+            await self.request("mailbox.get", reference.model_dump(mode="json"))
+        )
+
+    async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
+        return mailbox.InputRequest.model_validate(
+            await self.request("mailbox.respond", answer.model_dump(mode="json"))
+        )
 
     async def unsubscribe(self, subscription_id: str) -> None:
         await self.request("events.unsubscribe", {"subscription_id": subscription_id})
