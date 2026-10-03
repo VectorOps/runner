@@ -14,11 +14,13 @@ This repository targets Python `>=3.13,<3.14`.
 uv sync
 ```
 
-2. Run the package entry point:
+2. Show the CLI commands:
 
 ```bash
-uv run python -m vectorops.runner
+uv run vops-runner --help
 ```
+
+Use `vops-runner` to start, resume, inspect, and export executions. See the [CLI guide](docs/usage/cli.md) for a runnable workflow and recovery examples. `uv run python -m vectorops.runner` provides the same commands.
 
 ## Current scope
 
@@ -28,11 +30,12 @@ The design in `docs/design.md` describes three major roles:
 - host
 - runner
 
-This repository is the runner-focused project. The initial scaffold provides:
+This repository is the runner-focused project. It provides:
 
 - `uv` project metadata
 - an installable `vectorops.runner` package under `src/`
-- a minimal module entry point for future CLI and runtime bootstrapping
+- persistent workflow execution and crash recovery
+- a CLI with read-only status, statistics, and full-execution JSONL export
 
 The distribution is published independently as `vectorops-runner` while the Python import path is `vectorops.runner`.
 

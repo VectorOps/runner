@@ -40,11 +40,14 @@ Current implementation status and suggested next development horizon.
 - Joins reference exact child completion records and propagate or collect failures in invocation order.
 - Explicit child replay heads support partial recovery and forks across multiple nesting levels.
 - Cancellation closes replay streams, settles pending requests, and cancels owned child tasks.
+- `vops-runner` starts workflows with JSON input and optional execution IDs, and resumes persisted executions after interruption.
+- Read-only CLI status exposes persisted execution metadata and counts by operation and outcome across root, child, and retained branch histories while a writer is active.
+- Full-execution JSONL export writes a versioned metadata/configuration header followed by normalized steps from one committed snapshot, without overwriting existing files.
+- The CLI guide documents runnable authoring, inspection, recovery, and JSONL analysis contracts.
 - A comprehensive test suite covers implemented behaviors with reusable fixtures under `tests/fixtures/`.
 - Black, mypy, warnings-as-errors, and asyncio debug checks pass.
 
 ## Suggested next horizon
 
-- Add a minimal CLI to run, resume, fork, and inspect workflows.
-- Update the README with runnable authoring, execution-state inspection, and recovery examples.
+- Add explicit CLI fork and execution-listing commands if needed.
 - Keep RPC, parallel activities, retries, timeouts, and compensation outside the current scope.

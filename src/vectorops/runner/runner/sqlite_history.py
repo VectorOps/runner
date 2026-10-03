@@ -11,6 +11,7 @@ import typing
 
 from vectorops.runner import models
 from vectorops.runner.runner import execution_state as state
+from vectorops.runner.runner import inspection
 
 T = typing.TypeVar("T")
 
@@ -183,33 +184,104 @@ class SQLiteHistory:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
             with connection:
                 connection.execute("BEGIN")
-                row = connection.execute(
-                    "SELECT payload FROM execution WHERE singleton = 1"
-                ).fetchone()
-                if row is None:
-                    raise KeyError("execution state")
-                execution = state.ExecutionRecord.model_validate_json(row[0])
-                heads = dict(
-                    connection.execute(
-                        "SELECT workflow_id, step_id FROM workflow_heads"
-                    )
-                )
-                root_head = heads.get(execution.root_workflow_id)
-                completion_id = None
-                if (
-                    root_head is not None
-                    and self._step(connection, root_head).operation.kind
-                    == "workflow.complete"
-                ):
-                    completion_id = root_head
-                return execution.model_copy(
-                    update={
-                        "checkpoint": state.ExecutionCheckpoint(heads=heads),
-                        "completion_step_id": completion_id,
-                    }
-                )
+                return self._execution(connection)
 
         return await self._run(read)
+
+    @staticmethod
+    def _execution(connection: sqlite3.Connection) -> state.ExecutionRecord:
+        row = connection.execute(
+            "SELECT payload FROM execution WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise KeyError("execution state")
+        execution = state.ExecutionRecord.model_validate_json(row[0])
+        heads = dict(
+            connection.execute("SELECT workflow_id, step_id FROM workflow_heads")
+        )
+        root_head = heads.get(execution.root_workflow_id)
+        completion_id = None
+        if (
+            root_head is not None
+            and SQLiteHistory._step(connection, root_head).operation.kind
+            == "workflow.complete"
+        ):
+            completion_id = root_head
+        return execution.model_copy(
+            update={
+                "checkpoint": execution.checkpoint.model_copy(update={"heads": heads}),
+                "completion_step_id": completion_id,
+            }
+        )
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.path.as_uri() + "?mode=ro", uri=True, timeout=30
+        )
+        try:
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise ValueError("unsupported history schema version")
+            connection.execute("BEGIN")
+            return connection
+        except BaseException:
+            connection.close()
+            raise
+
+    async def inspect_execution(self) -> inspection.ExecutionStatus:
+        """Count all retained steps from one committed, read-only database snapshot."""
+
+        def read() -> inspection.ExecutionStatus:
+            with closing(self._connect_readonly()) as connection:
+                execution = self._execution(connection)
+                stats = inspection.ExecutionStats(
+                    workflows=connection.execute(
+                        "SELECT COUNT(*) FROM workflows"
+                    ).fetchone()[0],
+                    steps=0,
+                )
+                cursor = connection.execute("SELECT payload FROM steps ORDER BY rowid")
+                while rows := cursor.fetchmany(self.batch_size):
+                    for row in rows:
+                        step = models.WorkflowStep.model_validate_json(row[0])
+                        stats.steps += 1
+                        kind = step.operation.kind
+                        stats.operations[kind] = stats.operations.get(kind, 0) + 1
+                        outcome = step.outcome.kind
+                        stats.outcomes[outcome] = stats.outcomes.get(outcome, 0) + 1
+                return inspection.ExecutionStatus(execution=execution, stats=stats)
+
+        return await _offload(read)
+
+    async def export_execution(self, output: Path) -> None:
+        """Write a header and all retained steps from one read-only snapshot to JSONL."""
+
+        def export() -> None:
+            with closing(self._connect_readonly()) as connection:
+                header = inspection.ExportHeader(
+                    execution=self._execution(connection),
+                    workflows=[
+                        models.Workflow.model_validate_json(row[0])
+                        for row in connection.execute(
+                            "SELECT payload FROM workflows ORDER BY rowid"
+                        )
+                    ],
+                )
+                with output.open("x", encoding="utf-8") as stream:
+                    try:
+                        stream.write(header.model_dump_json() + "\n")
+                        cursor = connection.execute(
+                            "SELECT payload FROM steps ORDER BY rowid"
+                        )
+                        while rows := cursor.fetchmany(self.batch_size):
+                            for row in rows:
+                                step = models.WorkflowStep.model_validate_json(row[0])
+                                stream.write(step.model_dump_json() + "\n")
+                        stream.flush()
+                    except BaseException:
+                        output.unlink()
+                        raise
+
+        await _offload(export)
 
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))

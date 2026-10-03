@@ -22,6 +22,7 @@ from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
+from vectorops.runner.runner import inspection
 from vectorops.runner.runner.state_store import RunnerStateStore
 
 
@@ -48,9 +49,14 @@ class WorkflowRunner:
         continue_from_step_id: typing.Optional[str] = None,
         child_heads: typing.Optional[dict[str, str]] = None,
         execution_id: typing.Optional[str] = None,
+        new_execution_id: typing.Optional[str] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
         project = await RunnerProject.open(self.path)
+        if new_execution_id is not None and (
+            execution_id is not None or self.history is not None
+        ):
+            raise ValueError("new execution ID requires a new persistent execution")
         if self.history is None:
             async with RunnerStateStore(project.data_path) as store:
                 if execution_id is None:
@@ -58,12 +64,18 @@ class WorkflowRunner:
                         raise ValueError(
                             "execution ID is required for persistent continuation"
                         )
-                    execution_id = uuid4().hex
+                    execution_id = (
+                        uuid4().hex if new_execution_id is None else new_execution_id
+                    )
                     root_id = workflow_id if workflow_id is not None else uuid4().hex
                     record = execution_models.ExecutionRecord(
                         id=execution_id,
                         root_workflow_id=root_id,
                     )
+                    if await asyncio.to_thread(
+                        (project.data_path / "executions" / execution_id).exists
+                    ):
+                        raise FileExistsError("execution already exists")
                     configuration = models.Workflow(
                         id=root_id,
                         definition_ref=f"{workflow_name}:{callable_name}",
@@ -253,6 +265,28 @@ class WorkflowRunner:
     ) -> execution_models.ExecutionRecord:
         project = await RunnerProject.open(self.path)
         return await (await self._database(project, execution_id)).get_execution()
+
+    async def _selected_database(
+        self, execution_id: typing.Optional[str]
+    ) -> SQLiteHistory:
+        project = await RunnerProject.open(self.path)
+        if execution_id is None:
+            execution_id = (
+                await RunnerStateStore(project.data_path).load()
+            ).last_execution_id
+        if execution_id is None:
+            raise ValueError("no last execution is recorded")
+        return await self._database(project, execution_id)
+
+    async def inspect_execution(
+        self, execution_id: typing.Optional[str] = None
+    ) -> inspection.ExecutionStatus:
+        return await (await self._selected_database(execution_id)).inspect_execution()
+
+    async def export_execution(
+        self, output: Path, execution_id: typing.Optional[str] = None
+    ) -> None:
+        await (await self._selected_database(execution_id)).export_execution(output)
 
     async def recovery_candidates(self) -> list[execution_models.ExecutionRecord]:
         pointer = await self.project_state()

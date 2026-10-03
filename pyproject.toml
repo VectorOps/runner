@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.7.0",
 ]
 
+[project.scripts]
+vops-runner = "vectorops.runner.cli:main"
+
 [tool.uv.sources]
 connect = { path = "../connect", editable = true }
 
