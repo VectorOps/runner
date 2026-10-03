@@ -24,6 +24,8 @@ class HandlerRuntime(typing.Protocol):
     history: WorkflowHistory
     workflow: models.Workflow
 
+    async def prepare_workflow(self, workflow: models.Workflow) -> models.Workflow: ...
+
     async def recorded(
         self, operation: typing.Optional[models.WorkflowOperation]
     ) -> typing.Optional[models.WorkflowStep]: ...
@@ -207,12 +209,29 @@ class SpawnHandler:
         if step is not None:
             operation = require_spawn(step)
             child = await self.runtime.history.get_workflow(operation.child_workflow_id)
-            if child.definition_ref != definition or child.input != request.input:
+            if (
+                child.definition_ref != definition
+                or child.input != request.input
+                or (
+                    request.contract_kind is not None
+                    and child.kind != request.contract_kind
+                )
+                or (request.version is not None and child.version != request.version)
+            ):
                 raise ReplayMismatchError("child configuration differs from replay")
         else:
             child = models.Workflow(
-                id=uuid4().hex, definition_ref=definition, input=request.input
+                id=uuid4().hex,
+                definition_ref=definition,
+                input=request.input,
+                kind=(
+                    "workflow"
+                    if request.contract_kind is None
+                    else request.contract_kind
+                ),
+                version=1 if request.version is None else request.version,
             )
+            child = await self.runtime.prepare_workflow(child)
             await self.runtime.history.save_workflow(child)
             step = await self.runtime.append(
                 models.WorkflowSpawnOperation(child_workflow_id=child.id),

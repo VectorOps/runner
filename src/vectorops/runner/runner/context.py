@@ -36,6 +36,8 @@ class SpawnRequest:
     workflow_name: str
     callable_name: str
     input: dict[str, pydantic.JsonValue]
+    contract_kind: typing.Optional[str] = None
+    version: typing.Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -112,9 +114,17 @@ class WorkflowExecutionContext:
         callable_name: str = "workflow",
         *,
         input: typing.Optional[dict[str, pydantic.JsonValue]] = None,
+        kind: typing.Optional[str] = None,
+        version: typing.Optional[int] = None,
     ) -> ChildWorkflowHandle:
         response = await self.submitter.submit(
-            SpawnRequest(workflow_name, callable_name, {} if input is None else input)
+            SpawnRequest(
+                workflow_name,
+                callable_name,
+                {} if input is None else input,
+                kind,
+                version,
+            )
         )
         if response.kind != "spawn":
             raise RuntimeError("executor returned an invalid spawn response")

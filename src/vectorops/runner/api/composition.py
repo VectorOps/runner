@@ -30,6 +30,7 @@ class ActivityDefinition(typing.Generic[P, T]):
     func: Callable[typing.Concatenate[ActivityExecutionContext, P], Awaitable[T]]
     name: str
     kind: str = "activity"
+    version: int = 1
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         context = _CURRENT_CONTEXT.get()
@@ -40,7 +41,7 @@ class ActivityDefinition(typing.Generic[P, T]):
         arguments = dict(bound.arguments)
         arguments.pop(next(iter(arguments)))
         operation = models.StepOperation(
-            kind=self.kind, name=self.name, input=arguments
+            kind=self.kind, name=self.name, input=arguments, version=self.version
         )
 
         async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
@@ -53,7 +54,13 @@ class ActivityDefinition(typing.Generic[P, T]):
         return typing.cast(T, await context.run_activity(operation, invoke))
 
 
-def activity(*, name: typing.Optional[str] = None, kind: str = "activity") -> Callable[
+def activity(
+    *,
+    name: typing.Optional[str] = None,
+    kind: typing.Optional[str] = None,
+    namespace: typing.Optional[str] = None,
+    version: int = 1,
+) -> Callable[
     [Callable[typing.Concatenate[ActivityExecutionContext, P], Awaitable[T]]],
     ActivityDefinition[P, T],
 ]:
@@ -63,8 +70,14 @@ def activity(*, name: typing.Optional[str] = None, kind: str = "activity") -> Ca
         if not inspect.iscoroutinefunction(func):
             raise TypeError("activity implementations must be async functions")
         _validate_context_parameter(func)
-        operation = models.StepOperation(kind=kind, name=name or func.__name__)
-        return ActivityDefinition(func=func, name=operation.name, kind=operation.kind)
+        operation = models.StepOperation(
+            kind=_contract_kind(func, kind, namespace, "activity"),
+            name=name or func.__name__,
+            version=version,
+        )
+        return ActivityDefinition(
+            func, operation.name, operation.kind, operation.version
+        )
 
     return decorate
 
@@ -89,6 +102,7 @@ class StreamableActivityDefinition(typing.Generic[P, T]):
     ]
     name: str
     kind: str = "activity"
+    version: int = 1
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         context = _CURRENT_CONTEXT.get()
@@ -99,7 +113,7 @@ class StreamableActivityDefinition(typing.Generic[P, T]):
         arguments = dict(bound.arguments)
         arguments.pop(next(iter(arguments)))
         operation = models.StepOperation(
-            kind=self.kind, name=self.name, input=arguments
+            kind=self.kind, name=self.name, input=arguments, version=self.version
         )
 
         async def invoke(
@@ -117,7 +131,11 @@ class StreamableActivityDefinition(typing.Generic[P, T]):
 
 
 def streamable_activity(
-    *, name: typing.Optional[str] = None, kind: str = "activity"
+    *,
+    name: typing.Optional[str] = None,
+    kind: typing.Optional[str] = None,
+    namespace: typing.Optional[str] = None,
+    version: int = 1,
 ) -> Callable[
     [
         Callable[
@@ -136,10 +154,52 @@ def streamable_activity(
         if not inspect.isasyncgenfunction(func):
             raise TypeError("streamable activities must be async generator functions")
         _validate_context_parameter(func)
-        operation = models.StepOperation(kind=kind, name=name or func.__name__)
-        return StreamableActivityDefinition(func, operation.name, operation.kind)
+        operation = models.StepOperation(
+            kind=_contract_kind(func, kind, namespace, "activity"),
+            name=name or func.__name__,
+            version=version,
+        )
+        return StreamableActivityDefinition(
+            func, operation.name, operation.kind, operation.version
+        )
 
     return decorate
+
+
+def _module_name(func: Callable[..., object]) -> str:
+    if not func.__module__.startswith("_runner_workflow_"):
+        return func.__module__
+    module_name = func.__globals__.get("__runner_contract_module__")
+    if isinstance(module_name, str):
+        return module_name
+    source = inspect.getsourcefile(func)
+    if source is None:
+        raise ValueError("workflow source must be discoverable")
+    return Path(source).stem
+
+
+def _contract_kind(
+    func: Callable[..., object],
+    kind: typing.Optional[str],
+    namespace: typing.Optional[str],
+    default: str,
+) -> str:
+    """Generate local contract names without using transient loader module IDs."""
+    if kind is not None and namespace is not None:
+        raise ValueError("kind and namespace are mutually exclusive")
+    if kind is not None:
+        if not kind.strip():
+            raise ValueError("kind must not be empty")
+        return kind
+    if namespace is None:
+        return default
+    if not all(part.isidentifier() for part in namespace.split(".")):
+        raise ValueError("namespace must contain dot-separated identifiers")
+    if not func.__qualname__.isidentifier():
+        raise ValueError(
+            "generated kinds require a module-level callable or explicit kind"
+        )
+    return f"{namespace}.{_module_name(func)}.{func.__qualname__}"
 
 
 def _validate_context_parameter(func: Callable[..., object]) -> None:
@@ -155,6 +215,8 @@ def _validate_context_parameter(func: Callable[..., object]) -> None:
 class WorkflowDefinition(typing.Generic[P, T]):
     func: Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]
     name: str
+    kind: str = "workflow"
+    version: int = 1
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         context = _CURRENT_CONTEXT.get()
@@ -165,7 +227,11 @@ class WorkflowDefinition(typing.Generic[P, T]):
         arguments = dict(bound.arguments)
         arguments.pop(next(iter(arguments)))
         configuration = models.Workflow(
-            id="binding", definition_ref=self.name, input=arguments
+            id="binding",
+            definition_ref=self.name,
+            input=arguments,
+            kind=self.kind,
+            version=self.version,
         )
         source = inspect.getsourcefile(self.func)
         root = context.project.workflows_path.resolve()
@@ -176,7 +242,11 @@ class WorkflowDefinition(typing.Generic[P, T]):
                 raise ValueError("workflow source must remain inside the workspace")
             target = f"python:{self.func.__module__}"
         handle = await context.spawn_workflow(
-            target, self.func.__qualname__, input=configuration.input
+            target,
+            self.func.__qualname__,
+            input=configuration.input,
+            kind=self.kind,
+            version=self.version,
         )
         outcomes = await context.join_workflows([handle])
         outcome = outcomes[0]
@@ -185,7 +255,13 @@ class WorkflowDefinition(typing.Generic[P, T]):
         return typing.cast(T, outcome.result)
 
 
-def workflow(*, name: typing.Optional[str] = None) -> Callable[
+def workflow(
+    *,
+    name: typing.Optional[str] = None,
+    kind: typing.Optional[str] = None,
+    namespace: typing.Optional[str] = None,
+    version: int = 1,
+) -> Callable[
     [Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]],
     WorkflowDefinition[P, T],
 ]:
@@ -215,14 +291,18 @@ def workflow(*, name: typing.Optional[str] = None) -> Callable[
             raise TypeError("workflow inputs must be named parameters")
         if name is not None and not name.strip():
             raise ValueError("workflow name must not be empty")
-        module_name = func.__module__
-        if module_name.startswith("_runner_workflow_"):
-            source = inspect.getsourcefile(func)
-            if source is None:
-                raise ValueError("workflow source must be discoverable")
-            module_name = Path(source).stem
+        module_name = _module_name(func)
+        contract = models.Workflow(
+            id="declaration",
+            definition_ref="declaration",
+            kind=_contract_kind(func, kind, namespace, "workflow"),
+            version=version,
+        )
         return WorkflowDefinition(
-            func, name if name is not None else f"{module_name}.{func.__qualname__}"
+            func,
+            name if name is not None else f"{module_name}.{func.__qualname__}",
+            contract.kind,
+            contract.version,
         )
 
     return decorate

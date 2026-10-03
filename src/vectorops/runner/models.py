@@ -28,6 +28,8 @@ class Workflow(_JsonModel):
     id: str = pydantic.Field(min_length=1)
     definition_ref: str = pydantic.Field(min_length=1)
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+    kind: str = pydantic.Field(default="workflow", min_length=1)
+    version: int = pydantic.Field(default=1, ge=1, strict=True)
 
 
 class StepOperation(_JsonModel):
@@ -36,6 +38,7 @@ class StepOperation(_JsonModel):
     kind: str = pydantic.Field(min_length=1)
     name: str = pydantic.Field(min_length=1)
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+    version: int = pydantic.Field(default=1, ge=1, strict=True)
 
     @pydantic.field_validator("kind", mode="after")
     @classmethod

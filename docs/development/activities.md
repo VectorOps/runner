@@ -24,6 +24,32 @@ The caller supplies only business arguments.
 The executor injects the context, and recorded inputs exclude it.
 Implementations without a first positional context parameter are rejected.
 
+## Payload contracts
+
+Both `activity` and `streamable_activity` accept `kind`, `version`, and `namespace`.
+The operation's `kind` selects its input, streaming state, and final result contract.
+Its positive integer `version` defaults to `1` and is recorded before execution, including failed operations.
+The `name` identifies the implementation, not the payload schema or invocation.
+
+```python
+@activity(kind="customer.acme.prepare", version=2)
+async def prepare(ctx: ActivityExecutionContext, value: str) -> dict[str, str]:
+    return {"value": value}
+```
+
+Use explicit stable kinds for published contracts; internal code changes do not require a contract version change.
+Alternatively, `namespace="customer.acme"` generates `customer.acme.<module>.<callable>`.
+Workspace module names use the path relative to the workflows directory, without `.py`, with dots replacing path separators.
+Generated kinds require module-level callables and remain stable across loader instances, but change when files or functions are renamed.
+Explicit `kind` and `namespace` are mutually exclusive.
+Namespace components must be identifiers separated by dots.
+Namespace owners allocate contract names; generation alone cannot guarantee uniqueness across organizations.
+Use `vocode` for runner-provided contracts and an organization/project namespace for custom contracts.
+Without either option, the existing generic `activity` kind remains unchanged.
+Older operation records without a version load as version `1`.
+When replay reaches an activity, it rejects a changed operation kind or version rather than interpreting an incompatible recorded payload.
+Reusing a completed child result does not execute or validate that child's internal activities.
+
 ## Context fields
 
 | Field | Meaning |
@@ -66,3 +92,5 @@ async def build(
 
 Streaming implementations receive the same explicit context contract.
 All snapshots retain one step identity, and interrupted recovery restarts the generator with that identity.
+Each `delta()` replaces the full streaming state; it is not an append or patch.
+An LLM activity must accumulate provider fragments before yielding a snapshot.

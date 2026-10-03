@@ -63,6 +63,9 @@ class ExecutionSession:
         reporter: typing.Optional[CheckpointReporter] = None,
         execution_id: typing.Optional[str] = None,
         event_sink: typing.Optional[StepEventSink] = None,
+        configure_workflow: typing.Optional[
+            Callable[[models.Workflow], Awaitable[models.Workflow]]
+        ] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -84,6 +87,7 @@ class ExecutionSession:
         self.reporter = reporter
         self.execution_id = execution_id
         self.event_sink = event_sink
+        self.configure_workflow = configure_workflow
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -374,6 +378,11 @@ class ExecutionSession:
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
         return step
+
+    async def prepare_workflow(self, workflow: models.Workflow) -> models.Workflow:
+        if self.configure_workflow is None:
+            return workflow
+        return await self.configure_workflow(workflow)
 
     def start_child(
         self, workflow: models.Workflow

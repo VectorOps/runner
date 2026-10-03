@@ -69,6 +69,15 @@ class WorkflowRunner:
                         definition_ref=f"{workflow_name}:{callable_name}",
                         input={} if input is None else input,
                     )
+                    configuration = await WorkflowExecutor(
+                        project,
+                        SQLiteHistory(
+                            project.data_path
+                            / "executions"
+                            / execution_id
+                            / "history.sqlite3"
+                        ),
+                    ).configure(configuration)
                 else:
                     database = await self._database(project, execution_id)
                     record = await database.get_execution()
@@ -207,9 +216,12 @@ class WorkflowRunner:
                 definition_ref=f"{workflow_name}:{callable_name}",
                 input={} if input is None else input,
             )
-        completion = await WorkflowExecutor(
+        executor = WorkflowExecutor(
             project, history, reporter, execution_id, self.event_sink
-        ).execute(
+        )
+        if continue_from_step_id is None:
+            configuration = await executor.configure(configuration)
+        completion = await executor.execute(
             configuration,
             continue_from_step_id=continue_from_step_id,
             child_heads=child_heads,

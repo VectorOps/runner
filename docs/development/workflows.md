@@ -30,6 +30,23 @@ Workspace roots can remain undecorated async functions or use the same decorator
 Importable library functions are resolved by the executor through `python:<module>:<function>` references.
 Raw async helpers remain ordinary Python calls and do not create child histories.
 
+## Workflow contracts
+
+The workflow decorator accepts the same `kind`, `namespace`, and positive `version` options as [activity contracts](activities.md#payload-contracts).
+Root and child configurations persist their contract metadata before executing.
+The default workflow kind is `workflow`, and the default version is `1`, including older records without these fields.
+For example, `@workflow(kind="customer.acme.chat.turn", version=2)` declares the contract for the workflow input and final result.
+Changing a recorded workflow's declaration is rejected during replay.
+Structural operation kinds remain `workflow.spawn`, `workflow.join`, `workflow.complete`, and `workflow.resume`.
+A spawn references the independently stored child configuration containing its kind and version.
+
+An LLM turn can be a child workflow containing model invocation and tool execution activities, returning the last assistant message.
+A chat workflow can repeatedly accept input and call that turn workflow.
+Clients can flatten child activity histories for chat rendering while retaining workflow identity for grouping.
+Render the returned final message only once, not again for join or completion bookkeeping.
+Select specialized renderers by operation kind and version; unknown contracts can display the operation name, input, current state or result, and structured error.
+Refreshing a step snapshot updates its existing entry rather than appending another message.
+
 ## Concurrent activities and children
 
 ```python
