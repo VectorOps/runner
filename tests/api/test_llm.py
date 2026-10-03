@@ -29,6 +29,7 @@ class FakeProvider:
     def __init__(self, responses: list[connect.AssistantMessage]) -> None:
         self.responses = responses
         self.requests: list[connect.GenerateRequest] = []
+        self.settings: list[llm.Settings] = []
         self.step_ids: list[str] = []
         self.closed = 0
         self.started = asyncio.Event()
@@ -42,6 +43,7 @@ class FakeProvider:
     ) -> AsyncGenerator[StreamItem, None]:
         assert c._CURRENT_CONTEXT.get() is None
         self.requests.append(request.model_copy(deep=True))
+        self.settings.append(settings.model_copy(deep=True))
         self.step_ids.append(context.step_id)
         try:
             yield c.delta({"text": "partial"})
@@ -85,6 +87,7 @@ async def test_history_reconstructs_without_growing_inputs(
         step.operation.input
         for step in history.path(first.id)
         if isinstance(step.operation, models.StepOperation)
+        and step.operation.kind == "llm.generate"
     ]
     assert len(inputs) == 2
     assert all(set(item) == {"instance", "request_digest"} for item in inputs)
@@ -212,7 +215,9 @@ async def test_compaction_is_recorded_and_reconstructed(history: MemoryHistory) 
         for step in history.path(result.id)
         if step.operation.kind != "workflow.resume"
     ] == [
+        "configuration.get",
         "llm.generate",
+        "configuration.get",
         "llm.compact",
         "llm.generate",
         "workflow.complete",
@@ -464,6 +469,7 @@ async def test_storage_growth_is_linear(history: MemoryHistory) -> None:
         step.operation.input
         for step in history.path(first.id)
         if isinstance(step.operation, models.StepOperation)
+        and step.operation.kind == "llm.generate"
     ]
     assert len(inputs) == 20
     assert len({len(str(value)) for value in inputs}) == 1

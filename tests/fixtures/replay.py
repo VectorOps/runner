@@ -19,6 +19,7 @@ async def run(
     head: Optional[str] = None,
     *,
     mailbox: Optional[Mailbox] = None,
+    workspace: Optional[Path] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -39,7 +40,9 @@ async def run(
         mailbox=mailbox,
     )
     context = WorkflowExecutionContext(
-        RunnerProject(Path.cwd(), RunnerConfig()), workflow, session
+        RunnerProject(Path.cwd() if workspace is None else workspace, RunnerConfig()),
+        workflow,
+        session,
     )
     token = composition._CURRENT_CONTEXT.set(context)
     try:

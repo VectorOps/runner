@@ -34,6 +34,7 @@ class RunnerConfig(pydantic.BaseModel):
     logging: diagnostics.LogConfig = pydantic.Field(
         default_factory=diagnostics.LogConfig
     )
+    components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
 
     @pydantic.field_validator("workflows_directory", "data_directory", mode="after")
     @classmethod

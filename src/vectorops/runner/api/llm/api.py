@@ -5,6 +5,7 @@ from contextlib import aclosing, contextmanager
 import asyncio
 import hashlib
 import json
+import typing
 from typing import Optional
 
 import connect
@@ -12,6 +13,10 @@ import pydantic
 
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm import models, provider, tools as tool_api
+from vectorops.runner.api.llm.configuration import (
+    explicit_options,
+    resolve_configuration,
+)
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
 
@@ -28,21 +33,27 @@ class LLM:
     def __init__(
         self,
         identity: str,
-        settings: models.Settings,
+        settings: Optional[
+            typing.Union[models.Settings, models.SettingsOverrides]
+        ] = None,
         *,
         system_prompt: Optional[str] = None,
         backend: Optional[provider.Provider] = None,
-        compaction: Optional[models.Compaction] = None,
+        compaction: typing.Union[
+            models.Compaction, None, models.Unset
+        ] = models.Unset.VALUE,
+        **overrides: typing.Unpack[models.SettingsParameters],
     ) -> None:
         context = c.workflow_context()
         if not identity.strip():
             raise ValueError("LLM identity must not be blank")
         self._context = context
         self._identity = identity
-        self._settings = settings.model_copy(deep=True)
+        self._overrides = explicit_options(settings, compaction=compaction, **overrides)
+        self._settings: Optional[models.Settings] = None
         self._system_prompt = system_prompt
         self._backend = backend if backend is not None else provider.ConnectProvider()
-        self._compaction = compaction.model_copy(deep=True) if compaction else None
+        self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
         self._usage = connect.Usage()
         self._busy = False
@@ -63,6 +74,23 @@ class LLM:
             yield
         finally:
             self._busy = False
+
+    @property
+    def settings(self) -> models.Settings:
+        self._check_context()
+        if self._settings is None:
+            raise RuntimeError(
+                "LLM settings are resolved at the first generation; use await resolve_settings() to read them separately"
+            )
+        return self._settings.model_copy(deep=True)
+
+    async def _configure(self) -> models.Configuration:
+        resolved = await resolve_configuration(self._overrides)
+        self._settings = models.Settings.model_validate(
+            resolved.model_dump(exclude={"compaction", "max_rounds"})
+        )
+        self._compaction = resolved.compaction
+        return resolved
 
     @property
     def history(self) -> tuple[connect.Message, ...]:
@@ -88,6 +116,7 @@ class LLM:
     def _request(
         self, definitions: Sequence[connect.ToolSpec]
     ) -> connect.GenerateRequest:
+        assert self._settings is not None
         return connect.GenerateRequest(
             messages=[message.model_copy(deep=True) for message in self._messages],
             system_prompt=self._system_prompt,
@@ -98,6 +127,7 @@ class LLM:
         )
 
     def _input(self, request: connect.GenerateRequest) -> dict[str, pydantic.JsonValue]:
+        assert self._settings is not None
         return {
             "instance": self._identity,
             "request_digest": _digest(
@@ -114,6 +144,7 @@ class LLM:
         async def invoke(
             ctx: ActivityExecutionContext,
         ) -> AsyncGenerator[StreamItem, None]:
+            assert self._settings is not None
             async with aclosing(
                 self._backend.stream(ctx, self._settings, request)
             ) as stream:
@@ -142,25 +173,37 @@ class LLM:
         self, *, tools: Sequence[connect.ToolSpec] = ()
     ) -> connect.AssistantMessage:
         with self._mutation():
+            await self._configure()
             await self._maybe_compact()
             return await self._generate(tools)
 
     async def run(
-        self, *, tools: Sequence[tool_api.ToolBinding] = (), max_rounds: int = 100
+        self,
+        *,
+        tools: Sequence[tool_api.ToolBinding] = (),
+        max_rounds: Optional[int] = None,
     ) -> connect.AssistantMessage:
         """Run parallel tool rounds, committing results in model-call order.
 
         Infrastructure failures propagate after all calls settle; no partial
         round is appended to the conversation. Recorded successes remain reusable.
         """
-        if max_rounds < 1:
+        if max_rounds is not None and (
+            isinstance(max_rounds, bool)
+            or not isinstance(max_rounds, int)
+            or max_rounds < 1
+        ):
             raise ValueError("max_rounds must be positive")
         bindings = {tool.definition.name: tool for tool in tools}
         if len(bindings) != len(tools):
             raise ValueError("duplicate tool names")
         definitions = [tool.definition for tool in tools]
         with self._mutation():
-            for _ in range(max_rounds):
+            resolved = await self._configure()
+            limit = resolved.max_rounds if max_rounds is None else max_rounds
+            for index in range(limit):
+                if index:
+                    await self._configure()
                 await self._maybe_compact()
                 response = await self._generate(definitions)
                 calls = [
@@ -185,7 +228,7 @@ class LLM:
                     for result in results
                     if isinstance(result, connect.ToolResultMessage)
                 )
-        raise models.RoundLimitError(f"LLM exceeded max_rounds={max_rounds}")
+        raise models.RoundLimitError(f"LLM exceeded max_rounds={limit}")
 
     async def _maybe_compact(self) -> None:
         """Compact an old prefix without splitting assistant/tool exchanges."""
@@ -214,6 +257,7 @@ class LLM:
 
     @c.activity_wrapper(kind="llm.compact", version=1)
     async def _compact(self, call: c.ActivityCall, cut: int, instruction: str) -> None:
+        assert self._settings is not None
         prefix: list[pydantic.JsonValue] = [
             message.model_dump(mode="json") for message in self._messages[:cut]
         ]
