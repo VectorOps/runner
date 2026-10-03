@@ -12,6 +12,7 @@ import typing
 from vectorops.runner import models
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
+from vectorops.runner.runner import history_query as queries
 
 T = typing.TypeVar("T")
 
@@ -282,6 +283,80 @@ class SQLiteHistory:
                         raise
 
         await _offload(export)
+
+    async def query(self, query: queries.HistoryQuery) -> queries.HistoryPage:
+        """Read a bounded window; cursors freeze membership, not mutable snapshots."""
+
+        def read() -> queries.HistoryPage:
+            with closing(self._connect_readonly()) as connection:
+                execution = self._execution(connection)
+                if execution.id != query.execution_id:
+                    raise ValueError("execution identity mismatch")
+                cursor = (
+                    queries.HistoryCursor.decode(query.cursor, query.scope())
+                    if query.cursor
+                    else None
+                )
+                boundary = (
+                    cursor.boundary
+                    if cursor
+                    else connection.execute(
+                        "SELECT COALESCE(MAX(rowid), 0) FROM steps"
+                    ).fetchone()[0]
+                )
+                clauses = ["s.rowid <= ?"]
+                values: list[typing.Union[str, int]] = [boundary]
+                if cursor:
+                    clauses.append(
+                        "s.rowid < ?" if query.selection == "tail" else "s.rowid > ?"
+                    )
+                    values.append(cursor.position)
+                workflow_id = query.workflow_id
+                if workflow_id is None and not query.include_children:
+                    workflow_id = execution.root_workflow_id
+                if workflow_id is not None:
+                    clauses.append("s.workflow_id = ?")
+                    values.append(workflow_id)
+                if query.step_ids is not None:
+                    clauses.append(
+                        "s.id IN (" + ",".join("?" for _ in query.step_ids) + ")"
+                    )
+                    values.extend(query.step_ids)
+                prefix = ""
+                if query.head_step_id is not None:
+                    self._step(connection, query.head_step_id)
+                    prefix = "WITH RECURSIVE path(id, previous_step_id) AS (SELECT id, previous_step_id FROM steps WHERE id = ? UNION SELECT s.id, s.previous_step_id FROM steps s JOIN path p ON s.id = p.previous_step_id) "
+                    clauses.append("s.id IN (SELECT id FROM path)")
+                    values.insert(0, query.head_step_id)
+                direction = "DESC" if query.selection == "tail" else "ASC"
+                rows = connection.execute(
+                    prefix
+                    + "SELECT s.rowid, s.payload FROM steps s WHERE "
+                    + " AND ".join(clauses)
+                    + " ORDER BY s.rowid "
+                    + direction
+                    + " LIMIT ?",
+                    [*values, query.limit + 1],
+                ).fetchall()
+                selected = rows[: query.limit]
+                next_cursor = None
+                if len(rows) > query.limit:
+                    next_cursor = queries.HistoryCursor(
+                        scope=query.scope(), boundary=boundary, position=selected[-1][0]
+                    ).encode()
+                items = [
+                    queries.HistoryItem(
+                        position=row[0],
+                        step=models.WorkflowStep.model_validate_json(row[1]),
+                    )
+                    for row in selected
+                ]
+                items.sort(key=lambda item: item.position)
+                return queries.HistoryPage(
+                    execution_id=execution.id, items=items, next_cursor=next_cursor
+                )
+
+        return await _offload(read)
 
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))

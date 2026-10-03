@@ -23,6 +23,7 @@ class CachedHistory:
         cache_size: int = 256,
         max_pending: int = 64,
         flush_interval: float = 0.25,
+        write_through: bool = False,
     ) -> None:
         if cache_size < 1 or max_pending < 1:
             raise ValueError("cache and pending limits must be positive")
@@ -32,6 +33,7 @@ class CachedHistory:
         self.cache_size = cache_size
         self.max_pending = max_pending
         self.flush_interval = flush_interval
+        self.write_through = write_through
         self._workflows: OrderedDict[str, models.Workflow] = OrderedDict()
         self._steps: OrderedDict[str, models.WorkflowStep] = OrderedDict()
         self._pending: dict[str, models.WorkflowStep] = {}
@@ -115,7 +117,7 @@ class CachedHistory:
             ):
                 raise ValueError("step identity and links cannot change")
             snapshot = step.model_copy(deep=True)
-            if snapshot.outcome.kind == "streaming":
+            if snapshot.outcome.kind == "streaming" and not self.write_through:
                 self._pending[step.id] = snapshot
                 self._cache_step(snapshot)
                 if len(self._pending) >= self.max_pending:

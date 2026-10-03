@@ -139,14 +139,20 @@ class WorkflowExecutor:
             return self._entry_point(
                 importlib.import_module(module_name), callable_name
             )
-        relative_path = Path(workflow_name)
+        workspace_file = workflow_name.startswith("workspace:")
+        base = self.project.root if workspace_file else self.project.workflows_path
+        relative_path = Path(
+            workflow_name.removeprefix("workspace:")
+            if workspace_file
+            else workflow_name
+        )
         if relative_path.suffix == "":
             relative_path = relative_path.with_suffix(".py")
         if relative_path.is_absolute() or relative_path.suffix != ".py":
             raise ValueError("workflow must be a relative Python file")
-        path = (self.project.workflows_path / relative_path).resolve()
-        if not path.is_relative_to(self.project.workflows_path.resolve()):
-            raise ValueError("workflow must remain inside the workflows directory")
+        path = (base / relative_path).resolve()
+        if not path.is_relative_to(base.resolve()):
+            raise ValueError("workflow must remain inside its source directory")
         if not path.is_file():
             raise FileNotFoundError(f"workflow file does not exist: {path}")
         module_name = f"_runner_workflow_{uuid4().hex}"
@@ -155,7 +161,7 @@ class WorkflowExecutor:
             raise ImportError(f"cannot load workflow file: {path}")
         module = importlib.util.module_from_spec(spec)
         module.__dict__["__runner_contract_module__"] = (
-            path.relative_to(self.project.workflows_path.resolve())
+            path.relative_to(base.resolve())
             .with_suffix("")
             .as_posix()
             .replace("/", ".")

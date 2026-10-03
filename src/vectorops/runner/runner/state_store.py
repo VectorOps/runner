@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 from pathlib import Path
 import os
 import tempfile
 import typing
 
 from vectorops.runner.runner import state
+from vectorops.runner.runner.locking import FileLease
 
 
 class RunnerStateStore:
@@ -17,6 +17,7 @@ class RunnerStateStore:
         self.data_path = data_path
         self.path = data_path / "runner-state.json"
         self._descriptor: typing.Optional[int] = None
+        self._lease = FileLease(data_path / "runner.lock")
 
     async def load(self) -> state.RunnerState:
         def read() -> state.RunnerState:
@@ -41,11 +42,12 @@ class RunnerStateStore:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(name, self.path)
-                directory = os.open(self.data_path, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                if os.name != "nt":
+                    directory = os.open(self.data_path, os.O_RDONLY)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
             finally:
                 if os.path.exists(name):
                     os.unlink(name)
@@ -60,15 +62,8 @@ class RunnerStateStore:
     async def __aenter__(self) -> typing.Self:
         def acquire() -> None:
             self.data_path.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(
-                self.data_path / "runner.lock", os.O_CREAT | os.O_RDWR, 0o600
-            )
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                os.close(descriptor)
-                raise RuntimeError("another runner owns this project") from exc
-            self._descriptor = descriptor
+            self._lease.acquire()
+            self._descriptor = self._lease.descriptor
 
         task = asyncio.create_task(asyncio.to_thread(acquire))
         try:
@@ -81,6 +76,5 @@ class RunnerStateStore:
 
     async def __aexit__(self, *args: object) -> None:
         if self._descriptor is not None:
-            descriptor = self._descriptor
             self._descriptor = None
-            await asyncio.to_thread(os.close, descriptor)
+            await asyncio.to_thread(self._lease.release)

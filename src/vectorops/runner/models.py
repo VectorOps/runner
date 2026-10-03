@@ -198,6 +198,7 @@ class WorkflowStep(_JsonModel):
     operation: WorkflowOperation
     outcome: StepOutcome
     deferred_delivery: bool = False
+    revision: int = pydantic.Field(default=1, ge=1, strict=True)
 
     @pydantic.model_validator(mode="after")
     def validate_relationships(self) -> typing.Self:

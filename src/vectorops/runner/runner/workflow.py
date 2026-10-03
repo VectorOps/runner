@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from pathlib import Path
 import shutil
 import typing
@@ -23,6 +25,7 @@ from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection
+from vectorops.runner.runner import history_query
 from vectorops.runner.runner.state_store import RunnerStateStore
 
 
@@ -33,10 +36,12 @@ class WorkflowRunner:
         history: typing.Optional[WorkflowHistory] = None,
         *,
         event_sink: typing.Optional[StepEventSink] = None,
+        state_store: typing.Optional[RunnerStateStore] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
         self.event_sink = event_sink
+        self._state_store = state_store
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
 
@@ -77,6 +82,14 @@ class WorkflowRunner:
             if not task.done() and not task.cancelling():
                 task.cancel()
 
+    @asynccontextmanager
+    async def _writer(self, project: RunnerProject) -> AsyncIterator[RunnerStateStore]:
+        if self._state_store is not None:
+            yield self._state_store
+        else:
+            async with RunnerStateStore(project.data_path) as store:
+                yield store
+
     async def _execute(
         self,
         workflow_name: str,
@@ -95,7 +108,7 @@ class WorkflowRunner:
         ):
             raise ValueError("new execution ID requires a new persistent execution")
         if self.history is None:
-            async with RunnerStateStore(project.data_path) as store:
+            async with self._writer(project) as store:
                 if execution_id is None:
                     if continue_from_step_id is not None:
                         raise ValueError(
@@ -150,7 +163,10 @@ class WorkflowRunner:
                     history_path.is_file
                 ):
                     raise FileNotFoundError("execution history is missing")
-                async with CachedHistory(SQLiteHistory(history_path)) as history:
+                async with CachedHistory(
+                    SQLiteHistory(history_path),
+                    write_through=self._state_store is not None,
+                ) as history:
                     database = SQLiteHistory(history_path)
                     if configuration is not None:
                         await history.save_workflow(configuration)
@@ -319,6 +335,46 @@ class WorkflowRunner:
         self, execution_id: typing.Optional[str] = None
     ) -> inspection.ExecutionStatus:
         return await (await self._selected_database(execution_id)).inspect_execution()
+
+    async def query_history(
+        self, query: history_query.HistoryQuery
+    ) -> history_query.HistoryPage:
+        return await (await self._selected_database(query.execution_id)).query(query)
+
+    async def execution_ids(
+        self, *, after: typing.Optional[str] = None, limit: int = 100
+    ) -> list[str]:
+        project = await RunnerProject.open(self.path)
+
+        def listing() -> list[str]:
+            directory = project.data_path / "executions"
+            if not directory.exists():
+                return []
+            return sorted(
+                path.name
+                for path in directory.iterdir()
+                if (path / "history.sqlite3").is_file()
+                and (after is None or path.name > after)
+            )[:limit]
+
+        return await asyncio.to_thread(listing)
+
+    async def resolve_file(self, filename: str) -> str:
+        """Translate a workspace-relative file to the executor's workflow reference."""
+        project = await RunnerProject.open(self.path)
+
+        def resolve() -> str:
+            relative = Path(filename)
+            if relative.is_absolute() or relative.suffix != ".py":
+                raise ValueError("file must be a workspace-relative Python filename")
+            path = (project.root / relative).resolve()
+            if not path.is_relative_to(project.root):
+                raise ValueError("file must remain inside the workspace")
+            if not path.is_file():
+                raise FileNotFoundError(filename)
+            return "workspace:" + path.relative_to(project.root).as_posix()
+
+        return await asyncio.to_thread(resolve)
 
     async def export_execution(
         self, output: Path, execution_id: typing.Optional[str] = None

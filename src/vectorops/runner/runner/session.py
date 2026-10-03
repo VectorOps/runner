@@ -402,6 +402,8 @@ class ExecutionSession:
     async def update(self, step: models.WorkflowStep) -> None:
         if step.workflow_id != self.workflow.id:
             raise ValueError("step belongs to another workflow")
+        previous = await self.history.get_step(step.id)
+        step = step.model_copy(update={"revision": previous.revision + 1})
         await self.history.update_step(step)
         self._emit(step)
         if self.reporter is not None:

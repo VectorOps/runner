@@ -10,6 +10,7 @@ import typing
 import pydantic
 
 from vectorops.runner.runner.workflow import WorkflowRunner
+from vectorops.runner.control import daemon, provisioning
 
 
 class Arguments(argparse.Namespace):
@@ -20,6 +21,12 @@ class Arguments(argparse.Namespace):
     input: dict[str, pydantic.JsonValue]
     execution_id: typing.Optional[str]
     output: Path
+    daemon_command: str
+    port: int
+    mode: typing.Literal["cancel", "drain"]
+    host: str
+    token_stdin: bool
+    token_file: typing.Optional[Path]
 
 
 def _input(value: str) -> dict[str, pydantic.JsonValue]:
@@ -74,10 +81,66 @@ def parser() -> argparse.ArgumentParser:
                 type=Path,
                 help="new JSONL file; existing files are not overwritten",
             )
+    daemon_parser = commands.add_parser(
+        "daemon", help="control a workspace runner daemon"
+    )
+    daemon_commands = daemon_parser.add_subparsers(dest="daemon_command", required=True)
+    serve = daemon_commands.add_parser(
+        "serve", help="serve authenticated loopback TCP in the foreground"
+    )
+    serve.add_argument(
+        "--port", type=int, default=0, help="loopback port (default: OS-assigned)"
+    )
+    status = daemon_commands.add_parser(
+        "status", help="print authenticated daemon status as JSON"
+    )
+    stop = daemon_commands.add_parser("stop", help="shut down the workspace daemon")
+    stop.add_argument("--mode", choices=("cancel", "drain"), default="cancel")
+    connect = daemon_commands.add_parser(
+        "connect", help="attach and print live events as JSONL"
+    )
+    for command in (serve, status, stop, connect):
+        tokens = command.add_mutually_exclusive_group(required=True)
+        tokens.add_argument(
+            "--token-stdin",
+            action="store_true",
+            help="read one bearer token line from piped stdin",
+        )
+        tokens.add_argument(
+            "--token-file",
+            type=Path,
+            help="read bearer token from a harness-protected file",
+        )
+        if command is not serve:
+            command.add_argument(
+                "--port",
+                type=int,
+                required=True,
+                help="daemon or SSH-forwarded loopback port",
+            )
+            command.add_argument(
+                "--host", choices=("127.0.0.1", "::1"), default="127.0.0.1"
+            )
+    daemon_parser.set_defaults(port=0, mode="cancel", host="127.0.0.1")
     return result
 
 
 async def dispatch(args: Arguments) -> None:
+    if args.command == "daemon":
+        if not (0 if args.daemon_command == "serve" else 1) <= args.port <= 65535:
+            raise ValueError("invalid loopback port")
+        token = await provisioning.read_token(
+            token_stdin=args.token_stdin, token_file=args.token_file
+        )
+        await daemon.dispatch(
+            args.project,
+            args.daemon_command,
+            token=token,
+            port=args.port,
+            host=args.host,
+            mode=args.mode,
+        )
+        return
     runner = WorkflowRunner(args.project)
     if args.command == "start":
         result = await runner.run(
