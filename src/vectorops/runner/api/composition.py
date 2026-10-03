@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import wraps
 import inspect
 from pathlib import Path
 import typing
@@ -20,9 +21,18 @@ from vectorops.runner.runner import streaming
 
 P = typing.ParamSpec("P")
 T = typing.TypeVar("T", bound=pydantic.JsonValue)
+R = typing.TypeVar("R")
 _CURRENT_CONTEXT: ContextVar[typing.Optional[WorkflowExecutionContext]] = ContextVar(
     "workflow_context", default=None
 )
+
+
+def workflow_context() -> WorkflowExecutionContext:
+    """Return the active workflow context, rejecting calls from activity code."""
+    context = _CURRENT_CONTEXT.get()
+    if context is None:
+        raise RuntimeError("operation requires an active workflow context")
+    return context
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,125 @@ def _module_name(func: Callable[..., object]) -> str:
     if source is None:
         raise ValueError("workflow source must be discoverable")
     return Path(source).stem
+
+
+class ActivityCall:
+    """One explicit recorded operation inside an always-executed wrapper."""
+
+    def __init__(
+        self, context: WorkflowExecutionContext, contract: models.StepOperation
+    ) -> None:
+        self._context = context
+        self._contract = contract
+        self._submitted = False
+        self._closed = False
+
+    def _operation(self, input: dict[str, pydantic.JsonValue]) -> models.StepOperation:
+        if self._closed:
+            raise RuntimeError("activity helper is no longer active")
+        if _CURRENT_CONTEXT.get() is not self._context:
+            raise RuntimeError("activity helper requires its workflow context")
+        if self._submitted:
+            raise RuntimeError("activity wrapper permits only one submission")
+        operation = models.StepOperation(
+            kind=self._contract.kind,
+            name=self._contract.name,
+            version=self._contract.version,
+            input=input,
+        )
+        self._submitted = True
+        return operation
+
+    async def run(
+        self,
+        *,
+        input: dict[str, pydantic.JsonValue],
+        invoke: Callable[[ActivityExecutionContext], Awaitable[T]],
+    ) -> T:
+        operation = self._operation(input)
+
+        async def isolated(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+            token = _CURRENT_CONTEXT.set(None)
+            try:
+                return await invoke(ctx)
+            finally:
+                _CURRENT_CONTEXT.reset(token)
+
+        return typing.cast(T, await self._context.run_activity(operation, isolated))
+
+    async def stream(
+        self,
+        *,
+        input: dict[str, pydantic.JsonValue],
+        invoke: Callable[
+            [ActivityExecutionContext], AsyncGenerator[streaming.StreamItem, None]
+        ],
+    ) -> pydantic.JsonValue:
+        operation = self._operation(input)
+
+        async def isolated(
+            ctx: ActivityExecutionContext,
+        ) -> AsyncGenerator[streaming.StreamItem, None]:
+            token = _CURRENT_CONTEXT.set(None)
+            try:
+                async with aclosing(invoke(ctx)) as items:
+                    async for item in items:
+                        yield item
+            finally:
+                _CURRENT_CONTEXT.reset(token)
+
+        return await self._context.run_streaming_activity(operation, isolated)
+
+
+def activity_wrapper(
+    *,
+    name: typing.Optional[str] = None,
+    kind: typing.Optional[str] = None,
+    namespace: typing.Optional[str] = None,
+    version: int = 1,
+) -> Callable[[Callable[..., Awaitable[R]]], Callable[..., Awaitable[R]]]:
+    """Inject an ActivityCall without recording or skipping the wrapper body.
+
+    The helper is the first parameter of a free function, or follows ``self``
+    in an instance method. Only explicit helper inputs and results are recorded.
+    """
+
+    def decorate(func: Callable[..., Awaitable[R]]) -> Callable[..., Awaitable[R]]:
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError("activity wrappers must be async functions")
+        parameters = list(inspect.signature(func).parameters.values())
+        offset = int(bool(parameters) and parameters[0].name == "self")
+        if len(parameters) <= offset or any(
+            parameter.kind
+            not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            for parameter in parameters[: offset + 1]
+        ):
+            raise TypeError("activity wrappers require a positional helper parameter")
+        contract = models.StepOperation(
+            kind=_contract_kind(func, kind, namespace, "activity"),
+            name=name or func.__name__,
+            version=version,
+        )
+
+        @wraps(func)
+        async def wrapped(*args: object, **kwargs: object) -> R:
+            context = _CURRENT_CONTEXT.get()
+            if context is None:
+                raise RuntimeError(
+                    "activity wrappers require an active workflow context"
+                )
+            call = ActivityCall(context, contract)
+            try:
+                return await func(*args[:offset], call, *args[offset:], **kwargs)
+            finally:
+                call._closed = True
+
+        return wrapped
+
+    return decorate
 
 
 def _contract_kind(

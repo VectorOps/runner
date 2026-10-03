@@ -17,6 +17,12 @@ Current implementation status and suggested next development horizon.
 - Activity identities are persisted before invocation and reused during interrupted recovery for implementation-owned idempotency.
 - Streaming activities yield replacement snapshots and one final result while history retains only the latest step version.
 - Completed streams replay without reinvocation, and interrupted streams restart under the same step identity.
+- `@activity_wrapper` injects an `ActivityCall` helper into async functions and instance methods. Wrapper code always executes, while `run()` and `stream()` establish a single recorded activity boundary with explicit JSON inputs.
+- Workflow-local `LLM` objects own opaque conversation state, expose detached history snapshots, and reconstruct deterministic state changes from recorded results during replay. New instances reset history, and overlapping mutations on one instance are rejected.
+- LLM activity inputs contain instance identities and request digests rather than accumulated transcripts, preventing quadratic conversation duplication in saga storage and detecting changed requests during replay.
+- The `connect` provider adapter accumulates streaming events into replacement snapshots, preserves final response metadata, resolves authentication at runtime, and rejects unsuccessful or missing terminal responses.
+- Explicit typed tool bindings derive schemas from Pydantic argument models. Bounded LLM loops execute tools sequentially as recorded activities; expected tool errors become model-visible results while unexpected failures propagate.
+- Basic opt-in compaction records summary generation as `llm.compact` and applies history replacement outside the callback so replay reconstructs the same state. It uses a character-count threshold, the generation model/settings, and a configurable instruction; it preserves tool exchanges but does not guarantee that context fits the model limit.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
 - Each execution retains its root and child workflow histories in `data/executions/<execution_id>/history.sqlite3`.
 - Runner-owned `data/runner-state.json` stores only the last execution identity for restart discovery.
@@ -55,10 +61,18 @@ Current implementation status and suggested next development horizon.
 - A comprehensive test suite covers implemented behaviors with reusable fixtures under `tests/fixtures/`.
 - Mailbox coverage includes disconnect/reconnect, parallel channels, shutdown/restart, process crashes, undelivered accepted answers, competing responses, idempotent retries, cancellation, and notification failures.
 - Mailbox implementation validation passes all 372 tests, Black, mypy, and whitespace checks.
+- LLM integration coverage includes state reconstruction, request mismatches, branching, cancellation, tool errors, compaction interruption, and linear saga-input storage growth. Integration validation passes all 398 tests, Black, mypy, and whitespace checks; provider tests use fakes rather than live model calls.
 - Black, mypy, warnings-as-errors, and asyncio debug checks pass.
 
 ## Suggested next horizon
 
+- Improve LLM compaction beyond the initial summarizer: use model-aware token budgets that include system prompts, tool schemas, and output headroom; introduce structured summaries and explicit repeated-summary updates that preserve task intent, constraints, decisions, and unfinished work; support dedicated summary model/settings and output budgets; verify context reduction and define bounded recovery when compaction cannot fit the request. Add summary-quality and context-limit tests while retaining deterministic replay, compact saga inputs, and intact tool exchanges.
+- Add transient provider-error handling: classify retryable errors, including rate limits, timeouts, and transient transport/provider failures, and retry with bounded attempts and backoff before failing the activity. Define cancellation, partial-stream reset, and replay behavior rather than copying codeng's retry logic unchanged.
+- Make tool execution parallel within each model round while retaining individually recorded activities and deterministic result ordering in conversation history. Define concurrency limits, partial-failure handling, and cancellation behavior.
+- Rethink tool registration and execution policy: distinguish tools that can be automatically validated and executed from tools requiring explicit host validation or approval through a mailbox. Define policy ownership, approval scope, rejection behavior, and replay-safe recording of decisions separately from argument-schema validation.
+- Implement a subworkflow tool backed by a workflow manager or an explicit catalog of permitted workflows in workspace `config.toml`. Define discovery, input schemas, result mapping, and access restrictions; use workflow-level spawn/join orchestration rather than attempting nested workflow execution inside an activity callback.
+- Design a steering API for messages arriving when no input request is pending. Evaluate queued mailbox inputs and a nonblocking peek/receive API so the LLM loop can inject steering between rounds. Decide queue ownership, routing, persistence, consumption/acknowledgment, and deterministic replay semantics before changing the current request/response mailbox contract.
+- Design provider authentication, including OAuth2 login, refresh, and credential expiry. Evaluate host-to-worker authentication primitives supplied at startup over an authenticated channel, keeping secrets out of environment variables and saga storage. Resolve restart behavior explicitly: how a restarted worker reacquires credentials from a live host, and how recovery works after host restart when credentials were memory-only; consider secure external credential storage or reauthentication without persisting secrets in workflow history.
+- Extend LLM observability with cost estimates, model-aware context budgets, remaining output headroom, retry attempts, and compaction savings. Distinguish estimates from provider-reported usage and expose metrics through activity events and inspection without duplicating transcripts or leaking credentials.
 - Add explicit CLI fork and execution-listing commands if needed.
 - Add host-side mailbox presentation or HTTP adapters as needed without coupling them to workflow execution.
-- Keep unsolicited-message queueing on the host side; retries, timeouts, and compensation remain outside the current scope.
