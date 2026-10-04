@@ -1,0 +1,53 @@
+workflows:
+  architect:
+    description: "End-to-end development loop: discover requirements, design a plan, write code, apply patches, and run tests with retries."
+    nodes:
+      - $include:
+          template: nodes/discovery.yaml
+        confirmation: auto
+      - $include:
+          template: nodes/architect.yaml
+        tools:
+          - summarize_files
+          - read_files
+        preprocessors:
+          - name: skills
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+        reset_policy: keep
+      - $include:
+          template: nodes/coder.yaml
+        tools:
+          - read_files
+        confirmation: auto
+      - $include:
+          template: nodes/apply_patch.yaml
+        confirmation: auto
+      - name: test
+        type: exec
+        command: uv run pytest -q -rf ./tests/
+        timeout_s: 30
+        expected_return_code: 0
+        message: "All changes were successfully applied. Unit test results are below:"
+        confirmation: auto
+        outcomes:
+          - name: success
+          - name: fail
+      - name: reprompt
+        type: input
+        message: What else are we coding?
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+    edges:
+      - discovery.done -> architect
+      - architect.done -> coder
+      - coder.done -> apply
+      - apply.success -> test
+      - apply.fail -> coder:keep
+      - test.success -> reprompt
+      - test.fail -> architect:keep
+      - reprompt.done -> architect

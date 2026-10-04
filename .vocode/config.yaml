@@ -1,0 +1,365 @@
+# Default Vocode configuration
+logging:
+  #default_level: debug
+  enabled_loggers:
+    LiteLLM: warning
+variables:
+  LLM_DISCOVERY_MODEL: gpt-5-mini
+  LLM_ARCHITECT_MODEL: gpt-5.2
+  LLM_ARCHITECT_REASONING: high
+  #LLM_ARCHITECT_REASONING: medium
+  LLM_CODER_MODEL: gpt-5-mini
+# OpenAI
+#  LLM_DISCOVERY_MODEL: openai/gpt-5-mini
+#  LLM_ARCHITECT_MODEL: openai/gpt-5
+#  LLM_CODER_MODEL: openai/gpt-5-mini
+# Gemini
+#  LLM_DISCOVERY_MODEL: gemini/gemini-3-flash-preview
+#  LLM_ARCHITECT_MODEL: gemini/gemini-3-pro-preview
+#  LLM_CODER_MODEL: gemini/gemini-3-flash-preview
+#  LLM_DIFF_FORMAT: patch
+default_workflow: "architect"
+tools:
+  - name: read_files
+    auto_approve: true
+  - name: summarize_files
+    auto_approve: true
+  - name: list_files
+    auto_approve: true
+  - name: search_project
+    auto_approve: true
+  - name: run_agent
+    auto_approve: true
+workflows:
+  architect:
+    description: "End-to-end development loop: discover requirements, design a plan, write code, apply patches, and run tests with retries."
+    nodes:
+      - name: prompt
+        type: input
+        message: What are we coding today?
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/discovery.yaml
+        function_tokens_pct: 25
+        confirmation: auto
+        reset_policy: keep_results
+      - $include:
+          template: nodes/architect.yaml
+        tools:
+          - summarize_files
+          - read_files
+        preprocessors:
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+        function_tokens_pct: 25
+        reset_policy: keep_state
+      - $include:
+          template: nodes/coder.yaml
+        tools:
+          - read_files
+        confirmation: auto
+      - $include:
+          template: nodes/apply_patch.yaml
+        confirmation: auto
+      - name: test
+        type: exec
+        command: uv run pytest -q -rf ./tests/
+        timeout_s: 30
+        expected_return_code: 0
+        message: "All changes were successfully applied. Unit test results are below:"
+        confirmation: auto
+        outcomes:
+          - name: success
+          - name: fail
+      - name: reprompt
+        type: input
+        message: What else are we coding?
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+    edges:
+      - prompt.done -> discovery
+      - discovery.done -> architect
+      - architect.done -> coder
+      - coder.done -> apply
+      - apply.success -> test
+      - apply.fail -> coder:keep_state
+      - test.success -> reprompt
+      - test.fail -> architect:keep_state
+      - reprompt.done -> architect
+  # Search
+  agent-discovery:
+    description: "Smart codebase knowledge base agent. Can search and summarize project
+    efficiently. Use to inspect project files needed to solve the users ask."
+    nodes:
+      - $include:
+          template: nodes/discovery.yaml
+        confirmation: auto
+      - name: finish
+        type: result
+        hide_final_output: true
+    edges:
+      - discovery.done -> finish
+  # Agent
+  agent:
+    description: "End-to-end development loop: discover requirements, design a plan, write code, apply patches, and run tests with retries."
+    child_workflows:
+      - agent-discovery
+    nodes:
+      - name: prompt
+        type: input
+        message: What are we coding today?
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/agent.yaml
+        confirmation: loop
+        max_rounds: 0
+        preprocessors:
+          - name: system_details
+          - name: child_workflows
+          - name: skills
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+        tools:
+          - summarize_files
+          - read_files
+          - list_files
+          - search_project
+          - run_agent
+          - name: exec
+            auto_approve_rules:
+              - key: command
+                pattern: "^uv run pytest"
+              - key: command
+                pattern: "^uv run black"
+          - name: apply_patch
+            config:
+              format: ${LLM_DIFF_FORMAT}
+          - name: update_plan
+            auto_approve: true
+    edges:
+      - prompt.done -> agent
+  # Diff test tool
+  diff:
+    description: "Create a high-level plan/diff for the request without applying changes."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/architect.yaml
+        model: gpt-5-mini
+      - name: finish
+        type: noop
+    edges:
+      - prompt.done -> architect
+      - architect.done -> finish
+  # Aider-like explicit coder loop
+  coder:
+    description: "Interactive coder loop that plans, edits files, applies patches, and runs tests, keeping state between iterations."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/file_state.yaml
+          skip: true
+      - $include:
+          template: nodes/architect.yaml
+          reset_policy: keep_state
+        preprocessors:
+          - name: file_state
+            mode: user
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+      - $include:
+          template: nodes/coder.yaml
+        confirmation: auto
+      - $include:
+          template: nodes/apply_patch.yaml
+        confirmation: auto
+      - name: test
+        type: exec
+        command: uv run pytest -q -rf ./tests/
+        timeout_s: 300
+        expected_return_code: 0
+        message: "Tests results below:"
+        confirmation: auto
+        outcomes:
+          - name: success
+          - name: fail
+    edges:
+      - prompt.done -> architect
+      - architect.done -> coder
+      - coder.done -> apply
+      - apply.success -> test
+      - apply.fail -> coder:keep_state
+      - test.success -> prompt
+      - test.fail -> architect:keep_state
+  # Ask
+  ask:
+    description: "Q&A workflow for repository analysis and explanations using search and file tools."
+    nodes:
+      - name: prompt
+        type: input
+        message: What do you need help with?
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/analyst.yaml
+        tools:
+          - list_files
+          - search_project
+          - summarize_files
+          - read_files
+          - exec
+        reset_policy: keep_state
+        preprocessors:
+          - name: system_details
+          - name: child_workflows
+          - name: skills
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+    edges:
+      - prompt.done -> analyst
+      - analyst.done -> prompt
+  idler:
+    description: "Timing/debug workflow that sleeps and emits debug info for sanity checks."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        outcomes:
+          - name: done
+      - name: pause
+        type: noop
+        sleep_seconds: 5
+        outcomes:
+          - name: done
+      - name: debug
+        type: debug
+        outcomes:
+          - name: done
+      - name: pause2
+        type: noop
+        sleep_seconds: 5
+        outcomes:
+          - name: done
+      - name: done
+        type: noop
+        confirmation: auto
+    edges:
+      - prompt.done -> pause
+      - pause.done -> debug
+      - debug.done -> pause2
+      - pause2.done -> done
+  patcher:
+    description: "Quick patch loop: generate a patch and apply it repeatedly without running tests."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/coder.yaml
+        tools:
+          - read_files
+      - $include:
+          template: nodes/apply_patch.yaml
+        confirmation: auto
+      - name: finish
+        type: noop
+    edges:
+      - prompt.done -> coder
+      - coder.done -> apply
+      - apply.success -> prompt
+      - apply.fail -> coder:keep_state
+  apply:
+    description: "Apply a provided patch/diff directly without invoking an LLM."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - $include:
+          template: nodes/apply_patch.yaml
+        confirmation: auto
+      - name: finish
+        type: noop
+    edges:
+      - prompt.done -> apply
+      - apply.success -> prompt
+      - apply.fail -> prompt
+  exec:
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        hide_final_output: true
+        outcomes:
+          - name: done
+      - name: test
+        type: exec
+        command: uv run pytest -q -rf ./tests/
+        timeout_s: 300
+        message: "Tests results below:"
+        confirmation: auto
+    edges:
+      - prompt.done -> test
+  chat:
+    description: "General chat assistant that can also browse and read repository files when needed."
+    nodes:
+      - name: prompt
+        type: input
+        message: Enter your request
+        confirmation: auto
+        hide_final_output: true
+        system: |
+          You're friendly chat assistant. Take user prompts and provide necessary answers.
+        outcomes:
+          - name: done
+      - name: llm
+        type: llm
+        model: ${LLM_ARCHITECT_MODEL}
+        reset_policy: keep_state
+        tools:
+          - summarize_files
+          - read_files
+          - search_project
+        outcomes:
+          - name: done
+    edges:
+      - prompt.done -> llm
+      - llm.done -> prompt

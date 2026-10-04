@@ -1,0 +1,10 @@
+workflows:
+  # Discovery agent
+  agent-discovery:
+    description: "Code intelligence agent. Can find, investigate, summarize and identify relevant code in the project."
+    interactive: false
+    nodes:
+      - $include:
+          template: nodes/discovery.yaml
+        confirmation: auto
+        outcomes: []

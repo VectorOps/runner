@@ -1,0 +1,35 @@
+workflows:
+  agent:
+    description: "End-to-end development loop: discover requirements, design a plan, write code, apply patches, and run tests with retries."
+    agents:
+      - agent-discovery
+    nodes:
+      - $include:
+          template: nodes/agent.yaml
+        confirmation: loop
+        max_rounds: 0
+        preprocessors:
+          - name: system_details
+          - name: agents
+          - name: skills
+          - name: file_read
+            options:
+              paths:
+                - AGENTS.md
+        tools:
+          - summarize_files
+          - read_files
+          - list_files
+          - search_project
+          - run_agent
+          - name: exec
+            auto_approve_rules:
+              - key: command
+                pattern: "^uv run pytest"
+              - key: command
+                pattern: "^uv run black"
+          - name: apply_patch
+            config:
+              format: ${LLM_DIFF_FORMAT}
+          - name: update_plan
+            auto_approve: true

@@ -234,18 +234,19 @@ async def test_invalid_approval_fails_closed(
         raise AssertionError("malformed approval must never execute")
 
     async def workflow() -> pydantic.JsonValue:
-        await llm.invoke_tool(
+        response = await llm.invoke_tool(
             llm.Tool("test", "Test", Arguments, execute, approval=llm.ToolApproval()),
             connect.ToolCallBlock(id="a", name="test", arguments={"value": 1}),
         )
+        assert response.is_error
         return None
 
     task = asyncio.create_task(replay.run(history, workflow, mailbox=box))
     await asyncio.wait_for(store.registered.wait(), 2)
     await approve(box, next(iter(store.requests.values())), answer)
     result = await task
-    assert result.outcome.kind == "failed"
-    assert result.outcome.error.type == "ValidationError"
+    assert result.outcome.kind == "completed"
+    assert (await replay.run(history, workflow, result.id)).outcome.kind == "completed"
 
 
 async def test_changed_tool_arguments_reject_replay(history: MemoryHistory) -> None:

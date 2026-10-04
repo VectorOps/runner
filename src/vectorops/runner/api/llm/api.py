@@ -13,6 +13,7 @@ import pydantic
 
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm import models, provider, tools as tool_api
+from vectorops.runner.api.llm import retry as retry_api
 from vectorops.runner.api.llm.configuration import (
     explicit_options,
     resolve_configuration,
@@ -42,6 +43,8 @@ class LLM:
         compaction: typing.Union[
             models.Compaction, None, models.Unset
         ] = models.Unset.VALUE,
+        retry: Optional[models.RetryPolicy] = None,
+        raise_tool_errors: bool = False,
         **overrides: typing.Unpack[models.SettingsParameters],
     ) -> None:
         context = c.workflow_context()
@@ -50,6 +53,10 @@ class LLM:
         self._context = context
         self._identity = identity
         self._overrides = explicit_options(settings, compaction=compaction, **overrides)
+        if retry is not None:
+            self._overrides["retry"] = retry.model_dump(mode="json", exclude_unset=True)
+        self._retry = models.RetryPolicy()
+        self._raise_tool_errors = raise_tool_errors
         self._settings: Optional[models.Settings] = None
         self._system_prompt = system_prompt
         self._backend = backend if backend is not None else provider.ConnectProvider()
@@ -87,9 +94,10 @@ class LLM:
     async def _configure(self) -> models.Configuration:
         resolved = await resolve_configuration(self._overrides)
         self._settings = models.Settings.model_validate(
-            resolved.model_dump(exclude={"compaction", "max_rounds"})
+            resolved.model_dump(exclude={"compaction", "max_rounds", "retry"})
         )
         self._compaction = resolved.compaction
+        self._retry = resolved.retry
         return resolved
 
     @property
@@ -105,6 +113,10 @@ class LLM:
     def set_system_prompt(self, prompt: Optional[str]) -> None:
         with self._mutation():
             self._system_prompt = prompt
+
+    def set_raise_tool_errors(self, enabled: bool) -> None:
+        with self._mutation():
+            self._raise_tool_errors = enabled
 
     def add_message(self, message: connect.Message) -> None:
         with self._mutation():
@@ -149,12 +161,11 @@ class LLM:
         ) -> AsyncGenerator[StreamItem, None]:
             assert self._settings is not None
             async with aclosing(
-                self._backend.stream(ctx, self._settings, request)
+                retry_api.stream(
+                    self._backend, ctx, self._settings, request, self._retry
+                )
             ) as stream:
                 async for item in stream:
-                    if isinstance(item, c.ActivityFinal):
-                        response = connect.AssistantMessage.model_validate(item.value)
-                        provider.validate_response(response)
                     yield item
 
         result = await call.stream(input=self._input(request), invoke=invoke)
@@ -188,8 +199,9 @@ class LLM:
     ) -> connect.AssistantMessage:
         """Run parallel tool rounds, committing results in model-call order.
 
-        Infrastructure failures propagate after all calls settle; no partial
-        round is appended to the conversation. Recorded successes remain reusable.
+        Tool exceptions become model-visible responses by default. Strict mode
+        and runner infrastructure failures propagate after all calls settle,
+        without appending a partial round.
         """
         if max_rounds is not None and (
             isinstance(max_rounds, bool)
@@ -217,7 +229,10 @@ class LLM:
                 results = await asyncio.gather(
                     *(
                         tool_api.invoke_tool(
-                            bindings.get(request.name), request, instance=self._identity
+                            bindings.get(request.name),
+                            request,
+                            instance=self._identity,
+                            raise_errors=self._raise_tool_errors,
                         )
                         for request in calls
                     ),

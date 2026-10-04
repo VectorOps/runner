@@ -6,6 +6,7 @@ import pytest
 
 from vectorops.runner.api import composition as c, llm
 from vectorops.runner.api.llm.models import LLMResponseError
+from vectorops.runner.api.llm import retry
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 
@@ -70,3 +71,48 @@ async def test_missing_final_is_not_success() -> None:
             connect.GenerateRequest(messages=[connect.UserMessage(content="hello")]),
         ):
             pass
+
+
+async def test_connect_error_event_retries_with_same_idempotency_key() -> None:
+    clients = [
+        Client(
+            [
+                connect.TextDeltaEvent(index=0, delta="discard"),
+                connect.ErrorEvent(
+                    error=connect.ErrorInfo(
+                        code="rate_limit", message="busy", status_code=429
+                    )
+                ),
+            ]
+        ),
+        Client(
+            [
+                connect.TextDeltaEvent(index=0, delta="fresh"),
+                connect.ResponseEndEvent(
+                    response=connect.AssistantMessage(
+                        content=[connect.TextBlock(text="fresh")], finish_reason="stop"
+                    )
+                ),
+            ]
+        ),
+    ]
+    pending = iter(clients)
+    backend = llm.ConnectProvider(
+        auth=connect.NoAuth(), client_factory=lambda: next(pending)
+    )
+    items = [
+        item
+        async for item in retry.stream(
+            backend,
+            ActivityExecutionContext("exec", "workflow", "step"),
+            llm.Settings(model="test"),
+            connect.GenerateRequest(messages=[connect.UserMessage(content="hello")]),
+            llm.RetryPolicy(initial_delay=0),
+        )
+    ]
+    assert items[1] == c.delta({"content": []})
+    assert items[2] == c.delta({"content": [{"type": "text", "text": "fresh"}]})
+    assert all(
+        client.options is not None and client.options.idempotency_key == "step"
+        for client in clients
+    )

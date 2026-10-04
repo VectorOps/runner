@@ -154,6 +154,81 @@ defaults to 4 and must be positive. Optional `instruction` overrides the existin
 summary prompt. Generation and compaction both use the resolved model, reasoning,
 output budget, temperature, and timeouts.
 
+## Transient provider retries
+
+LLM generation and compaction retry transient provider failures within the same
+recorded activity. Defaults allow three retries after the initial attempt, with
+exponential delays of 1, 2, and 4 seconds, capped at 30 seconds.
+
+```toml
+[components.llm.retry]
+max_retries = 3
+initial_delay = 1
+max_delay = 30
+```
+
+`max_retries` is an integer from 0 through 20; zero disables retries. Delays are
+finite seconds from 0 through 300, and `max_delay` must be at least `initial_delay`.
+Explicit `LLM(..., retry=llm.RetryPolicy(max_retries=5))` overrides supplied policy
+fields. Workspace policy is read through the same recorded settings snapshot as
+generation, so edits apply to fresh rounds rather than in-flight attempts.
+
+Retryable failures include timeouts, connection resets/disconnects, truncated
+transport payloads, Connect rate limits, transient provider errors, retryable
+Connect errors, and HTTP 408/429/5xx errors. Authentication, certificate/TLS
+configuration, context-length, permanent provider, and invalid response errors
+are not retried. Custom providers participate by raising the same exception types.
+Direct `ConnectProvider.stream()` calls remain single-attempt; `LLM` owns retries.
+
+Every attempt closes its stream, uses detached copies of the original request,
+and retains the activity step ID (the Connect idempotency key). Before waiting for
+a retry, an empty content snapshot replaces partial output. Only a validated final
+response from an exhausted, successfully closed stream updates conversation state
+and usage. Failed-attempt usage is not included, even if the provider charges it.
+
+Cancellation propagates during streaming or backoff. Replay of terminal activities
+does not call the provider or sleep. Restart of an unfinished activity starts a new
+bounded retry budget with its recorded settings and existing identity. This is not
+an exactly-once provider guarantee. Storage failures are outside the retry boundary.
+Exhaustion propagates as the ordinary recorded `ActivityError`.
+
+## Tool error responses
+
+By default, tool validation and implementation exceptions become recorded tool
+responses with `is_error=True` and the exact `str(exception)` text. The LLM receives
+these alongside successful tool results in original call order and can recover or
+choose another action. Tool implementations are not automatically retried: they
+can have non-idempotent side effects. Unknown tools, rejected approval, and malformed
+approval responses also return errors without executing the tool.
+
+```python
+from vectorops.runner.api import llm
+
+async def main(ctx):
+    agent = llm.LLM("assistant", raise_tool_errors=True)
+    agent.set_raise_tool_errors(False)
+    agent.add_user_message("Continue despite tool failures.")
+    return (await agent.run()).model_dump(mode="json")
+```
+
+`raise_tool_errors=True` (or `set_raise_tool_errors(True)`) opts into exception
+handling for tool exceptions, including explicit `ToolExecutionError`. Exceptions
+cross the recorded activity boundary as `ActivityError`, with their original type
+and message retained. Parallel calls settle before propagation; no partial round
+is appended. Standalone `invoke_tool(..., raise_errors=True)` offers the same mode.
+Explicitly returned `ToolResponse(is_error=True)` remains a response in either mode.
+Changing strict mode for an already recorded tool invocation causes a replay mismatch.
+
+Cancellation, replay mismatches, history/storage failures, and failures obtaining
+approval from the mailbox remain runner errors, not model-visible tool errors.
+Exception messages sent to the LLM are also stored in history: tool authors must
+avoid putting credentials or other sensitive data in exception messages.
+
+Retries emit `llm.request_retry` warnings; terminal provider failures and tool errors
+emit `llm.request_failed`, `llm.tool_failed`, or `llm.tool_error` errors. Structured
+logs include correlation IDs, attempt/delay fields, and exception type/frame
+metadata without raw exception messages, request contents, or credentials.
+
 ## Reusable workflow components
 
 ```python

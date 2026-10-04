@@ -76,9 +76,24 @@ class Compaction(pydantic.BaseModel):
     )
 
 
+class RetryPolicy(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    max_retries: int = pydantic.Field(default=3, ge=0, le=20, strict=True)
+    initial_delay: float = pydantic.Field(default=1, ge=0, le=300)
+    max_delay: float = pydantic.Field(default=30, ge=0, le=300)
+
+    @pydantic.model_validator(mode="after")
+    def validate_delays(self) -> typing.Self:
+        if self.max_delay < self.initial_delay:
+            raise ValueError("max_delay must be at least initial_delay")
+        return self
+
+
 class Configuration(Settings):
     compaction: Optional[Compaction] = None
     max_rounds: int = pydantic.Field(default=100, gt=0, strict=True)
+    retry: RetryPolicy = pydantic.Field(default_factory=RetryPolicy)
 
 
 class Unset(Enum):

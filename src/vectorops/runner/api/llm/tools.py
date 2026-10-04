@@ -8,6 +8,7 @@ import typing
 import connect
 import pydantic
 
+from vectorops.runner import diagnostics
 from vectorops.runner.api import composition as c, mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
@@ -35,7 +36,7 @@ class ToolResponse(pydantic.BaseModel):
 
 
 class ToolExecutionError(Exception):
-    """An expected, model-visible tool error rather than an infrastructure failure."""
+    """An explicit tool error, model-visible unless strict handling is enabled."""
 
 
 class ToolBinding(typing.Protocol):
@@ -121,13 +122,15 @@ async def invoke_tool(
     request: connect.ToolCallBlock,
     *,
     instance: typing.Optional[str] = None,
+    raise_errors: bool = False,
 ) -> connect.ToolResultMessage:
     """Validate, optionally await host approval, and execute a recorded tool call.
 
     Approval uses a JSON mailbox response with a strict ``approved`` boolean and
     optional ``reason``. Decisions apply to one call, not future invocations.
     The helper runs in workflow context; only the implementation runs in an
-    activity. Expected validation errors and rejections return tool error results.
+    activity. Tool exceptions return their unchanged text by default. Cancellation,
+    replay mismatches, storage failures, and approval transport errors propagate.
     """
     c.workflow_context()
     request = request.model_copy(deep=True)
@@ -140,7 +143,7 @@ async def invoke_tool(
         if definition is None or definition.name != request.name:
             raise ToolExecutionError(f"tool binding does not match: {request.name}")
         binding.validate(request.arguments)
-    except ToolExecutionError as exc:
+    except Exception as exc:
         error = str(exc)
 
     if error is None and approval is not None:
@@ -154,9 +157,12 @@ async def invoke_tool(
             },
             response_type="json",
         )
-        decision = ToolApprovalResponse.model_validate(answer)
-        if not decision.approved:
-            error = decision.reason or "Tool call rejected by host"
+        try:
+            decision = ToolApprovalResponse.model_validate(answer)
+            if not decision.approved:
+                error = decision.reason or "Tool call rejected by host"
+        except pydantic.ValidationError as exc:
+            error = str(exc)
 
     return await _execute_tool(
         binding,
@@ -171,7 +177,9 @@ async def invoke_tool(
             "tool_version": binding.version if binding is not None else None,
             "approval": approval.model_dump(mode="json") if approval else None,
             "error": error,
+            **({"raise_errors": True} if raise_errors else {}),
         },
+        raise_errors,
     )
 
 
@@ -182,6 +190,7 @@ async def _execute_tool(
     request: connect.ToolCallBlock,
     error: typing.Optional[str],
     input: dict[str, pydantic.JsonValue],
+    raise_errors: bool,
 ) -> connect.ToolResultMessage:
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         try:
@@ -190,16 +199,34 @@ async def _execute_tool(
             if binding is None:
                 raise ToolExecutionError(f"unknown tool: {request.name}")
             response = await binding.execute(ctx, request.arguments)
-        except ToolExecutionError as exc:
-            response = ToolResponse(
-                content=[connect.TextBlock(text=str(exc))], is_error=True
+            result = connect.ToolResultMessage(
+                tool_call_id=request.id,
+                tool_name=request.name,
+                content=response.content,
+                is_error=response.is_error,
+            ).model_dump(mode="json")
+            if response.is_error:
+                diagnostics.log(
+                    "llm.tool_error",
+                    level=diagnostics.Level.ERROR,
+                    fields={"tool": request.name, "call_id": request.id},
+                )
+            return result
+        except Exception as exc:
+            diagnostics.log(
+                "llm.tool_failed",
+                level=diagnostics.Level.ERROR,
+                fields={"tool": request.name, "call_id": request.id},
+                error=exc,
             )
-        return connect.ToolResultMessage(
-            tool_call_id=request.id,
-            tool_name=request.name,
-            content=response.content,
-            is_error=response.is_error,
-        ).model_dump(mode="json")
+            if raise_errors:
+                raise
+            return connect.ToolResultMessage(
+                tool_call_id=request.id,
+                tool_name=request.name,
+                content=[connect.TextBlock(text=str(exc))],
+                is_error=True,
+            ).model_dump(mode="json")
 
     result = await call.run(input=input, invoke=invoke)
     return connect.ToolResultMessage.model_validate(result)

@@ -328,7 +328,7 @@ def test_constructor_requires_workflow_and_settings_are_validated() -> None:
 
 
 @pytest.mark.parametrize("invalid_arguments", [False, True])
-async def test_tool_errors_distinguish_validation_and_infrastructure(
+async def test_tool_errors_are_model_visible_by_default(
     history: MemoryHistory, invalid_arguments: bool
 ) -> None:
     class Arguments(pydantic.BaseModel):
@@ -363,14 +363,11 @@ async def test_tool_errors_distinguish_validation_and_infrastructure(
         agent = llm.LLM("chat", llm.Settings(model="test"), backend=backend)
         agent.add_user_message("hello")
         bindings = [llm.Tool("test", "Test", Arguments, execute)]
-        if invalid_arguments:
-            await agent.run(tools=bindings)
-            result = agent.history[-2]
-            assert result.role == "tool" and result.is_error
-        else:
-            with pytest.raises(ActivityError, match="infrastructure failure"):
-                await agent.run(tools=bindings)
-            assert len(agent.history) == 2
+        await agent.run(tools=bindings)
+        result = agent.history[-2]
+        assert result.role == "tool" and result.is_error
+        if not invalid_arguments:
+            assert result.content == [connect.TextBlock(text="infrastructure failure")]
         return None
 
     first = await replay.run(history, workflow)
@@ -603,6 +600,7 @@ async def test_parallel_tool_failure_settles_siblings_before_return(
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("chat", llm.Settings(model="test"), backend=backend)
         agent.add_user_message("hello")
+        agent.set_raise_tool_errors(True)
         with pytest.raises(ActivityError, match="broken tool"):
             await agent.run(tools=[llm.Tool("test", "Test", Arguments, execute)])
         assert completed == [2]
