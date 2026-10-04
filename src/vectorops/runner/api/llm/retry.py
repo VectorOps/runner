@@ -10,7 +10,7 @@ import connect
 import pydantic
 
 from vectorops.runner import diagnostics
-from vectorops.runner.api.llm import models, provider
+from vectorops.runner.api.llm import deadlines, models, provider
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
 
@@ -68,10 +68,13 @@ async def stream(
         final: Optional[streaming.ActivityFinal[pydantic.JsonValue]] = None
         try:
             async with aclosing(
-                backend.stream(
-                    context,
-                    settings.model_copy(deep=True),
-                    request.model_copy(deep=True),
+                deadlines.stream(
+                    backend.stream(
+                        context,
+                        settings.model_copy(deep=True),
+                        request.model_copy(deep=True),
+                    ),
+                    settings,
                 )
             ) as items:
                 async for item in items:

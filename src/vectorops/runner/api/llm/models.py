@@ -24,6 +24,8 @@ class GenerationOptions(pydantic.BaseModel):
     reasoning: Optional[connect.ReasoningConfig] = None
     timeout: Optional[float] = pydantic.Field(default=None, gt=0)
     stream_read_timeout: Optional[float] = pydantic.Field(default=None, gt=0)
+    first_token_timeout: float = pydantic.Field(default=180, gt=0)
+    stream_stall_timeout: float = pydantic.Field(default=120, gt=0)
 
     @pydantic.field_validator("reasoning", mode="before")
     @classmethod
@@ -59,6 +61,8 @@ class SettingsParameters(typing.TypedDict, total=False):
     reasoning: Optional[connect.ReasoningConfig]
     timeout: Optional[float]
     stream_read_timeout: Optional[float]
+    first_token_timeout: float
+    stream_stall_timeout: float
 
 
 class Compaction(pydantic.BaseModel):

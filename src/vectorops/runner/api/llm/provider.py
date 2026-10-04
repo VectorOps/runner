@@ -8,6 +8,7 @@ import connect
 import pydantic
 
 from vectorops.runner.api import composition as c
+from vectorops.runner.api.llm import deadlines
 from vectorops.runner.api.llm.models import LLMResponseError, Settings
 from vectorops.runner.authentication import models as auth_models
 from vectorops.runner.authentication.service import AuthenticationService
@@ -32,6 +33,21 @@ def validate_response(response: connect.AssistantMessage) -> None:
         raise LLMResponseError("tool-call finish reason without tool calls")
     if len({call.id for call in calls}) != len(calls):
         raise LLMResponseError("duplicate tool call IDs")
+
+
+class _Authentication:
+    def __init__(self, auth: connect.TransportAuth) -> None:
+        self.auth = auth
+
+    async def resolve(
+        self, context: Optional[connect.AuthContext] = None
+    ) -> connect.ResolvedAuth:
+        with deadlines.suspend():
+            return await self.auth.resolve(context)
+
+    async def refresh(self, context: Optional[connect.AuthContext] = None) -> bool:
+        with deadlines.suspend():
+            return await self.auth.refresh(context)
 
 
 class ConnectProvider:
@@ -69,16 +85,17 @@ class ConnectProvider:
         auth = self._auth
         if auth is None:
             authentication = context.authentication or AuthenticationService()
-            auth = await authentication.transport(
-                settings.provider,
-                settings.model,
-                settings.credential_profile or "default",
-                context.execution_id,
-            )
+            with deadlines.suspend():
+                auth = await authentication.transport(
+                    settings.provider,
+                    settings.model,
+                    settings.credential_profile or "default",
+                    context.execution_id,
+                )
         options = connect.RequestOptions(
             timeout=settings.timeout,
             stream_read_timeout=settings.stream_read_timeout,
-            auth=auth,
+            auth=_Authentication(auth),
             idempotency_key=context.step_id,
         )
         blocks: dict[int, dict[str, pydantic.JsonValue]] = {}

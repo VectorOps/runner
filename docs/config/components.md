@@ -12,7 +12,8 @@ the current workspace file. There is no central component schema or global diges
 model = "gpt-4.1"
 provider = "openai"
 max_output_tokens = 4096
-timeout = 120
+first_token_timeout = 180
+stream_stall_timeout = 120
 max_rounds = 20
 ```
 
@@ -130,8 +131,10 @@ not work inside an activity; resolve before entering its recorded callback.
 | `credential_profile` | None (`default` profile) | Non-secret runner credential profile reference |
 | `temperature` | None | Number from 0 through 2 |
 | `max_output_tokens` | None | Positive integer |
-| `timeout` | None | Positive timeout in seconds |
-| `stream_read_timeout` | None | Positive stream-read timeout in seconds |
+| `timeout` | None | Optional positive total HTTP request timeout in seconds; can limit healthy streams |
+| `stream_read_timeout` | None | Optional positive socket-read timeout in seconds; network traffic resets it |
+| `first_token_timeout` | 180 | Positive finite seconds of provider waiting before first meaningful output |
+| `stream_stall_timeout` | 120 | Positive finite seconds of provider waiting without further output after streaming starts |
 | `reasoning` | None | Provider reasoning configuration |
 | `reasoning.effort` | None | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `reasoning.summary` | None | `auto`, `concise`, `detailed` |
@@ -153,6 +156,41 @@ Compaction requires a positive `max_context_characters`. `keep_recent_messages`
 defaults to 4 and must be positive. Optional `instruction` overrides the existing
 summary prompt. Generation and compaction both use the resolved model, reasoning,
 output budget, temperature, and timeouts.
+
+## Stalled LLM calls
+
+Generation and compaction allow three minutes for the first meaningful output,
+then two minutes without further output. Healthy streams have no total duration
+limit by default. Configure these deadlines in `[components.llm]` or override them
+with `LLM(..., first_token_timeout=180, stream_stall_timeout=120)`.
+Both settings require positive finite seconds; zero and `None` are rejected.
+
+Text, reasoning text, and tool-argument changes count as progress. Response metadata,
+usage updates, empty text, and repeated snapshots do not reset the deadline.
+A final-only response also succeeds without an earlier token. A provider that hangs
+after its final response is still subject to the stall deadline while exhausting
+the stream.
+
+The runner enforces deadlines around provider iteration, including custom backends.
+Snapshot persistence and downstream processing do not consume the waiting budget.
+The Connect adapter excludes credential acquisition and transport authentication
+resolve/refresh waits, including interactive host login. Custom providers that
+perform interactive authentication can use `deadlines.suspend()` from
+`vectorops.runner.api.llm` around that wait. This does not suspend explicitly
+configured transport timeouts.
+
+Expiry cancels and closes the attempt, emits `llm.request_timeout` with `phase`
+(`first_token` or `stream_stall`) and `timeout_seconds`, and raises a retryable
+`StreamTimeoutError`. Each retry starts with a fresh first-output budget; the retry
+policy below still bounds the number of attempts, not the entire call's duration.
+Cancellation remains cancellation rather than becoming a retryable timeout.
+Providers must cooperate with asyncio cancellation; blocking event-loop code or
+suppressed cancellation cannot be forcibly stopped by an asyncio deadline.
+
+`timeout` and `stream_read_timeout` remain optional lower-level transport controls.
+Leave `timeout` unset to avoid terminating a healthy long-running response.
+Socket reads alone cannot detect a model stalled behind heartbeats; the output
+deadlines operate independently of those reads.
 
 ## Transient provider retries
 
