@@ -400,8 +400,12 @@ class ExecutionSession:
 
     async def prepare_workflow(self, workflow: models.Workflow) -> models.Workflow:
         if self.configure_workflow is None:
-            return workflow
-        return await self.configure_workflow(workflow)
+            configured = workflow
+        else:
+            configured = await self.configure_workflow(workflow)
+        return configured.model_copy(
+            update={"tool_policy_version": self.workflow.tool_policy_version}
+        )
 
     def start_child(
         self, workflow: models.Workflow

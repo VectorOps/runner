@@ -1,11 +1,11 @@
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import pydantic
 
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import models
+from vectorops.runner import models, tool_policy
 from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.mailbox import Mailbox
@@ -20,6 +20,8 @@ async def run(
     *,
     mailbox: Optional[Mailbox] = None,
     workspace: Optional[Path] = None,
+    tool_policy_version: Optional[Literal[1]] = None,
+    policy: Optional[tool_policy.ToolPolicy] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -29,7 +31,11 @@ async def run(
     ) -> models.WorkflowStep:
         raise AssertionError("unexpected child")
 
-    workflow = models.Workflow(id="test", definition_ref="test:workflow")
+    workflow = models.Workflow(
+        id="test",
+        definition_ref="test:workflow",
+        tool_policy_version=tool_policy_version,
+    )
     await history.save_workflow(workflow)
     session = ExecutionSession(
         history,
@@ -40,7 +46,11 @@ async def run(
         mailbox=mailbox,
     )
     context = WorkflowExecutionContext(
-        RunnerProject(Path.cwd() if workspace is None else workspace, RunnerConfig()),
+        RunnerProject(
+            Path.cwd() if workspace is None else workspace,
+            RunnerConfig(),
+            tool_policy.ToolPolicy() if policy is None else policy,
+        ),
         workflow,
         session,
     )

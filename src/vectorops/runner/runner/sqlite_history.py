@@ -388,7 +388,7 @@ class SQLiteHistory:
                 if execution.status != "running":
                     raise mailbox.MailboxConflict("execution is not running")
                 if (
-                    step.operation.kind != mailbox.KIND
+                    step.operation.kind not in (mailbox.KIND, "llm.tool")
                     or step.outcome.kind != "pending"
                 ):
                     raise mailbox.MailboxConflict("step is not an input wait")

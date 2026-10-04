@@ -192,6 +192,64 @@ bounded retry budget with its recorded settings and existing identity. This is n
 an exactly-once provider guarantee. Storage failures are outside the retry boundary.
 Exhaustion propagates as the ordinary recorded `ActivityError`.
 
+## Tool approval
+
+New workflows require host confirmation for tools unless their stable names are
+whitelisted or approve-all is enabled in workspace `config.toml`:
+
+```toml
+[components.tools.approval]
+approve_all = false
+whitelist = ["read_file", "list_files"]
+```
+
+`approve_all` defaults to false and accepts only a boolean. `whitelist` defaults
+to an empty list and accepts unique, nonempty, unpadded tool names. Names match
+exactly; there are no wildcard or argument-pattern grants in configuration.
+Set `approve_all = true` to bypass confirmation for every valid, permitted tool.
+Unknown settings and invalid configuration fail closed as tool errors.
+
+Argument validation always precedes authorization. Mandatory registered checks
+can deny calls even when approve-all is enabled; otherwise workspace grants,
+runtime name grants, and registered matchers can permit automatic execution.
+Without a grant, the tool waits on the existing `tool.approval` mailbox channel.
+`ToolApproval(channel=...)` still selects a custom channel, but its presence or
+absence no longer determines authorization in new workflows.
+
+Hosts use `mailbox.list`, `mailbox.get`, and `mailbox.respond`, supplemented by
+`mailbox.requested` and `mailbox.answered` notifications. Request payloads retain
+`instance`, `call`, `tool`, and `tool_version`. The JSON response contains strict
+`approved: bool` and optional `reason: str`; unknown fields are rejected.
+Rejection and malformed answers become tool errors, just like implementation
+exceptions. Missing mailbox support and mailbox/storage failures propagate.
+
+The gate executes inside `llm.tool` version 3. There is no policy activity,
+configuration-read activity, or recorded policy decision. Completed tool outcomes,
+including rejections, replay without validation, policy evaluation, or invocation.
+Fresh or interrupted calls without an existing confirmation request read current
+settings off the event loop. Existing requests and accepted host answers remain
+durable mailbox records attached to the tool step and are reused on recovery;
+enabling approve-all does not bypass an outstanding confirmation or rejection.
+An interrupted tool can execute again after approval: this is not an exactly-once
+side-effect guarantee, and implementations retain responsibility for idempotency.
+
+`RunnerProject.tool_policy` owns an isolated `ToolPolicy` registry. Trusted Python
+code can use `allow(name)`, `remove(name)`, `register_check(name, callback)`, and
+`register_matcher(name, callback)` without changing tool bindings. Async checks
+return a denial reason or None; async matchers return whether to grant approval.
+Each receives a detached `ToolCall` with name, version, arguments, definition
+digest, and execution/workflow/step identities. Checks run before grants;
+exceptions fail closed. Configure extensions before calls begin. Runtime grants
+are shared with children of that project attachment, not persisted or shared
+between independently opened projects. Workspace grants apply to every execution
+using that workspace. Neither mechanism sandboxes trusted workflow Python code.
+
+Existing workflow records without `tool_policy_version` retain the old binding-local
+approval and activity sequence. New workflows persist format marker 1; children
+inherit their parent's format. This marker selects compatibility behavior, not
+a policy snapshot. Start a new execution to adopt centralized approval for a
+legacy workflow. No history is silently rewritten.
+
 ## Tool error responses
 
 By default, tool validation and implementation exceptions become recorded tool

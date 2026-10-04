@@ -96,6 +96,12 @@ class Mailbox:
     def waiting(self) -> bool:
         return bool(self._waiters)
 
+    async def existing(self, request_id: str) -> typing.Optional[InputRequest]:
+        try:
+            return await self.store.get_input(request_id)
+        except KeyError:
+            return None
+
     def emit(self, kind: str, request: InputRequest) -> None:
         if self.sink is not None:
             try:

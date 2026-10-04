@@ -30,6 +30,7 @@ class Workflow(_JsonModel):
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     kind: str = pydantic.Field(default="workflow", min_length=1)
     version: int = pydantic.Field(default=1, ge=1, strict=True)
+    tool_policy_version: typing.Optional[typing.Literal[1]] = None
 
 
 class StepOperation(_JsonModel):

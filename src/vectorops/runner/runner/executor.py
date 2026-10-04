@@ -63,6 +63,7 @@ class WorkflowExecutor:
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
         """Resolve decorator metadata before the immutable configuration is saved."""
+        configuration = configuration.model_copy(update={"tool_policy_version": 1})
         entry = await self._definition(configuration.definition_ref)
         if not isinstance(entry, composition.WorkflowDefinition):
             return configuration

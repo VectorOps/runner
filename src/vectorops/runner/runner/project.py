@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
 import typing
@@ -12,6 +12,7 @@ import pydantic
 
 from vectorops.runner import diagnostics
 from vectorops.runner.environment.configuration import EnvironmentConfig
+from vectorops.runner.tool_policy import ToolPolicy
 
 
 class RetentionPolicy(pydantic.BaseModel):
@@ -51,6 +52,9 @@ class RunnerConfig(pydantic.BaseModel):
 class RunnerProject:
     root: Path
     config: RunnerConfig
+    tool_policy: ToolPolicy = field(
+        default_factory=ToolPolicy, compare=False, repr=False
+    )
 
     @property
     def config_path(self) -> Path:

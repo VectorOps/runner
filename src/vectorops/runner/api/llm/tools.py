@@ -8,8 +8,9 @@ import typing
 import connect
 import pydantic
 
-from vectorops.runner import diagnostics
+from vectorops.runner import diagnostics, tool_policy
 from vectorops.runner.api import composition as c, mailbox
+from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 A = typing.TypeVar("A", bound=pydantic.BaseModel)
@@ -128,11 +129,15 @@ async def invoke_tool(
 
     Approval uses a JSON mailbox response with a strict ``approved`` boolean and
     optional ``reason``. Decisions apply to one call, not future invocations.
-    The helper runs in workflow context; only the implementation runs in an
-    activity. Tool exceptions return their unchanged text by default. Cancellation,
+    The helper runs in workflow context; validation, the runtime policy gate,
+    and implementation run in one activity for new workflows. Legacy histories
+    retain binding-local approval. Tool exceptions return their unchanged text by default. Cancellation,
     replay mismatches, storage failures, and approval transport errors propagate.
     """
-    c.workflow_context()
+    if c.workflow_context().workflow.tool_policy_version is not None:
+        return await _gated_tool(
+            binding, request.model_copy(deep=True), instance, raise_errors
+        )
     request = request.model_copy(deep=True)
     definition = binding.definition if binding is not None else None
     approval = binding.approval if binding is not None else None
@@ -229,4 +234,127 @@ async def _execute_tool(
             ).model_dump(mode="json")
 
     result = await call.run(input=input, invoke=invoke)
+    return connect.ToolResultMessage.model_validate(result)
+
+
+@c.activity_wrapper(name="invoke_tool", kind="llm.tool", version=3)
+async def _gated_tool(
+    call: c.ActivityCall,
+    binding: typing.Optional[ToolBinding],
+    request: connect.ToolCallBlock,
+    instance: typing.Optional[str],
+    raise_errors: bool,
+) -> connect.ToolResultMessage:
+    """Gate only live tool execution; replay returns the recorded result directly."""
+    project = c.workflow_context().project
+    definition = binding.definition if binding is not None else None
+    digest = _digest(definition.model_dump(mode="json")) if definition else None
+
+    async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        error: typing.Optional[Exception] = None
+        decision = tool_policy.Decision(action="require_confirmation")
+        existing = (
+            await ctx.mailbox.existing(ctx.step_id) if ctx.mailbox is not None else None
+        )
+        try:
+            if binding is None:
+                raise ToolExecutionError(f"unknown tool: {request.name}")
+            if definition is None or definition.name != request.name:
+                raise ToolExecutionError(f"tool binding does not match: {request.name}")
+            binding.validate(request.arguments)
+            if existing is None:
+                decision = await project.tool_policy.evaluate(
+                    project.config_path,
+                    tool_policy.ToolCall(
+                        name=request.name,
+                        version=binding.version,
+                        arguments=request.arguments,
+                        definition_digest=digest or "",
+                        execution_id=ctx.execution_id,
+                        workflow_id=ctx.workflow_id,
+                        step_id=ctx.step_id,
+                    ),
+                )
+            if decision.action == "deny":
+                raise ToolExecutionError(
+                    decision.reason or "Tool call denied by policy"
+                )
+        except Exception as exc:
+            error = exc
+
+        if error is None and decision.action == "require_confirmation":
+            if ctx.mailbox is None:
+                raise RuntimeError(
+                    "tool approval requires a persistent workflow runner"
+                )
+            approval = binding.approval if binding is not None else None
+            spec = runtime_mailbox.InputSpec(
+                channel=approval.channel if approval else "tool.approval",
+                payload={
+                    "instance": instance,
+                    "call": request.model_dump(mode="json"),
+                    "tool": definition.model_dump(mode="json") if definition else None,
+                    "tool_version": binding.version if binding is not None else None,
+                },
+                response_type="json",
+            )
+            if existing is not None:
+                spec = runtime_mailbox.InputSpec(
+                    channel=existing.channel,
+                    payload=existing.payload,
+                    response_type=existing.response_type,
+                )
+            answer = await ctx.mailbox.wait(ctx.step_id, spec)
+            try:
+                response = ToolApprovalResponse.model_validate(answer)
+                if not response.approved:
+                    raise ToolExecutionError(
+                        response.reason or "Tool call rejected by host"
+                    )
+            except Exception as exc:
+                error = exc
+
+        try:
+            if error is not None:
+                raise error
+            assert binding is not None
+            result = await binding.execute(ctx, request.arguments)
+            if result.is_error:
+                diagnostics.log(
+                    "llm.tool_error",
+                    level=diagnostics.Level.ERROR,
+                    fields={"tool": request.name, "call_id": request.id},
+                )
+            return connect.ToolResultMessage(
+                tool_call_id=request.id,
+                tool_name=request.name,
+                content=result.content,
+                is_error=result.is_error,
+            ).model_dump(mode="json")
+        except Exception as exc:
+            diagnostics.log(
+                "llm.tool_failed",
+                level=diagnostics.Level.ERROR,
+                fields={"tool": request.name, "call_id": request.id},
+                error=exc,
+            )
+            if raise_errors:
+                raise
+            return connect.ToolResultMessage(
+                tool_call_id=request.id,
+                tool_name=request.name,
+                content=[connect.TextBlock(text=str(exc))],
+                is_error=True,
+            ).model_dump(mode="json")
+
+    result = await call.run(
+        input={
+            "instance": instance,
+            "call_digest": _digest(request.model_dump(mode="json")),
+            "tool_digest": digest,
+            "tool_version": binding.version if binding is not None else None,
+            **({"raise_errors": True} if raise_errors else {}),
+        },
+        invoke=invoke,
+    )
     return connect.ToolResultMessage.model_validate(result)
