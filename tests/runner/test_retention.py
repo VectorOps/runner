@@ -136,6 +136,20 @@ async def test_zero_limits_preserve_last_and_noncompleted_histories(
     )
 
 
+async def test_reserved_histories_survive_retention_until_released(
+    tmp_path: Path,
+) -> None:
+    for identifier in ("resuming", "finishing", "old", "last"):
+        await create_history(tmp_path, identifier, days=100)
+    retention = ExecutionRetention(
+        tmp_path, RetentionPolicy(max_completed_executions=0, max_age_days=0)
+    )
+    assert await retention.apply(
+        "last", now=NOW, protected_ids={"resuming", "finishing"}
+    ) == ["old"]
+    assert set(await retention.apply("last", now=NOW)) == {"resuming", "finishing"}
+
+
 async def test_running_last_pointer_does_not_consume_completed_limit(
     tmp_path: Path,
 ) -> None:

@@ -25,11 +25,11 @@ Current implementation status and suggested next development horizon.
 - Basic opt-in compaction records summary generation as `llm.compact` and applies history replacement outside the callback so replay reconstructs the same state. It uses a character-count threshold, the generation model/settings, and a configurable instruction; it preserves tool exchanges but does not guarantee that context fits the model limit.
 - History access is injected through an asynchronous protocol rather than an executor-owned step collection.
 - Each execution retains its root and child workflow histories in `data/executions/<execution_id>/history.sqlite3`.
-- Runner-owned `data/runner-state.json` stores only the last execution identity for restart discovery.
+- Runner-owned `data/runner-state.json` stores the last execution identity and active execution IDs for restart discovery, with serialized updates and backward-compatible loading of last-pointer-only manifests.
 - Each history database contains execution identity, lifecycle status, root configuration, and selected root and child heads.
 - Durable step writes advance selected heads transactionally, independently of global runner state.
 - Periodic execution checkpoints flush buffered snapshots and persist recovery metadata inside the history database.
-- Explicit resume uses recorded execution configuration and checkpoint heads; the control service automatically recovers the last execution when its persisted status is `running`.
+- Explicit resume uses recorded execution configuration and checkpoint heads; the control service reconciles workspace state against retained histories and automatically recovers all executions whose persisted status is `running`, including when the manifest is missing.
 - Exclusive project writer ownership prevents concurrent processes from conflicting over global state.
 - Explicit cleanup removes terminal execution histories while preserving active executions and unrelated records.
 - Optional age and count retention limits prune completed histories after successful execution while protecting the last execution.
@@ -53,7 +53,7 @@ Current implementation status and suggested next development horizon.
 - Hosts can list pending requests with channel and workflow filters, inspect a request, and submit an atomic, idempotent response through `mailbox.list`, `mailbox.get`, and `mailbox.respond`.
 - Live `mailbox.requested` and `mailbox.answered` notifications supplement durable queries; reconnecting hosts discover outstanding requests without relying on event replay.
 - Host disconnects preserve waits. Service shutdown while input is pending preserves waits for restart, while explicit execution stops cancel them.
-- Multiple input waits can run concurrently, including on the same channel. The service retains its single-active-root execution limit, and rewinding an execution with pending requests is rejected.
+- Multiple input waits and independent root executions can run concurrently, including on the same channel. Input ownership and responses remain execution-specific, and rewinding an execution with pending requests is rejected.
 - `vops-runner` starts workflows with JSON input and optional execution IDs, and resumes persisted executions after interruption.
 - Read-only CLI status exposes persisted execution metadata and counts by operation and outcome across root, child, and retained branch histories while a writer is active.
 - Full-execution JSONL export writes a versioned metadata/configuration header followed by normalized steps from one committed snapshot, without overwriting existing files.
@@ -77,6 +77,11 @@ Current implementation status and suggested next development horizon.
 - Missing API keys fail without prompting; interactive OAuth waits survive host disconnect and clean runner shutdown/recovery. Claims expire, stale callbacks are rejected, and explicit authentication cancellation fails shared waiters. Token endpoint failures are sanitized and classified, refresh retries are bounded, and rotated tokens finish publication before cancellation propagates.
 - [Provider authentication](docs/config/authentication.md) documents provisioning, host coordination, RPC contracts, restart behavior, Unix filesystem requirements, and the trusted same-user execution boundary. Authentication coverage includes mocked token endpoints and host callback HTTP rather than live provider login.
 - Authentication validation passes all 511 tests with warnings-as-errors and asyncio debug, plus Black, mypy, and whitespace checks.
+
+- One daemon now manages concurrent independent executions within a workspace while retaining exclusive project writer ownership. Start creates a new root; resume rejects duplicate active execution IDs; stop affects only the selected execution and waits for owned cleanup before terminal notification. Startup stops persist cancellation after history initialization. Roots retain separate histories, mailboxes, environment attachments, and process managers, but shared source-tree edits are not isolated.
+- The execution-oriented control API adds paginated `executions.active` and typed client listing results. `executions.current` accepts an execution ID and rejects ambiguous no-ID queries; start, resume, stop, persisted lookup, history, and event subscriptions remain execution-specific. Daemon status/connect display active execution pages. [Control protocol](docs/reference/control-protocol.md#concurrent-execution-lifecycle) documents lifecycle and compatibility behavior.
+- Cancel shutdown handles each root independently, preserving mailbox/authentication waits for restart without suspending unrelated work or overriding explicit stops. Drain waits for every root while accepting responses and reconnects. Active, scheduled, and reserved histories are protected against retention during startup, resume, and cleanup.
+- Multi-execution validation passes all 612 tests with warnings-as-errors and asyncio debug enabled, plus Black, whitespace checks, and mypy over production code and changed tests. Coverage includes concurrent memory/TCP clients, independent failures and stops, idempotent start/resume, active pagination, event filtering, atomic state updates, legacy manifests, hard-crash recovery without a manifest, incomplete unpublished histories, multi-waiter restart, authentication isolation, drain/reconnect, cancelled/repeated shutdown, and retention protection. A broader `mypy src tests` run reports eight pre-existing errors in four unchanged authentication/diagnostics test files.
 
 ## Suggested next horizon
 

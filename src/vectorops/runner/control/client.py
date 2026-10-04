@@ -165,9 +165,21 @@ class RunnerClient:
 
     async def executions(
         self, params: typing.Optional[p.ExecutionList] = None
-    ) -> pydantic.JsonValue:
-        return await self.request(
-            "executions.list", (params or p.ExecutionList()).model_dump(mode="json")
+    ) -> p.ExecutionPage:
+        return p.ExecutionPage.model_validate(
+            await self.request(
+                "executions.list", (params or p.ExecutionList()).model_dump(mode="json")
+            )
+        )
+
+    async def active(
+        self, params: typing.Optional[p.ExecutionList] = None
+    ) -> p.ActivePage:
+        return p.ActivePage.model_validate(
+            await self.request(
+                "executions.active",
+                (params or p.ExecutionList()).model_dump(mode="json"),
+            )
         )
 
     async def shutdown(
@@ -180,8 +192,13 @@ class RunnerClient:
             await self.request("executions.resume", params.model_dump(mode="json"))
         )
 
-    async def current(self) -> typing.Optional[p.Active]:
-        result = await self.request("executions.current")
+    async def current(
+        self, execution_id: typing.Optional[str] = None
+    ) -> typing.Optional[p.Active]:
+        result = await self.request(
+            "executions.current",
+            p.Current(execution_id=execution_id).model_dump(mode="json"),
+        )
         return None if result is None else p.Active.model_validate(result)
 
     async def execution(self, execution_id: str) -> execution_state.ExecutionRecord:

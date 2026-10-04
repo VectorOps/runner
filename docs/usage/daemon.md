@@ -17,9 +17,11 @@ The runner creates and reuses a persistent control token in its [global configur
 
 `status`, `connect`, and `stop` require `--port`. Their optional `--host` accepts `127.0.0.1` (default) or `::1`, including a local SSH-forwarded endpoint. They do not discover endpoints or read the workspace.
 
-`status` authenticates and prints the endpoint, runner information, and active execution as JSON. `connect` prints runner information, current execution, and then live events as JSONL; it does not backfill history. It is an observational CLI attachment, not an interactive command shell or stdio relay.
+`status` authenticates and prints the endpoint, runner information, and an `active` execution page as JSON. The compatibility `current` field contains the sole active execution, or null when there are zero or multiple executions. `connect` prints runner information, an active-execution page, and then live events as JSONL; it does not backfill history. These pages include `next_after` for continuation through `executions.active`. It is an observational CLI attachment, not an interactive command shell or stdio relay.
 
-`stop --mode cancel` requests cancellation and shutdown. `stop --mode drain` waits for the active execution to finish. The command acknowledges the request; it does not wait for daemon exit. Closing a host connection leaves the daemon and workflow running.
+`stop --mode cancel` requests cancellation and shutdown of all executions, preserving executions waiting for mailbox input or authentication for restart. `stop --mode drain` waits for all active executions to finish and allows hosts to reconnect and answer pending requests. The command acknowledges the request; it does not wait for daemon exit. Closing a host connection leaves the daemon and workflows running.
+
+Use one daemon for multiple independent agents sharing a workspace. Start, inspect, stop, and resume each by execution ID through the [control API](../reference/control-protocol.md#concurrent-execution-lifecycle). Each root has separate history and environment resources. The exclusive workspace writer lock protects persistence; it does not limit the daemon to one execution or prevent concurrent edits to a shared source directory.
 
 ## Provision from a Python harness
 
@@ -50,7 +52,7 @@ async def main():
         async with asyncio.timeout(10):
             endpoint = json.loads(await process.stdout.readline())
         async with await RunnerClient.tcp(endpoint["port"], token) as host:
-            print(await host.current())
+            print(await host.active())
             await host.shutdown()
         async with asyncio.timeout(10):
             await process.wait()

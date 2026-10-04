@@ -32,6 +32,8 @@ uv run vops-runner --project /path/to/workspace resume example-run
 
 `resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
 
+This foreground CLI owns the workspace writer lock. For concurrent independent executions in one workspace, run a [daemon](daemon.md) and use its [execution-oriented control API](../reference/control-protocol.md#concurrent-execution-lifecycle) instead of launching competing foreground writers.
+
 ## Inspect status and statistics
 
 ```bash

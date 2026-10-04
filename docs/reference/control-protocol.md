@@ -1,6 +1,6 @@
 # Runner control protocol
 
-The host controls one workspace runner through authenticated JSON packets. A runner owns one top-level execution at a time; children run within that execution. Workflow code remains on the runner's filesystem.
+The host controls one workspace runner through authenticated JSON packets. A runner owns multiple concurrent top-level executions, each with its own history and resources; children run within their root execution. One daemon retains exclusive workspace writer ownership. Workflow code remains on the runner's filesystem.
 
 ## Quick start
 
@@ -21,7 +21,7 @@ async def run():
         ))
         while True:
             packet = await host.next_event()
-            if packet.event["kind"] in (
+            if packet.event.get("execution_id") == accepted.execution_id and packet.event["kind"] in (
                 "execution.completed", "execution.failed", "execution.cancelled"
             ):
                 break
@@ -31,7 +31,7 @@ async def run():
         return history
 ```
 
-`embedded` owns the service lifetime and cancels remaining execution on exit. Closing an ordinary `RunnerClient` does not stop its runner. `RunnerService` and `RunnerServer` can be managed separately when an embedded service must outlive clients.
+`embedded` owns the service lifetime and stops remaining executions on exit, preserving executions waiting for mailbox input or authentication for recovery. Closing an ordinary `RunnerClient` does not stop its runner. `RunnerService` and `RunnerServer` can be managed separately when an embedded service must outlive clients.
 
 ## Framing and authentication
 
@@ -68,7 +68,7 @@ Version 2 replaces version 1's HMAC hello/challenge exchange. Old handshake pack
 ```
 
 ```json
-{"kind":"error","id":"req-1","code":"runner_busy","message":"a top-level workflow is already active"}
+{"kind":"error","id":"req-1","code":"execution_conflict","message":"execution is already active"}
 ```
 
 ```json
@@ -85,7 +85,8 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | --- | --- | --- |
 | `runner.info` | None | Identity, workspace, protocol version, limits |
 | `runner.shutdown` | `mode`: `cancel` (default) or `drain` | Shutdown accepted |
-| `executions.current` | None | Active execution ID/status, or null |
+| `executions.current` | Optional `execution_id` | Selected active execution/status, or null; without an ID, conflicts when multiple executions are active |
+| `executions.active` | `after`, `limit` (default 100, maximum 500) | Lexically ordered `executions` with ID/status and `next_after` |
 | `executions.list` | `after`, `limit` (default 100, maximum 500) | Lexically ordered execution IDs and `next_after` |
 | `executions.get` | `execution_id` | Persisted execution record and checkpoint |
 | `executions.start` | `file`, `callable`, `input`, `idempotency_key` | Execution ID and `starting` status |
@@ -103,9 +104,37 @@ Start and resume receipts are persisted before launch. Repeating the same idempo
 
 Stop is cooperative and addresses the specific active execution. It returns before cleanup; wait for `execution.cancelled`, `execution.completed`, or `execution.failed`. Workflows that block the event loop or suppress cancellation can delay shutdown. Forced termination is not supported.
 
+### Concurrent execution lifecycle
+
+Start creates a new independent execution even when others are active. Resume uses an existing execution's recorded inputs and selected history heads; it is not a fresh run. Resuming an already active or stopping execution returns `execution_conflict`. Repeating an accepted idempotency key still returns its original receipt. Stop affects only the selected execution and its children/resources; other roots continue. A stop during startup is recorded once execution history is initialized.
+
+`RunnerClient.active()` returns an `ActivePage`; `RunnerClient.executions()` returns an `ExecutionPage`. Both accept `ExecutionList` pagination parameters. Active pages are live snapshots, not a frozen listing. Use `current(execution_id)` for live status and `execution(execution_id)` for persisted status. The no-argument `current()` remains supported for zero or one active execution, but never silently chooses among multiple executions. `runner.info.max_active_executions` is null: no fixed root-execution limit is imposed.
+
+```python
+import asyncio
+from vectorops.runner.control.protocol import Start, Resume
+
+async def manage(host):
+    first, second = await asyncio.gather(
+        host.start(Start(file="workflows/agent.py", callable="main", idempotency_key="agent-a")),
+        host.start(Start(file="workflows/agent.py", callable="main", idempotency_key="agent-b")),
+    )
+    await host.stop(first.execution_id)
+    while await host.current(first.execution_id) is not None:
+        await asyncio.sleep(0.05)
+    await host.resume(Resume(execution_id=first.execution_id, idempotency_key="resume-a"))
+    return await host.current(second.execution_id)
+```
+
+Shutdown rejects new start/resume requests. Cancel mode stops all roots, but suspends each execution waiting for mailbox input or authentication instead of cancelling its durable wait. Explicit stops remain cancellations. Drain mode waits for every active execution and continues accepting input/authentication responses and connections; it can wait indefinitely for user input. Shutdown waits for owned cleanup before releasing workspace ownership.
+
+Workspace `runner-state.json` retains `last_execution_id` and adds `active_execution_ids`. Updates are serialized; legacy manifests default to an empty active list. Per-execution databases remain authoritative for status and recovery heads. Startup reconciles the manifest with retained histories and recovers every record still marked `running`, including histories missed by a crash during manifest publication. Completed, failed, and cancelled histories do not auto-resume. Runtime process sessions are not restored.
+
+Independent roots can target the same source directory. This does not serialize their file edits or isolate their working trees; use separate Git worktrees when filesystem isolation is required.
+
 ## History and live reconciliation
 
-Subscribe first and wait for acknowledgement, query the current execution, then fetch the desired history window. Subscriptions become active before their acknowledgement. The application merges events received before, during, and after backfill.
+Subscribe first and wait for acknowledgement, query active executions or a selected execution, then fetch the desired history windows. Subscriptions become active before their acknowledgement. The application merges events received before, during, and after backfill, keyed by execution ID.
 
 Step events retain the existing kinds `step.created`, `step.updated`, `step.completed`, and `step.failed`. They contain `execution_id` and a full `step` replacement snapshot, not a patch. A step's first event can already be terminal. Key records by execution/step ID and accept only newer `step.revision` values. Revisions start at 1 and persist across resume; legacy records default to revision 1. History items include a stable storage `position`; workflow predecessor links describe workflow order.
 

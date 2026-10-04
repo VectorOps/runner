@@ -112,6 +112,12 @@ class Resume(Execution):
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
 
 
+class Current(Model):
+    execution_id: typing.Optional[str] = pydantic.Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]+$", max_length=128
+    )
+
+
 class ExecutionList(Model):
     after: typing.Optional[str] = None
     limit: int = pydantic.Field(default=100, ge=1, le=500, strict=True)
@@ -138,6 +144,16 @@ class Accepted(Model):
 class Active(Model):
     execution_id: str
     status: typing.Literal["starting", "running", "stopping"] = "starting"
+
+
+class ActivePage(Model):
+    executions: list[Active]
+    next_after: typing.Optional[str] = None
+
+
+class ExecutionPage(Model):
+    execution_ids: list[str]
+    next_after: typing.Optional[str] = None
 
 
 class RemoteError(Exception):

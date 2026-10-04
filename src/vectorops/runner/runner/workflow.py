@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from functools import partial
 import shutil
@@ -56,6 +56,8 @@ class WorkflowRunner:
         self.authentication = authentication or AuthenticationService()
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
+        self._suspending: set[str] = set()
+        self._stop_requests: set[str] = set()
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
 
@@ -70,6 +72,7 @@ class WorkflowRunner:
         child_heads: typing.Optional[dict[str, str]] = None,
         execution_id: typing.Optional[str] = None,
         new_execution_id: typing.Optional[str] = None,
+        on_started: typing.Optional[Callable[[], None]] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
         task = asyncio.create_task(
@@ -82,6 +85,7 @@ class WorkflowRunner:
                 child_heads=child_heads,
                 execution_id=execution_id,
                 new_execution_id=new_execution_id,
+                on_started=on_started,
             )
         )
         self._executions.add(task)
@@ -104,6 +108,9 @@ class WorkflowRunner:
             if not task.done() and not task.cancelling():
                 task.cancel()
 
+    def request_stop(self, execution_id: str) -> None:
+        self._stop_requests.add(execution_id)
+
     @asynccontextmanager
     async def _writer(self, project: RunnerProject) -> AsyncIterator[RunnerStateStore]:
         if self._state_store is not None:
@@ -120,14 +127,63 @@ class WorkflowRunner:
                     with logs.activate():
                         yield store
 
-    def suspend_inputs(self) -> bool:
+    @asynccontextmanager
+    async def _execution_writer(
+        self, project: RunnerProject, execution_id: str
+    ) -> AsyncIterator[RunnerStateStore]:
+        async with self._writer(project) as store:
+            async with store.reserve(execution_id):
+                cancelled = False
+                try:
+                    yield store
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                finally:
+
+                    async def settle() -> None:
+                        try:
+                            record = await (
+                                await self._database(project, execution_id)
+                            ).get_execution()
+                        except (FileNotFoundError, KeyError):
+                            return
+                        if (
+                            cancelled
+                            and execution_id not in self._suspending
+                            and record.status == "running"
+                        ):
+                            database = await self._database(project, execution_id)
+                            await database.cancel_inputs()
+                            await database.save_execution(
+                                record.model_copy(update={"status": "cancelled"})
+                            )
+                            await store.deactivate(execution_id)
+                        elif record.status != "running":
+                            await store.deactivate(execution_id)
+
+                    await finish_cleanup(asyncio.create_task(settle()))
+                    self._suspending.discard(execution_id)
+                    self._stop_requests.discard(execution_id)
+
+    def suspend_inputs(self, execution_id: typing.Optional[str] = None) -> bool:
         """Preserve durable waits when shutting down, unlike an explicit stop."""
+        if execution_id is not None:
+            owner = self._mailboxes.get(execution_id)
+            waiting = self.authentication.waiting_for(execution_id) or (
+                owner is not None and bool(owner.waiting)
+            )
+            if waiting and owner is not None:
+                owner.suspending = True
+                self._suspending.add(execution_id)
+            return waiting
         waiting = self.authentication.waiting or any(
             owner.waiting for owner in self._mailboxes.values()
         )
         if waiting:
-            for owner in self._mailboxes.values():
+            for identifier, owner in self._mailboxes.items():
                 owner.suspending = True
+                self._suspending.add(identifier)
             self.stop()
         return waiting
 
@@ -163,6 +219,7 @@ class WorkflowRunner:
         child_heads: typing.Optional[dict[str, str]],
         execution_id: typing.Optional[str],
         new_execution_id: typing.Optional[str],
+        on_started: typing.Optional[Callable[[], None]],
     ) -> pydantic.JsonValue:
         project = await RunnerProject.open(self.path)
         if new_execution_id is not None and (
@@ -170,15 +227,14 @@ class WorkflowRunner:
         ):
             raise ValueError("new execution ID requires a new persistent execution")
         if self.history is None:
-            async with self._writer(project) as store:
+            identifier = execution_id or new_execution_id or uuid4().hex
+            async with self._execution_writer(project, identifier) as store:
                 if execution_id is None:
                     if continue_from_step_id is not None:
                         raise ValueError(
                             "execution ID is required for persistent continuation"
                         )
-                    execution_id = (
-                        uuid4().hex if new_execution_id is None else new_execution_id
-                    )
+                    execution_id = identifier
                     root_id = workflow_id if workflow_id is not None else uuid4().hex
                     record = execution_models.ExecutionRecord(
                         id=execution_id,
@@ -284,10 +340,14 @@ class WorkflowRunner:
                     checkpointer = ExecutionCheckpointer(database, history, record)
                     await database.save_execution(record, replace_heads=True)
                     await checkpointer.persist()
-                    await store.save(state.RunnerState(last_execution_id=execution_id))
+                    await store.activate(execution_id)
                     owner = mailbox.Mailbox(database, self.mailbox_sink)
                     self._mailboxes[execution_id] = owner
                     try:
+                        if on_started is not None:
+                            on_started()
+                        if execution_id in self._stop_requests:
+                            raise asyncio.CancelledError
                         async with checkpointer.tracking():
                             result = await self._run(
                                 project,
@@ -318,9 +378,16 @@ class WorkflowRunner:
                     await database.cancel_inputs()
                     await checkpointer.persist("completed")
                     await history.flush()
-                    await ExecutionRetention(
-                        project.data_path, project.config.retention
-                    ).apply((await store.load()).last_execution_id)
+                    async with store.coordination:
+                        pointer = await store.load()
+                        await ExecutionRetention(
+                            project.data_path, project.config.retention
+                        ).apply(
+                            pointer.last_execution_id,
+                            protected_ids=store.reserved
+                            | store.scheduled
+                            | set(pointer.active_execution_ids),
+                        )
                     return result
         return await self._run(
             project,
@@ -484,13 +551,30 @@ class WorkflowRunner:
 
     async def recovery_candidates(self) -> list[execution_models.ExecutionRecord]:
         pointer = await self.project_state()
-        if pointer.last_execution_id is None:
-            return []
-        record = await self.execution_state(pointer.last_execution_id)
-        return [record] if record.status == "running" else []
+        identifiers = set(pointer.active_execution_ids)
+        if pointer.last_execution_id is not None:
+            identifiers.add(pointer.last_execution_id)
+        after = None
+        while page := await self.execution_ids(after=after):
+            identifiers.update(page)
+            after = page[-1]
+        records = []
+        for identifier in sorted(identifiers):
+            try:
+                records.append(await self.execution_state(identifier))
+            except KeyError:
+                if (
+                    identifier in pointer.active_execution_ids
+                    or identifier == pointer.last_execution_id
+                ):
+                    raise
+        return [record for record in records if record.status == "running"]
 
     async def resume(
-        self, execution_id: typing.Optional[str] = None
+        self,
+        execution_id: typing.Optional[str] = None,
+        *,
+        on_started: typing.Optional[Callable[[], None]] = None,
     ) -> pydantic.JsonValue:
         project = await RunnerProject.open(self.path)
         if execution_id is None:
@@ -501,7 +585,12 @@ class WorkflowRunner:
         record = await database.get_execution()
         configuration = await database.get_workflow(record.root_workflow_id)
         workflow_name, _, callable_name = configuration.definition_ref.rpartition(":")
-        return await self.run(workflow_name, callable_name, execution_id=execution_id)
+        return await self.run(
+            workflow_name,
+            callable_name,
+            execution_id=execution_id,
+            on_started=on_started,
+        )
 
     async def remove_execution(self, execution_id: str) -> None:
         project = await RunnerProject.open(self.path)
@@ -512,5 +601,6 @@ class WorkflowRunner:
                 raise ValueError("active execution history cannot be removed")
             pointer = await store.load()
             if pointer.last_execution_id == execution_id:
-                await store.save(state.RunnerState())
+                await store.save(pointer.model_copy(update={"last_execution_id": None}))
+            await store.deactivate(execution_id)
             await asyncio.to_thread(shutil.rmtree, database.path.parent)

@@ -1,4 +1,4 @@
-"""Single-root execution ownership and transport-independent control operations."""
+"""Concurrent execution ownership and transport-independent control operations."""
 
 import asyncio
 from collections.abc import Callable
@@ -17,6 +17,7 @@ from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
 from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner.resources import finish_cleanup
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -36,11 +37,12 @@ class RunnerService:
         self._store: typing.Optional[RunnerStateStore] = None
         self._requests: typing.Optional[RequestStore] = None
         self._runner: typing.Optional[WorkflowRunner] = None
-        self._task: typing.Optional[asyncio.Task[None]] = None
-        self._active: typing.Optional[p.Active] = None
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._active: dict[str, p.Active] = {}
         self._lock = asyncio.Lock()
         self._listeners: set[EventSink] = set()
-        self._suspending = False
+        self._suspending: set[str] = set()
+        self._close_task: typing.Optional[asyncio.Task[None]] = None
         self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
 
     async def __aenter__(self) -> typing.Self:
@@ -68,10 +70,11 @@ class RunnerService:
             authentication=self.authentication,
         )
         try:
-            for candidate in await self.runner.recovery_candidates():
+            candidates = await self.runner.recovery_candidates()
+            await self._store.reconcile([candidate.id for candidate in candidates])
+            for candidate in candidates:
                 accepted = p.Accepted(execution_id=candidate.id)
-                self._active = p.Active(execution_id=candidate.id)
-                self._task = asyncio.create_task(self._execute(accepted, None, None))
+                self._schedule(accepted, None, None)
         except BaseException:
             await self._logs.aclose()
             await self._store.__aexit__()
@@ -83,21 +86,22 @@ class RunnerService:
         await self.aclose()
 
     async def aclose(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         async with self._lock:
             self.shutdown_requested.set()
+            if self.shutdown_mode == "cancel":
+                for identifier, active in self._active.items():
+                    if active.status != "stopping" and self.runner.suspend_inputs(
+                        identifier
+                    ):
+                        self._suspending.add(identifier)
+                    self._stop(identifier)
         try:
-            if self._task is not None:
-                if self.shutdown_mode == "cancel" and self._active is not None:
-                    if self._active.status != "stopping":
-                        self._suspending = self.runner.suspend_inputs()
-                    if not self._suspending:
-                        self._stop()
-                try:
-                    await asyncio.shield(self._task)
-                except asyncio.CancelledError:
-                    self._stop()
-                    await self._task
-                    raise
+            await asyncio.gather(*self._tasks.values())
         finally:
             try:
                 if self._logs is not None:
@@ -107,7 +111,8 @@ class RunnerService:
                 if self._store is not None:
                     await self._store.__aexit__()
                 self._runner = None
-                self._task = None
+                self._tasks.clear()
+                self._active.clear()
 
     @property
     def logs(self) -> diagnostics.DiagnosticLog:
@@ -148,13 +153,28 @@ class RunnerService:
     def _step(self, event: events.StepEvent) -> None:
         self._emit(event.model_dump(mode="json"))
 
-    def _stop(self) -> None:
-        if self._active is None or self._active.status == "stopping":
+    def _stop(self, execution_id: str) -> None:
+        active = self._active.get(execution_id)
+        if active is None or active.status == "stopping":
             return
-        started = self._active.status != "starting"
-        self._active = self._active.model_copy(update={"status": "stopping"})
-        if started and self._task is not None:
-            self._task.cancel()
+        started = active.status != "starting"
+        self._active[execution_id] = active.model_copy(update={"status": "stopping"})
+        if started:
+            self._tasks[execution_id].cancel()
+        else:
+            self.runner.request_stop(execution_id)
+
+    def _schedule(
+        self,
+        accepted: p.Accepted,
+        start: typing.Optional[p.Start],
+        reference: typing.Optional[str],
+    ) -> None:
+        identifier = accepted.execution_id
+        self._active[identifier] = p.Active(execution_id=identifier)
+        self._tasks[identifier] = asyncio.create_task(
+            self._execute(accepted, start, reference)
+        )
 
     async def _execute(
         self,
@@ -165,15 +185,18 @@ class RunnerService:
         """Retain task ownership across client disconnects and publish terminal cleanup."""
         status = "completed"
         error: typing.Optional[str] = None
-        try:
-            if self._active is not None and self._active.status == "stopping":
-                raise asyncio.CancelledError
-            self._active = p.Active(
+
+        def started() -> None:
+            if self._active[accepted.execution_id].status == "stopping":
+                return
+            self._active[accepted.execution_id] = p.Active(
                 execution_id=accepted.execution_id, status="running"
             )
             self._emit(
                 {"kind": "execution.started", "execution_id": accepted.execution_id}
             )
+
+        try:
             if start is not None:
                 assert reference is not None
                 await self.runner.run(
@@ -181,11 +204,16 @@ class RunnerService:
                     start.callable,
                     input=start.input,
                     new_execution_id=accepted.execution_id,
+                    on_started=started,
                 )
             else:
-                await self.runner.resume(accepted.execution_id)
+                await self.runner.resume(accepted.execution_id, on_started=started)
         except asyncio.CancelledError:
-            status = "suspended" if self._suspending else "cancelled"
+            status = (
+                "suspended"
+                if accepted.execution_id in self._suspending
+                else "cancelled"
+            )
         except Exception as exc:
             status, error = "failed", str(exc)
             with diagnostics.bind(execution_id=accepted.execution_id):
@@ -193,7 +221,11 @@ class RunnerService:
                     "execution.error", level=diagnostics.Level.ERROR, error=exc
                 )
         finally:
-            self._active = None
+            assert self._store is not None
+            self._store.scheduled.discard(accepted.execution_id)
+            self._active.pop(accepted.execution_id, None)
+            self._tasks.pop(accepted.execution_id, None)
+            self._suspending.discard(accepted.execution_id)
             self._emit(
                 {
                     "kind": "execution." + status,
@@ -204,6 +236,7 @@ class RunnerService:
 
     async def _launch(self, params: typing.Union[p.Start, p.Resume]) -> p.Accepted:
         assert self._requests is not None
+        assert self._store is not None
         fingerprint = json.dumps(
             [type(params).__name__, params.model_dump(exclude={"idempotency_key"})],
             sort_keys=True,
@@ -216,10 +249,6 @@ class RunnerService:
                 return previous
             if self.shutdown_requested.is_set():
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
-            if self._active is not None:
-                raise p.RemoteError(
-                    "runner_busy", "a top-level workflow is already active"
-                )
             reference = None
             start = None
             if isinstance(params, p.Start):
@@ -227,12 +256,21 @@ class RunnerService:
                 start = params
                 execution_id = uuid4().hex
             else:
-                await self.runner.execution_state(params.execution_id)
+                if params.execution_id in self._active:
+                    raise p.RemoteError(
+                        "execution_conflict", "execution is already active"
+                    )
                 execution_id = params.execution_id
+                async with self._store.coordination:
+                    await self.runner.execution_state(execution_id)
+                    self._store.scheduled.add(execution_id)
             accepted = p.Accepted(execution_id=execution_id)
-            await self._requests.save(params.idempotency_key, fingerprint, accepted)
-            self._active = p.Active(execution_id=execution_id)
-            self._task = asyncio.create_task(self._execute(accepted, start, reference))
+            try:
+                await self._requests.save(params.idempotency_key, fingerprint, accepted)
+            except BaseException:
+                self._store.scheduled.discard(execution_id)
+                raise
+            self._schedule(accepted, start, reference)
             return accepted
 
     async def dispatch(
@@ -243,7 +281,7 @@ class RunnerService:
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
         if method.startswith("auth."):
-            if self.shutdown_requested.is_set():
+            if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
             try:
                 if method == "auth.list":
@@ -299,7 +337,7 @@ class RunnerService:
                 "instance_id": self.instance_id,
                 "workspace": str(self.path),
                 "version": p.VERSION,
-                "max_active_executions": 1,
+                "max_active_executions": None,
                 "event_replay": False,
                 "max_frame": p.MAX_FRAME,
                 "max_history_page": 500,
@@ -312,8 +350,37 @@ class RunnerService:
                     self.shutdown_requested.set()
             return {"status": "stopping"}
         if method == "executions.current":
-            p.Empty.model_validate(params)
-            return None if self._active is None else p.json_value(self._active)
+            selected_active = p.Current.model_validate(params)
+            if selected_active.execution_id is not None:
+                active = self._active.get(selected_active.execution_id)
+            else:
+                if len(self._active) > 1:
+                    raise p.RemoteError(
+                        "execution_conflict",
+                        "multiple executions are active; specify execution_id or use executions.active",
+                    )
+                active = next(iter(self._active.values()), None)
+            return None if active is None else p.json_value(active)
+        if method == "executions.active":
+            listing = p.ExecutionList.model_validate(params)
+            identifiers = sorted(
+                identifier
+                for identifier in self._active
+                if listing.after is None or identifier > listing.after
+            )
+            return p.json_value(
+                p.ActivePage(
+                    executions=[
+                        self._active[identifier]
+                        for identifier in identifiers[: listing.limit]
+                    ],
+                    next_after=(
+                        identifiers[listing.limit - 1]
+                        if len(identifiers) > listing.limit
+                        else None
+                    ),
+                )
+            )
         if method == "executions.start":
             return p.json_value(await self._launch(p.Start.model_validate(params)))
         if method == "executions.resume":
@@ -321,15 +388,10 @@ class RunnerService:
         if method == "executions.stop":
             selected = p.Execution.model_validate(params)
             async with self._lock:
-                if (
-                    self._active is None
-                    or self._active.execution_id != selected.execution_id
-                ):
-                    raise p.RemoteError(
-                        "execution_conflict", "execution is not the active workflow"
-                    )
-                self._stop()
-                return p.json_value(self._active)
+                if selected.execution_id not in self._active:
+                    raise p.RemoteError("execution_conflict", "execution is not active")
+                self._stop(selected.execution_id)
+                return p.json_value(self._active[selected.execution_id])
         if method == "executions.get":
             selected = p.Execution.model_validate(params)
             return p.json_value(
@@ -364,7 +426,7 @@ class RunnerService:
         if method == "mailbox.respond":
             answer = mailbox.Answer.model_validate(params)
             async with self._lock:
-                if self.shutdown_requested.is_set():
+                if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                     raise p.RemoteError("runner_stopping", "runner is shutting down")
                 try:
                     return p.json_value(await self.runner.answer_input(answer))

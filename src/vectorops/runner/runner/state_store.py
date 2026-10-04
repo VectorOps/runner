@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 import os
 import tempfile
@@ -18,6 +20,55 @@ class RunnerStateStore:
         self.path = data_path / "runner-state.json"
         self._descriptor: typing.Optional[int] = None
         self._lease = FileLease(data_path / "runner.lock")
+        self.coordination = asyncio.Lock()
+        self.reserved: set[str] = set()
+        self.scheduled: set[str] = set()
+
+    @asynccontextmanager
+    async def reserve(self, execution_id: str) -> AsyncIterator[None]:
+        async with self.coordination:
+            if execution_id in self.reserved:
+                raise ValueError("execution is already active")
+            self.reserved.add(execution_id)
+        try:
+            yield
+        finally:
+            self.reserved.discard(execution_id)
+
+    async def activate(self, execution_id: str) -> None:
+        async with self.coordination:
+            current = await self.load()
+            identifiers = sorted(set(current.active_execution_ids) | {execution_id})
+            await self.save(
+                state.RunnerState(
+                    last_execution_id=execution_id, active_execution_ids=identifiers
+                )
+            )
+
+    async def reconcile(self, execution_ids: list[str]) -> None:
+        async with self.coordination:
+            current = await self.load()
+            await self.save(
+                state.RunnerState(
+                    last_execution_id=current.last_execution_id,
+                    active_execution_ids=sorted(execution_ids),
+                )
+            )
+
+    async def deactivate(self, execution_id: str) -> None:
+        async with self.coordination:
+            current = await self.load()
+            await self.save(
+                current.model_copy(
+                    update={
+                        "active_execution_ids": [
+                            identifier
+                            for identifier in current.active_execution_ids
+                            if identifier != execution_id
+                        ]
+                    }
+                )
+            )
 
     async def load(self) -> state.RunnerState:
         def read() -> state.RunnerState:

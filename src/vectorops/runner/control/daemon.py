@@ -47,8 +47,10 @@ async def serve(
             )
             print(endpoint.model_dump_json(), flush=True)
             await service.shutdown_requested.wait()
-            await server.finish_requests()
+            if service.shutdown_mode != "drain":
+                await server.finish_requests()
             await service.aclose()
+            await server.finish_requests()
             await server.flush_events()
         finally:
             await server.aclose()
@@ -71,6 +73,7 @@ async def dispatch(
         port, token, host=host, config_dir=config_dir
     ) as connection:
         if command == "status":
+            active = await connection.active()
             print(
                 json.dumps(
                     {
@@ -81,10 +84,11 @@ async def dispatch(
                         },
                         "runner": await connection.info(),
                         "current": (
-                            p.json_value(current)
-                            if (current := await connection.current())
+                            p.json_value(active.executions[0])
+                            if len(active.executions) == 1 and active.next_after is None
                             else None
                         ),
+                        "active": p.json_value(active),
                     }
                 )
             )
@@ -96,11 +100,7 @@ async def dispatch(
             await connection.subscribe()
             print(json.dumps(await connection.info()), flush=True)
             print(
-                json.dumps(
-                    p.json_value(current)
-                    if (current := await connection.current())
-                    else None
-                ),
+                json.dumps(p.json_value(await connection.active())),
                 flush=True,
             )
             while True:

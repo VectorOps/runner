@@ -23,11 +23,12 @@ def database(workspace: Path, execution_id: str) -> SQLiteHistory:
     )
 
 
-def test_global_state_contains_only_last_execution_pointer() -> None:
+def test_global_state_tracks_execution_discovery() -> None:
     pointer = state.RunnerState(last_execution_id="execution")
     assert pointer.model_dump() == {
         "schema_version": 1,
         "last_execution_id": "execution",
+        "active_execution_ids": [],
     }
     assert state.RunnerState.model_validate_json(pointer.model_dump_json()) == pointer
     with pytest.raises(pydantic.ValidationError):
@@ -58,6 +59,7 @@ async def test_atomic_pointer_save_and_project_ownership(tmp_path: Path) -> None
         assert json.loads(store.path.read_text()) == {
             "schema_version": 1,
             "last_execution_id": "execution",
+            "active_execution_ids": [],
         }
         with pytest.raises(RuntimeError, match="another runner"):
             async with RunnerStateStore(tmp_path):
@@ -117,7 +119,7 @@ async def test_cancelled_stream_retains_latest_head_in_database(
     await asyncio.wait_for(execution_probe.started.get(), 2)
     execution_id = str(runner.last_execution_id)
     assert (await runner.execution_state(execution_id)).status == "running"
-    pointer_before = (workspace / "data/runner-state.json").read_bytes()
+    assert (await runner.project_state()).active_execution_ids == [execution_id]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -127,7 +129,9 @@ async def test_cancelled_stream_retains_latest_head_in_database(
     assert (
         await database(workspace, execution_id).get_step(head)
     ).outcome == models.StepStreaming(state={"index": 0})
-    assert (workspace / "data/runner-state.json").read_bytes() == pointer_before
+    pointer = await runner.project_state()
+    assert pointer.last_execution_id == execution_id
+    assert pointer.active_execution_ids == []
     execution_probe.gate.set()
     assert await WorkflowRunner(workspace).resume() == {"count": 2}
     assert (await runner.execution_state(execution_id)).status == "completed"
@@ -200,6 +204,7 @@ async def test_failed_execution_status_lives_only_in_database(
     assert set(json.loads((workspace / "data/runner-state.json").read_text())) == {
         "schema_version",
         "last_execution_id",
+        "active_execution_ids",
     }
 
 

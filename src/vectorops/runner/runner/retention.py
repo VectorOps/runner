@@ -49,6 +49,7 @@ class ExecutionRetention:
         last_execution_id: typing.Optional[str],
         *,
         now: typing.Optional[datetime] = None,
+        protected_ids: typing.AbstractSet[str] = frozenset(),
     ) -> list[str]:
         """Delete completed histories exceeding either limit; caller owns project lock."""
         if (
@@ -109,7 +110,10 @@ class ExecutionRetention:
                 available -= 1
         deleted: list[str] = []
         for item in histories:
-            if item.execution.id == last_execution_id:
+            if (
+                item.execution.id == last_execution_id
+                or item.execution.id in protected_ids
+            ):
                 continue
             age_exceeded = (
                 self.policy.max_age_days is not None

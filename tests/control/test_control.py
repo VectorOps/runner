@@ -88,7 +88,9 @@ async def test_execution_history_events_and_reconnect(
         assert (await connection.execution(accepted.execution_id)).status == "completed"
 
 
-async def test_busy_stop_disconnect_and_workspace_ownership(tmp_path: Path) -> None:
+async def test_concurrent_stop_disconnect_and_workspace_ownership(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "wait.py").write_text(
         "import asyncio\nasync def main(ctx):\n    await asyncio.sleep(60)\n"
     )
@@ -111,18 +113,16 @@ async def test_busy_stop_disconnect_and_workspace_ownership(tmp_path: Path) -> N
                     current is not None
                     and current.execution_id == accepted.execution_id
                 )
-                with pytest.raises(p.RemoteError) as error:
-                    await second.start(
-                        p.Start(
-                            file="wait.py", callable="main", idempotency_key="other"
-                        )
-                    )
-                assert error.value.code == "runner_busy"
+                other = await second.start(
+                    p.Start(file="wait.py", callable="main", idempotency_key="other")
+                )
+                assert other.execution_id != accepted.execution_id
                 with pytest.raises(p.RemoteError) as error:
                     await second.stop("wrong")
                 assert error.value.code == "execution_conflict"
                 assert (await second.stop(accepted.execution_id)).status == "stopping"
                 assert (await terminal(second)).event["kind"] == "execution.cancelled"
+                assert await second.current(other.execution_id) is not None
         finally:
             await server.aclose()
 

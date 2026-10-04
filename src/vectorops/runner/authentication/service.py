@@ -52,6 +52,9 @@ class AuthenticationService:
     def waiting(self) -> bool:
         return bool(self._pending)
 
+    def waiting_for(self, execution_id: str) -> bool:
+        return any(execution_id in item.executions for item in self._pending.values())
+
     def _emit(self, kind: str, item: Pending) -> None:
         if self.event_sink is not None:
             try:
