@@ -18,7 +18,7 @@ async def test_stream_replaces_one_record_with_latest_state(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+        runner.run("streaming:workflow", input={"mode": "blocked"}, workflow_id="root")
     )
     assert await asyncio.wait_for(execution_probe.started.get(), 2) == 0
     head = history.heads["root"]
@@ -44,13 +44,13 @@ async def test_completed_stream_replay_never_reinvokes_or_updates(
     execution_probe: ExecutionProbe,
     callable_name: str,
 ) -> None:
-    assert await runner.run("streaming", callable_name, workflow_id="root") == {
+    assert await runner.run(f"streaming:{callable_name}", workflow_id="root") == {
         "count": 2
     }
     appended = list(history.appended)
     updated = history.updated
     assert await runner.run(
-        "streaming", callable_name, continue_from_step_id=history.heads["root"]
+        f"streaming:{callable_name}", continue_from_step_id=history.heads["root"]
     ) == {"count": 2}
     assert history.appended == appended
     assert history.updated == updated
@@ -78,7 +78,7 @@ async def test_invalid_streams_record_one_failure_and_close_generator(
     message: str,
 ) -> None:
     with pytest.raises(ActivityError, match=message):
-        await runner.run("streaming", input={"mode": mode}, workflow_id="root")
+        await runner.run("streaming:workflow", input={"mode": mode}, workflow_id="root")
     assert len(history.steps) == 3
     assert all(
         step.outcome.kind == "failed"
@@ -88,7 +88,9 @@ async def test_invalid_streams_record_one_failure_and_close_generator(
     assert execution_probe.cancelled == 1
     updated = history.updated
     with pytest.raises(ActivityError, match=message):
-        await runner.run("streaming", continue_from_step_id=history.heads["root"])
+        await runner.run(
+            "streaming:workflow", continue_from_step_id=history.heads["root"]
+        )
     assert history.updated == updated
     assert execution_probe.calls == [2]
 
@@ -96,14 +98,14 @@ async def test_invalid_streams_record_one_failure_and_close_generator(
 async def test_null_final_is_valid(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    assert await runner.run("streaming", input={"mode": "null"}) is None
+    assert await runner.run("streaming:workflow", input={"mode": "null"}) is None
 
 
 async def test_cancelled_stream_keeps_latest_snapshot_and_restarts_same_step(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+        runner.run("streaming:workflow", input={"mode": "blocked"}, workflow_id="root")
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     head = history.heads["root"]
@@ -114,7 +116,9 @@ async def test_cancelled_stream_keeps_latest_snapshot_and_restarts_same_step(
     assert len(history.steps) == 1
     assert execution_probe.cancelled == 1
     execution_probe.gate.set()
-    assert await runner.run("streaming", continue_from_step_id=head) == {"count": 2}
+    assert await runner.run("streaming:workflow", continue_from_step_id=head) == {
+        "count": 2
+    }
     assert history.steps[head].outcome == models.StepCompleted(result={"count": 2})
     assert history.appended[0] == head
     assert len(history.steps) == 3
@@ -127,7 +131,7 @@ async def test_update_storage_failure_is_fatal_and_closes_generator(
 ) -> None:
     history.fail_update = True
     with pytest.raises(OSError, match="storage"):
-        await runner.run("streaming", workflow_id="root")
+        await runner.run("streaming:workflow", workflow_id="root")
     assert len(history.steps) == 1
     assert history.steps[history.heads["root"]].outcome.kind == "streaming"
     assert execution_probe.cancelled == 1
@@ -136,7 +140,9 @@ async def test_update_storage_failure_is_fatal_and_closes_generator(
 async def test_many_updates_do_not_accumulate_step_versions(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    assert await runner.run("streaming", input={"count": 1000}) == {"count": 1000}
+    assert await runner.run("streaming:workflow", input={"count": 1000}) == {
+        "count": 1000
+    }
     assert len(history.steps) == 3
     assert len(history.appended) == 3
     assert history.updated == 1002
@@ -145,12 +151,12 @@ async def test_many_updates_do_not_accumulate_step_versions(
 async def test_fork_after_stream_reuses_final_result_without_updating_history(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    await runner.run("streaming", workflow_id="root")
+    await runner.run("streaming:workflow", workflow_id="root")
     original = history.path(history.heads["root"])
     updated = history.updated
-    assert await runner.run("streaming", continue_from_step_id=original[0].id) == {
-        "count": 2
-    }
+    assert await runner.run(
+        "streaming:workflow", continue_from_step_id=original[0].id
+    ) == {"count": 2}
     fork = history.path(history.heads["root"])
     assert fork[0] == original[0]
     assert fork[1].id != original[1].id
@@ -162,7 +168,7 @@ async def test_fork_after_stream_reuses_final_result_without_updating_history(
 async def test_terminal_stream_record_cannot_be_rewritten(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    await runner.run("streaming", workflow_id="root")
+    await runner.run("streaming:workflow", workflow_id="root")
     step = history.path(history.heads["root"])[0]
     with pytest.raises(ValueError, match="terminal"):
         await history.update_step(
@@ -173,14 +179,14 @@ async def test_terminal_stream_record_cannot_be_rewritten(
 async def test_unfinished_stream_cannot_have_recorded_delivery(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    await runner.run("streaming", workflow_id="root")
+    await runner.run("streaming:workflow", workflow_id="root")
     path = history.path(history.heads["root"])
     history.replay_override = [
         path[0].model_copy(update={"outcome": models.StepStreaming()}),
         path[1],
     ]
     with pytest.raises(ReplayMismatchError, match="unfinished invocation"):
-        await runner.run("streaming", continue_from_step_id=path[-1].id)
+        await runner.run("streaming:workflow", continue_from_step_id=path[-1].id)
 
 
 async def test_streaming_requires_active_context() -> None:

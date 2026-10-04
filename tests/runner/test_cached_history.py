@@ -278,7 +278,7 @@ async def test_default_runner_coalesces_sqlite_updates(
         await original(self, step)
 
     monkeypatch.setattr(SQLiteHistory, "update_step", update)
-    assert await WorkflowRunner(workspace).run("streaming", input={"count": 1000}) == {
-        "count": 1000
-    }
+    assert await WorkflowRunner(workspace).run(
+        "streaming:workflow", input={"count": 1000}
+    ) == {"count": 1000}
     assert updates == 1

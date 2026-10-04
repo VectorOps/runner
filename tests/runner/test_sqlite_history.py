@@ -338,7 +338,7 @@ async def test_default_database_follows_configured_data_directory(
 ) -> None:
     (workspace / "config.toml").write_text('data_directory = "state"\n')
     runner = WorkflowRunner(workspace)
-    assert await runner.run("activities") == 2
+    assert await runner.run("activities:workflow") == 2
     manifest = await runner.project_state()
     assert (
         workspace
@@ -353,7 +353,7 @@ async def test_default_runner_persists_and_replays_after_restart(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    assert await runner.run("activities", workflow_id="root") == 2
+    assert await runner.run("activities:workflow", workflow_id="root") == 2
     record = await runner.execution_state(str(runner.last_execution_id))
     database = SQLiteHistory(
         workspace / "data/executions" / record.id / "history.sqlite3"
@@ -372,7 +372,9 @@ async def test_default_runner_persists_and_replays_after_restart(
     completion_id = await asyncio.to_thread(head)
     assert (
         await WorkflowRunner(workspace).run(
-            "activities", continue_from_step_id=completion_id, execution_id=record.id
+            "activities:workflow",
+            continue_from_step_id=completion_id,
+            execution_id=record.id,
         )
         == 2
     )
@@ -384,7 +386,7 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+        runner.run("streaming:workflow", input={"mode": "blocked"}, workflow_id="root")
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     task.cancel()
@@ -410,7 +412,7 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
     )
     execution_probe.gate.set()
     assert await WorkflowRunner(workspace).run(
-        "streaming", continue_from_step_id=stream_id, execution_id=record.id
+        "streaming:workflow", continue_from_step_id=stream_id, execution_id=record.id
     ) == {"count": 2}
     assert (await database.get_step(stream_id)).outcome == m.StepCompleted(
         result={"count": 2}
@@ -421,7 +423,7 @@ async def test_nested_children_persist_and_replay(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    assert await runner.run("children:deep_parent", workflow_id="root") == 4
     record = await runner.execution_state(str(runner.last_execution_id))
     database = SQLiteHistory(
         workspace / "data/executions" / record.id / "history.sqlite3"
@@ -439,8 +441,7 @@ async def test_nested_children_persist_and_replay(
 
     assert (
         await WorkflowRunner(workspace).run(
-            "children",
-            "deep_parent",
+            "children:deep_parent",
             continue_from_step_id=await asyncio.to_thread(completion),
             execution_id=record.id,
         )

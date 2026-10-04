@@ -126,7 +126,8 @@ async def test_nonfinite_json_rejected(number: str) -> None:
 async def test_backfill_matches_update_while_workflow_is_running(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "job.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/job.py").write_text(
         "import asyncio\n"
         "from vectorops.runner.api import composition as c\n"
         "@c.streamable_activity()\n"
@@ -140,7 +141,7 @@ async def test_backfill_matches_update_while_workflow_is_running(
     async with client.embedded(tmp_path) as connection:
         await connection.subscribe()
         accepted = await connection.start(
-            p.Start(file="job.py", callable="main", idempotency_key="start")
+            p.Start(reference="job:main", idempotency_key="start")
         )
         async with asyncio.timeout(5):
             while True:

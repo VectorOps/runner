@@ -1,6 +1,7 @@
 """Typed tool bindings and workflow-side approval/execution composition."""
 
 from collections.abc import Awaitable, Callable
+from abc import ABC, abstractmethod
 import hashlib
 import json
 import typing
@@ -12,6 +13,8 @@ from vectorops.runner import diagnostics, tool_policy
 from vectorops.runner.api import composition as c, mailbox
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.errors import ActivityError
 
 A = typing.TypeVar("A", bound=pydantic.BaseModel)
 
@@ -109,6 +112,39 @@ class Tool(typing.Generic[A]):
         return await self._invoke(context, self._validated(arguments))
 
 
+class WorkflowToolBinding(ABC):
+    """A tool whose implementation composes durable workflow operations."""
+
+    @property
+    @abstractmethod
+    def definition(self) -> connect.ToolSpec: ...
+
+    @property
+    @abstractmethod
+    def version(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def approval(self) -> typing.Optional[ToolApproval]: ...
+
+    @abstractmethod
+    def validate(self, arguments: dict[str, pydantic.JsonValue]) -> None: ...
+
+    async def execute(
+        self,
+        context: ActivityExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> ToolResponse:
+        raise RuntimeError("workflow tools must execute in workflow context")
+
+    @abstractmethod
+    async def execute_workflow(
+        self,
+        context: WorkflowExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> ToolResponse: ...
+
+
 def _digest(value: pydantic.JsonValue) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -131,6 +167,10 @@ async def invoke_tool(
     retain binding-local approval. Tool exceptions return their unchanged text by default. Cancellation,
     replay mismatches, storage failures, and approval transport errors propagate.
     """
+    if isinstance(binding, WorkflowToolBinding):
+        return await _workflow_tool(
+            binding, request.model_copy(deep=True), instance, raise_errors
+        )
     if c.workflow_context().workflow.tool_policy_version is not None:
         return await _gated_tool(
             binding, request.model_copy(deep=True), instance, raise_errors
@@ -241,6 +281,7 @@ async def _gated_tool(
     request: connect.ToolCallBlock,
     instance: typing.Optional[str],
     raise_errors: bool,
+    gate_only: bool = False,
 ) -> connect.ToolResultMessage:
     """Gate only live tool execution; replay returns the recorded result directly."""
     project = c.workflow_context().project
@@ -324,6 +365,12 @@ async def _gated_tool(
             if error is not None:
                 raise error
             assert binding is not None
+            if gate_only:
+                return connect.ToolResultMessage(
+                    tool_call_id=request.id,
+                    tool_name=request.name,
+                    content=[],
+                ).model_dump(mode="json")
             result = await binding.execute(ctx, request.arguments)
             if result.is_error:
                 diagnostics.log(
@@ -359,8 +406,33 @@ async def _gated_tool(
             "call_digest": _digest(request.model_dump(mode="json")),
             "tool_digest": digest,
             "tool_version": binding.version if binding is not None else None,
+            **({"gate_only": True} if gate_only else {}),
             **({"raise_errors": True} if raise_errors else {}),
         },
         invoke=invoke,
     )
     return connect.ToolResultMessage.model_validate(result)
+
+
+async def _workflow_tool(
+    binding: WorkflowToolBinding,
+    request: connect.ToolCallBlock,
+    instance: typing.Optional[str],
+    raise_errors: bool,
+) -> connect.ToolResultMessage:
+    """Replay the approval gate while leaving child operations in workflow history."""
+    gate = await _gated_tool(binding, request, instance, raise_errors, gate_only=True)
+    if gate.is_error:
+        return gate
+    try:
+        result = await binding.execute_workflow(c.workflow_context(), request.arguments)
+    except (ActivityError, ToolExecutionError) as exc:
+        if raise_errors:
+            raise
+        result = ToolResponse(content=[connect.TextBlock(text=str(exc))], is_error=True)
+    return connect.ToolResultMessage(
+        tool_call_id=request.id,
+        tool_name=request.name,
+        content=result.content,
+        is_error=result.is_error,
+    )

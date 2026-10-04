@@ -10,6 +10,7 @@ import typing
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.project import RunnerProject
@@ -33,8 +34,7 @@ class StreamingActivityRequest:
 @dataclass(frozen=True)
 class SpawnRequest:
     kind: typing.ClassVar[typing.Literal["spawn"]] = "spawn"
-    workflow_name: str
-    callable_name: str
+    reference: str
     input: dict[str, pydantic.JsonValue]
     contract_kind: typing.Optional[str] = None
     version: typing.Optional[int] = None
@@ -110,8 +110,7 @@ class WorkflowExecutionContext:
 
     async def spawn_workflow(
         self,
-        workflow_name: str,
-        callable_name: str = "workflow",
+        reference: str,
         *,
         input: typing.Optional[dict[str, pydantic.JsonValue]] = None,
         kind: typing.Optional[str] = None,
@@ -119,8 +118,7 @@ class WorkflowExecutionContext:
     ) -> ChildWorkflowHandle:
         response = await self.submitter.submit(
             SpawnRequest(
-                workflow_name,
-                callable_name,
+                str(WorkflowReference.parse(reference)),
                 {} if input is None else input,
                 kind,
                 version,

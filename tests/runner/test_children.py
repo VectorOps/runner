@@ -14,8 +14,7 @@ async def test_parallel_children_preserve_invocation_order(
 ) -> None:
     task = asyncio.create_task(
         runner.run(
-            "children",
-            "parent",
+            "children:parent",
             input={"values": [2, 1], "block": True},
             workflow_id="root",
         )
@@ -49,10 +48,10 @@ async def test_sequential_and_nested_children(
     execution_probe: ExecutionProbe,
     callable_name: str,
 ) -> None:
-    assert await runner.run("children", callable_name, workflow_id="root") == [2, 4]
+    assert await runner.run(f"children:{callable_name}", workflow_id="root") == [2, 4]
     before = list(history.appended)
     assert await runner.run(
-        "children", callable_name, continue_from_step_id=history.heads["root"]
+        f"children:{callable_name}", continue_from_step_id=history.heads["root"]
     ) == [2, 4]
     assert history.appended == before
     assert execution_probe.calls == [1, 2]
@@ -64,17 +63,14 @@ async def test_collect_failed_children(
     expected = [4, {"error": "child -1 failed"}, 2]
     assert (
         await runner.run(
-            "children",
-            "parent",
+            "children:parent",
             input={"values": [2, -1, 1], "policy": "collect"},
             workflow_id="root",
         )
         == expected
     )
     assert (
-        await runner.run(
-            "children", "parent", continue_from_step_id=history.heads["root"]
-        )
+        await runner.run("children:parent", continue_from_step_id=history.heads["root"])
         == expected
     )
 
@@ -84,24 +80,18 @@ async def test_propagates_first_failure_in_invocation_order(
 ) -> None:
     with pytest.raises(ActivityError, match="child -2 failed"):
         await runner.run(
-            "children", "parent", input={"values": [-2, -1]}, workflow_id="root"
+            "children:parent", input={"values": [-2, -1]}, workflow_id="root"
         )
     with pytest.raises(ActivityError, match="child -2 failed"):
-        await runner.run(
-            "children", "parent", continue_from_step_id=history.heads["root"]
-        )
+        await runner.run("children:parent", continue_from_step_id=history.heads["root"])
 
 
 async def test_parent_can_catch_child_failure(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
+    assert await runner.run("children:catch", workflow_id="root") == "child -1 failed"
     assert (
-        await runner.run("children", "catch", workflow_id="root") == "child -1 failed"
-    )
-    assert (
-        await runner.run(
-            "children", "catch", continue_from_step_id=history.heads["root"]
-        )
+        await runner.run("children:catch", continue_from_step_id=history.heads["root"])
         == "child -1 failed"
     )
 
@@ -109,7 +99,7 @@ async def test_parent_can_catch_child_failure(
 async def test_resume_spawn_with_explicit_child_head(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    await runner.run("children", "sequential", workflow_id="root")
+    await runner.run("children:sequential", workflow_id="root")
     parent_path = history.path(history.heads["root"])
     spawn = models.WorkflowSpawnOperation.model_validate(
         parent_path[0].operation.model_dump()
@@ -117,8 +107,7 @@ async def test_resume_spawn_with_explicit_child_head(
     child_path = history.path(history.heads[spawn.child_workflow_id])
     before = len(execution_probe.calls)
     assert await runner.run(
-        "children",
-        "sequential",
+        "children:sequential",
         continue_from_step_id=parent_path[0].id,
         child_heads={spawn.child_workflow_id: child_path[0].id},
     ) == [2, 4]
@@ -129,7 +118,7 @@ async def test_resume_spawn_with_explicit_child_head(
 async def test_invalid_child_completion_reference(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    await runner.run("children", "sequential", workflow_id="root")
+    await runner.run("children:sequential", workflow_id="root")
     parent_path = history.path(history.heads["root"])
     join = parent_path[1]
     assert join.outcome.kind == "joined"
@@ -140,14 +129,14 @@ async def test_invalid_child_completion_reference(
     )
     with pytest.raises(ReplayMismatchError):
         await runner.run(
-            "children", "sequential", continue_from_step_id=parent_path[-1].id
+            "children:sequential", continue_from_step_id=parent_path[-1].id
         )
 
 
 async def test_deep_partial_recovery_forks_each_level_without_replaying_effects(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    assert await runner.run("children:deep_parent", workflow_id="root") == 4
     root_path = history.path(history.heads["root"])
     child_spawn = models.WorkflowSpawnOperation.model_validate(
         root_path[0].operation.model_dump()
@@ -166,8 +155,7 @@ async def test_deep_partial_recovery_forks_each_level_without_replaying_effects(
 
     assert (
         await runner.run(
-            "children",
-            "deep_parent",
+            "children:deep_parent",
             continue_from_step_id=root_path[0].id,
             child_heads={child_id: child_path[0].id, leaf_id: leaf_path[0].id},
         )
@@ -214,7 +202,7 @@ async def test_deep_partial_recovery_forks_each_level_without_replaying_effects(
     execution_probe.calls.clear()
     assert (
         await runner.run(
-            "children", "deep_parent", continue_from_step_id=history.heads["root"]
+            "children:deep_parent", continue_from_step_id=history.heads["root"]
         )
         == 4
     )
@@ -227,8 +215,7 @@ async def test_parent_cancellation_cleans_children(
 ) -> None:
     task = asyncio.create_task(
         runner.run(
-            "children",
-            "parent",
+            "children:parent",
             input={"values": [1, 2], "block": True},
             workflow_id="root",
         )

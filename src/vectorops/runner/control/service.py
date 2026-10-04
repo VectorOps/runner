@@ -201,7 +201,6 @@ class RunnerService:
                 assert reference is not None
                 await self.runner.run(
                     reference,
-                    start.callable,
                     input=start.input,
                     new_execution_id=accepted.execution_id,
                     on_started=started,
@@ -252,7 +251,8 @@ class RunnerService:
             reference = None
             start = None
             if isinstance(params, p.Start):
-                reference = await self.runner.resolve_file(params.file)
+                reference = params.reference
+                await (await self.runner.project()).resolver.resolve(reference)
                 start = params
                 execution_id = uuid4().hex
             else:

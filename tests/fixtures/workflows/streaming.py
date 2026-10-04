@@ -52,7 +52,7 @@ async def workflow(
 
 
 async def parent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
-    handle = await ctx.spawn_workflow("streaming")
+    handle = await ctx.spawn_workflow("streaming:workflow")
     outcomes = await ctx.join_workflows([handle])
     if outcomes[0].kind != "completed":
         raise AssertionError("child failed")

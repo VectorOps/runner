@@ -14,7 +14,10 @@ from vectorops.runner.runner.workflow import WorkflowRunner
 async def test_records_activities_in_order(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    assert await runner.run("activities", input={"value": 3}, workflow_id="root") == 5
+    assert (
+        await runner.run("activities:workflow", input={"value": 3}, workflow_id="root")
+        == 5
+    )
     steps = history.path(history.heads["root"])
     assert [step.operation.kind for step in steps] == [
         "test.increment",
@@ -32,7 +35,7 @@ async def test_records_activities_in_order(
 async def test_no_activity_workflow_records_completion(
     runner: WorkflowRunner, history: MemoryHistory, workspace: Path
 ) -> None:
-    assert await runner.run("activities", "empty", workflow_id="root") == {
+    assert await runner.run("activities:empty", workflow_id="root") == {
         "id": "root",
         "data": str(workspace / "data"),
     }
@@ -50,16 +53,16 @@ async def test_result_is_recorded_before_next_activity(
         )
 
     execution_probe.before_call = check
-    assert await runner.run("activities") == 2
+    assert await runner.run("activities:workflow") == 2
 
 
 async def test_full_replay_does_not_reinvoke_or_append(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    assert await runner.run("activities", workflow_id="root") == 2
+    assert await runner.run("activities:workflow", workflow_id="root") == 2
     head = history.heads["root"]
     before = list(history.appended)
-    assert await runner.run("activities", continue_from_step_id=head) == 2
+    assert await runner.run("activities:workflow", continue_from_step_id=head) == 2
     assert history.appended == before
     assert execution_probe.calls == [0, 1]
     assert history.closed_paths == 1
@@ -68,9 +71,12 @@ async def test_full_replay_does_not_reinvoke_or_append(
 async def test_fork_preserves_existing_descendants(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     original = history.path(history.heads["root"])
-    assert await runner.run("activities", continue_from_step_id=original[0].id) == 2
+    assert (
+        await runner.run("activities:workflow", continue_from_step_id=original[0].id)
+        == 2
+    )
     fork = history.path(history.heads["root"])
     assert fork[0] == original[0]
     assert fork[1].id != original[1].id
@@ -80,25 +86,32 @@ async def test_fork_preserves_existing_descendants(
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"workflow_id": "other"}, {"input": {"value": 10}}, {"callable_name": "empty"}],
+    [
+        {"workflow_id": "other"},
+        {"input": {"value": 10}},
+        {"reference": "activities:empty"},
+    ],
 )
 async def test_resume_configuration_mismatch(
     runner: WorkflowRunner, history: MemoryHistory, kwargs: dict[str, object]
 ) -> None:
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     with pytest.raises(ValueError):
         await runner.run(
-            "activities",
+            str(kwargs.get("reference", "activities:workflow")),
             continue_from_step_id=history.heads["root"],
-            **typing.cast(dict[str, typing.Any], kwargs),
+            **typing.cast(
+                dict[str, typing.Any],
+                {key: value for key, value in kwargs.items() if key != "reference"},
+            ),
         )
 
 
 async def test_unknown_and_empty_resume_step(runner: WorkflowRunner) -> None:
     with pytest.raises(ValueError):
-        await runner.run("activities", continue_from_step_id="")
+        await runner.run("activities:workflow", continue_from_step_id="")
     with pytest.raises(KeyError):
-        await runner.run("activities", continue_from_step_id="missing")
+        await runner.run("activities:workflow", continue_from_step_id="missing")
 
 
 @pytest.mark.parametrize(
@@ -112,7 +125,7 @@ async def test_unknown_and_empty_resume_step(runner: WorkflowRunner) -> None:
 async def test_operation_mismatch_is_fatal(
     runner: WorkflowRunner, history: MemoryHistory, field: str, value: object
 ) -> None:
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     path = history.path(history.heads["root"])
     operation = path[0].operation.model_dump()
     operation[field] = value
@@ -124,7 +137,7 @@ async def test_operation_mismatch_is_fatal(
     ]
     before = list(history.appended)
     with pytest.raises(ReplayMismatchError):
-        await runner.run("activities", continue_from_step_id=path[-1].id)
+        await runner.run("activities:workflow", continue_from_step_id=path[-1].id)
     assert history.appended == before
     assert history.closed_paths == 1
 
@@ -135,7 +148,7 @@ async def test_operation_mismatch_is_fatal(
 async def test_invalid_replay_path(
     runner: WorkflowRunner, history: MemoryHistory, mutation: str
 ) -> None:
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     path = history.path(history.heads["root"])
     if mutation == "wrong_workflow":
         history.replay_override = [
@@ -157,19 +170,19 @@ async def test_invalid_replay_path(
             ),
         ]
     with pytest.raises(ReplayMismatchError):
-        await runner.run("activities", continue_from_step_id=path[-1].id)
+        await runner.run("activities:workflow", continue_from_step_id=path[-1].id)
 
 
 async def test_changed_workflow_return_is_mismatch(
     runner: WorkflowRunner, history: MemoryHistory, workspace: Path
 ) -> None:
-    await runner.run("activities", "empty", workflow_id="root")
+    await runner.run("activities:empty", workflow_id="root")
     completion = history.steps[history.heads["root"]]
     history.replay_override = [
         completion.model_copy(update={"outcome": m.StepCompleted(result="different")})
     ]
     with pytest.raises(ReplayMismatchError, match="completion"):
-        await runner.run("activities", "empty", continue_from_step_id=completion.id)
+        await runner.run("activities:empty", continue_from_step_id=completion.id)
 
 
 @pytest.mark.parametrize(
@@ -185,24 +198,25 @@ async def test_failures_record_terminal_outcomes(
     runner: WorkflowRunner, history: MemoryHistory, callable_name: str, message: str
 ) -> None:
     with pytest.raises(ActivityError, match=message):
-        await runner.run("activities", callable_name, workflow_id="root")
+        await runner.run(f"activities:{callable_name}", workflow_id="root")
     terminal = history.steps[history.heads["root"]]
     assert terminal.operation.kind == "workflow.complete"
     assert terminal.outcome.kind == "failed"
     with pytest.raises(ActivityError, match=message):
-        await runner.run("activities", callable_name, continue_from_step_id=terminal.id)
+        await runner.run(
+            f"activities:{callable_name}", continue_from_step_id=terminal.id
+        )
 
 
 async def test_activity_failure_can_be_caught_and_replayed(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
     assert (
-        await runner.run("activities", "caught", workflow_id="root")
-        == "activity failed"
+        await runner.run("activities:caught", workflow_id="root") == "activity failed"
     )
     assert (
         await runner.run(
-            "activities", "caught", continue_from_step_id=history.heads["root"]
+            "activities:caught", continue_from_step_id=history.heads["root"]
         )
         == "activity failed"
     )
@@ -214,20 +228,20 @@ async def test_history_failures_are_fatal(
 ) -> None:
     head = None
     if failure == "replay":
-        await runner.run("activities", workflow_id="root")
+        await runner.run("activities:workflow", workflow_id="root")
         head = history.heads["root"]
         history.replay_error = OSError("replay failed")
     history.fail_save = failure == "save"
     history.fail_append = failure == "append"
     with pytest.raises(OSError):
-        await runner.run("activities", continue_from_step_id=head)
+        await runner.run("activities:workflow", continue_from_step_id=head)
 
 
 async def test_cancellation_retains_pending_activity_identity(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     before = set(asyncio.all_tasks())
-    task = asyncio.create_task(runner.run("activities", "wait", workflow_id="root"))
+    task = asyncio.create_task(runner.run("activities:wait", workflow_id="root"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -242,7 +256,7 @@ async def test_cancellation_retains_pending_activity_identity(
 async def test_parallel_activities_run_without_deadlock(
     runner: WorkflowRunner, execution_probe: ExecutionProbe
 ) -> None:
-    task = asyncio.create_task(runner.run("activities", "parallel"))
+    task = asyncio.create_task(runner.run("activities:parallel"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     await asyncio.wait_for(execution_probe.started.get(), 2)
     assert execution_probe.active == 2
@@ -254,16 +268,16 @@ async def test_stop_is_safe_when_idle_and_runner_can_be_reused(
     runner: WorkflowRunner,
 ) -> None:
     runner.stop()
-    assert await runner.run("activities") == 2
+    assert await runner.run("activities:workflow") == 2
     runner.stop()
-    assert await runner.run("activities") == 2
+    assert await runner.run("activities:workflow") == 2
 
 
 async def test_stop_cancels_workflow_loop_and_preserves_history(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     before = set(asyncio.all_tasks())
-    task = asyncio.create_task(runner.run("activities", "loop", workflow_id="root"))
+    task = asyncio.create_task(runner.run("activities:loop", workflow_id="root"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     runner.stop()
     runner.stop()
@@ -282,7 +296,7 @@ async def test_stop_cancels_workflow_loop_and_preserves_history(
 async def test_stop_cancels_all_concurrent_root_executions(
     runner: WorkflowRunner, execution_probe: ExecutionProbe
 ) -> None:
-    tasks = [asyncio.create_task(runner.run("activities", "wait")) for _ in range(2)]
+    tasks = [asyncio.create_task(runner.run("activities:wait")) for _ in range(2)]
     for _ in tasks:
         await asyncio.wait_for(execution_probe.started.get(), 2)
     runner.stop()
@@ -297,15 +311,13 @@ async def test_long_history_is_consumed_incrementally(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     assert (
-        await runner.run("activities", "many", input={"count": 300}, workflow_id="root")
+        await runner.run("activities:many", input={"count": 300}, workflow_id="root")
         == 300
     )
     execution_probe.calls.clear()
     before = len(history.steps)
     assert (
-        await runner.run(
-            "activities", "many", continue_from_step_id=history.heads["root"]
-        )
+        await runner.run("activities:many", continue_from_step_id=history.heads["root"])
         == 300
     )
     assert execution_probe.calls == []

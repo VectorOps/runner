@@ -67,7 +67,7 @@ def test_require_successful_spawn(
 async def test_replayed_spawn_validates_child_configuration(
     runner: WorkflowRunner, history: MemoryHistory, mutation: str
 ) -> None:
-    await runner.run("children", "sequential", workflow_id="root")
+    await runner.run("children:sequential", workflow_id="root")
     path = history.path(history.heads["root"])
     spawn = handlers.require_spawn(path[0])
     child = history.workflows[spawn.child_workflow_id]
@@ -79,7 +79,7 @@ async def test_replayed_spawn_validates_child_configuration(
     history.workflows[child.id] = child.model_copy(update=update)
     before = list(history.appended)
     with pytest.raises(ReplayMismatchError, match="configuration"):
-        await runner.run("children", "sequential", continue_from_step_id=path[-1].id)
+        await runner.run("children:sequential", continue_from_step_id=path[-1].id)
     assert history.appended == before
 
 
@@ -90,7 +90,7 @@ async def test_replayed_spawn_validates_child_configuration(
 async def test_join_validates_referenced_records(
     runner: WorkflowRunner, history: MemoryHistory, mutation: str
 ) -> None:
-    await runner.run("children", "sequential", workflow_id="root")
+    await runner.run("children:sequential", workflow_id="root")
     path = history.path(history.heads["root"])
     join = path[1]
     assert join.outcome.kind == "joined"
@@ -112,4 +112,4 @@ async def test_join_validates_referenced_records(
         del history.steps[completion_id]
     error = KeyError if mutation == "missing_completion" else ReplayMismatchError
     with pytest.raises(error):
-        await runner.run("children", "sequential", continue_from_step_id=path[-1].id)
+        await runner.run("children:sequential", continue_from_step_id=path[-1].id)

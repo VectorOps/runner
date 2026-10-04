@@ -75,7 +75,7 @@ async def verify_shared(ctx: ActivityExecutionContext) -> None:
 async def workflow(ctx: WorkflowExecutionContext, mode: str = "success") -> str:
     if mode == "child":
         handle = await ctx.spawn_workflow(
-            "python:tests.fixtures.resource_workflows", "child"
+            "python:tests.fixtures.resource_workflows:child"
         )
         await ctx.join_workflows([handle])
         await ctx.run_activity(

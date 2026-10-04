@@ -49,8 +49,8 @@ async def child(context: WorkflowExecutionContext) -> None:
 
 async def main(context: WorkflowExecutionContext) -> None:
     children = await asyncio.gather(
-        context.spawn_workflow("diagnostics", "child"),
-        context.spawn_workflow("diagnostics", "child"),
+        context.spawn_workflow("diagnostics:child"),
+        context.spawn_workflow("diagnostics:child"),
     )
     await context.join_workflows(list(children))
 

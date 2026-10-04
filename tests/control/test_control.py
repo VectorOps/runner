@@ -30,7 +30,8 @@ async def terminal(connection: client.RunnerClient) -> p.Event:
 async def test_execution_history_events_and_reconnect(
     tmp_path: Path, tcp: bool
 ) -> None:
-    (tmp_path / "job.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/job.py").write_text(
         "async def main(ctx, value=7):\n    return value\n"
     )
     secret = secrets.token_urlsafe(32)
@@ -48,8 +49,7 @@ async def test_execution_history_events_and_reconnect(
             async with connection:
                 await connection.subscribe()
                 params = p.Start(
-                    file="job.py",
-                    callable="main",
+                    reference="job:main",
                     input={"value": 11},
                     idempotency_key="first",
                 )
@@ -91,7 +91,8 @@ async def test_execution_history_events_and_reconnect(
 async def test_concurrent_stop_disconnect_and_workspace_ownership(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "wait.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/wait.py").write_text(
         "import asyncio\nasync def main(ctx):\n    await asyncio.sleep(60)\n"
     )
     secret = secrets.token_urlsafe(32)
@@ -104,7 +105,7 @@ async def test_concurrent_stop_disconnect_and_workspace_ownership(
                     pass
             async with await client.RunnerClient.tcp(port, secret) as first:
                 accepted = await first.start(
-                    p.Start(file="wait.py", callable="main", idempotency_key="wait")
+                    p.Start(reference="wait:main", idempotency_key="wait")
                 )
             async with await client.RunnerClient.tcp(port, secret) as second:
                 await second.subscribe()
@@ -114,7 +115,7 @@ async def test_concurrent_stop_disconnect_and_workspace_ownership(
                     and current.execution_id == accepted.execution_id
                 )
                 other = await second.start(
-                    p.Start(file="wait.py", callable="main", idempotency_key="other")
+                    p.Start(reference="wait:main", idempotency_key="other")
                 )
                 assert other.execution_id != accepted.execution_id
                 with pytest.raises(p.RemoteError) as error:
@@ -213,9 +214,15 @@ async def test_tail_pagination_is_bounded_and_query_bound(tmp_path: Path) -> Non
 
 async def test_start_rejects_workspace_escape(tmp_path: Path) -> None:
     async with client.embedded(tmp_path) as connection:
-        for filename in ("../outside.py", "/outside.py", "python:sys", "job.txt"):
+        for reference in (
+            "../outside:main",
+            "/outside:main",
+            "workspace:job:main",
+            "job.py:main",
+        ):
             with pytest.raises(p.RemoteError) as error:
-                await connection.start(
-                    p.Start(file=filename, callable="main", idempotency_key=filename)
+                await connection.request(
+                    "executions.start",
+                    {"reference": reference, "idempotency_key": reference},
                 )
             assert error.value.code == "invalid_argument"

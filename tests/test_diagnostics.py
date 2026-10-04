@@ -225,7 +225,8 @@ async def test_host_download_and_restart(tmp_path: Path, tcp: bool) -> None:
     import secrets
     from vectorops.runner.control import transport
 
-    (tmp_path / "job.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/job.py").write_text(
         "async def main(ctx):\n    return 'private-result'\n"
     )
     async with RunnerService(tmp_path) as service:
@@ -241,7 +242,7 @@ async def test_host_download_and_restart(tmp_path: Path, tcp: bool) -> None:
             async with connection:
                 await connection.subscribe()
                 accepted = await connection.start(
-                    p.Start(file="job.py", callable="main", idempotency_key="logging")
+                    p.Start(reference="job:main", idempotency_key="logging")
                 )
                 async with asyncio.timeout(5):
                     while (await connection.next_event()).event[
@@ -288,7 +289,7 @@ async def test_local_runner_logs_failure_and_step_identity(tmp_path: Path) -> No
     )
     runner = WorkflowRunner(tmp_path)
     with pytest.raises(Exception, match="private-failure"):
-        await runner.run("job", "main")
+        await runner.run("job:main")
     async with d.DiagnosticLog(tmp_path / "data") as logs:
         entries = await records(logs)
         assert any(

@@ -13,7 +13,7 @@ async def test_activity_events_are_snapshots_of_same_step(
 ) -> None:
     events: list[StepEvent] = []
     runner = WorkflowRunner(workspace, history, event_sink=events.append)
-    assert await runner.run("activities", workflow_id="root") == 2
+    assert await runner.run("activities:workflow", workflow_id="root") == 2
     first, completed = events[:2]
     assert first.kind == "step.created"
     assert first.step.outcome.kind == "pending"
@@ -23,7 +23,10 @@ async def test_activity_events_are_snapshots_of_same_step(
     assert StepEvent.model_validate_json(first.model_dump_json()) == first
     before = list(events)
     assert (
-        await runner.run("activities", continue_from_step_id=history.heads["root"]) == 2
+        await runner.run(
+            "activities:workflow", continue_from_step_id=history.heads["root"]
+        )
+        == 2
     )
     assert events == before
 
@@ -33,7 +36,7 @@ async def test_nested_stream_updates_do_not_become_workflow_results(
 ) -> None:
     events: list[StepEvent] = []
     runner = WorkflowRunner(workspace, history, event_sink=events.append)
-    assert await runner.run("composed", "streamed", workflow_id="root") == 7
+    assert await runner.run("composed:streamed", workflow_id="root") == 7
     stream_events = [
         event
         for event in events
@@ -57,7 +60,7 @@ async def test_nested_stream_updates_do_not_become_workflow_results(
     before = list(events)
     assert (
         await runner.run(
-            "composed", "streamed", continue_from_step_id=history.heads["root"]
+            "composed:streamed", continue_from_step_id=history.heads["root"]
         )
         == 7
     )
@@ -69,7 +72,7 @@ async def test_persistent_events_include_execution_identity(
 ) -> None:
     events: list[StepEvent] = []
     runner = WorkflowRunner(workspace, event_sink=events.append)
-    await runner.run("composed", "streamed")
+    await runner.run("composed:streamed")
     assert events
     assert all(event.execution_id == runner.last_execution_id for event in events)
 
@@ -84,7 +87,10 @@ async def test_sink_failures_are_observational(
         raise ValueError("listener failed")
 
     assert (
-        await WorkflowRunner(workspace, history, event_sink=sink).run("activities") == 2
+        await WorkflowRunner(workspace, history, event_sink=sink).run(
+            "activities:workflow"
+        )
+        == 2
     )
     assert "Step event sink failed" in caplog.text
 
@@ -96,6 +102,6 @@ async def test_failed_storage_does_not_emit_unaccepted_events(
     history.fail_append = True
     with pytest.raises(OSError):
         await WorkflowRunner(workspace, history, event_sink=events.append).run(
-            "activities"
+            "activities:workflow"
         )
     assert events == []

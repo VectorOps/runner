@@ -22,7 +22,7 @@ async def test_asyncio_primitives_wait_for_concurrent_children(
 ) -> None:
     execution_probe.gates = {1: asyncio.Event(), 2: asyncio.Event()}
     task = asyncio.create_task(
-        runner.run("composed", callable_name, workflow_id="root")
+        runner.run(f"composed:{callable_name}", workflow_id="root")
     )
     assert {
         await asyncio.wait_for(execution_probe.started.get(), 2),
@@ -39,7 +39,7 @@ async def test_asyncio_primitives_wait_for_concurrent_children(
     assert all(step.outcome.kind != "waiting" for step in path)
     before = list(history.appended)
     assert await runner.run(
-        "composed", callable_name, continue_from_step_id=path[-1].id
+        f"composed:{callable_name}", continue_from_step_id=path[-1].id
     ) == [4, 2]
     assert history.appended == before
     assert sorted(execution_probe.calls) == [1, 2]
@@ -48,12 +48,12 @@ async def test_asyncio_primitives_wait_for_concurrent_children(
 async def test_gather_collects_independent_child_errors(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    assert await runner.run("composed", "collected", workflow_id="root") == [
+    assert await runner.run("composed:collected", workflow_id="root") == [
         "ValueError: negative child",
         "4",
     ]
     assert await runner.run(
-        "composed", "collected", continue_from_step_id=history.heads["root"]
+        "composed:collected", continue_from_step_id=history.heads["root"]
     ) == ["ValueError: negative child", "4"]
     assert sorted(execution_probe.calls) == [-1, 2]
 
@@ -63,11 +63,11 @@ async def test_concurrent_streaming_children_emit_updates_and_replay(
 ) -> None:
     events: list[StepEvent] = []
     runner = WorkflowRunner(workspace, history, event_sink=events.append)
-    assert await runner.run("composed", "streamed_gather", workflow_id="root") == [2, 1]
+    assert await runner.run("composed:streamed_gather", workflow_id="root") == [2, 1]
     assert any(event.kind == "step.updated" for event in events)
     before = list(events)
     assert await runner.run(
-        "composed", "streamed_gather", continue_from_step_id=history.heads["root"]
+        "composed:streamed_gather", continue_from_step_id=history.heads["root"]
     ) == [2, 1]
     assert events == before
 
@@ -82,7 +82,7 @@ async def test_persistent_multiple_pending_joins_recover_without_head_regression
             joins.put_nowait(event.step.id)
 
     runner = WorkflowRunner(workspace, event_sink=event_sink)
-    task = asyncio.create_task(runner.run("composed", "gathered", workflow_id="root"))
+    task = asyncio.create_task(runner.run("composed:gathered", workflow_id="root"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     await asyncio.wait_for(execution_probe.started.get(), 2)
     await asyncio.wait_for(joins.get(), 2)
@@ -129,7 +129,7 @@ async def test_gather_failure_does_not_wait_for_unfinished_sibling(
 ) -> None:
     before = set(asyncio.all_tasks())
     with pytest.raises(ActivityError, match="negative child"):
-        await asyncio.wait_for(runner.run("composed", "fail_fast"), 2)
+        await asyncio.wait_for(runner.run("composed:fail_fast"), 2)
     assert execution_probe.active == 0
     assert not set(asyncio.all_tasks()) - before
 
@@ -138,11 +138,11 @@ async def test_many_child_calls_do_not_drop_requests(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     expected = [value * 2 for value in range(20)]
-    assert await runner.run("composed", "many_children", workflow_id="root") == expected
+    assert await runner.run("composed:many_children", workflow_id="root") == expected
     before = list(history.appended)
     assert (
         await runner.run(
-            "composed", "many_children", continue_from_step_id=history.heads["root"]
+            "composed:many_children", continue_from_step_id=history.heads["root"]
         )
         == expected
     )

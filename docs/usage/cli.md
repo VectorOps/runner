@@ -14,7 +14,7 @@ async def workflow(ctx, value: int = 0) -> int:
 Run it with JSON keyword arguments:
 
 ```bash
-uv run vops-runner start example --input '{"value": 4}' --execution-id example-run
+uv run vops-runner start example:workflow --input '{"value": 4}' --execution-id example-run
 uv run vops-runner status
 uv run vops-runner export --output example-run.jsonl
 ```
@@ -24,11 +24,11 @@ Start prints a JSON object containing `execution_id` and `result`. It runs in th
 ## Start and resume
 
 ```bash
-uv run vops-runner --project /path/to/workspace start example --callable workflow
+uv run vops-runner --project /path/to/workspace start example:workflow
 uv run vops-runner --project /path/to/workspace resume example-run
 ```
 
-`--project` precedes the command and defaults to the current directory. Workspace paths follow `config.toml`, including workflow and data directory overrides. `start` takes a workflow file name relative to the workflow directory, without `.py`. The callable defaults to `workflow`, input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
+`--project` precedes the command and defaults to the current directory. Workspace paths follow `config.toml`, including workflow and data directory overrides. `start` takes an explicit `path:callable` reference relative to the workflow directory, without `.py`, or `python:package.module:callable` for a library workflow. There is no callable default or `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
 
 `resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
 

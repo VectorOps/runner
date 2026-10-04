@@ -84,7 +84,9 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
     (directory / "chat.py").write_text(SOURCE)
     events: list[StepEvent] = []
     runner = WorkflowRunner(workspace, history, event_sink=events.append)
-    assert await runner.run("support/chat", workflow_id="root") == {"text": "hello"}
+    assert await runner.run("support/chat:workflow", workflow_id="root") == {
+        "text": "hello"
+    }
     assert (history.workflows["root"].kind, history.workflows["root"].version) == (
         "customer.acme.chat",
         2,
@@ -104,7 +106,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
         if isinstance(e.step.outcome, models.StepStreaming)
     ] == [None, {"text": "partial"}, {"text": "hello"}, {"text": "hello"}]
     assert await runner.run(
-        "support/chat", continue_from_step_id=history.heads["root"]
+        "support/chat:workflow", continue_from_step_id=history.heads["root"]
     ) == {"text": "hello"}
     assert any(
         s.operation.kind == "customer.acme.support.chat.prepare"
@@ -115,7 +117,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
 async def test_contracts_survive_sqlite_restart(workspace: Path) -> None:
     (workspace / "workflows" / "contracts.py").write_text(SOURCE)
     runner = WorkflowRunner(workspace)
-    assert await runner.run("contracts") == {"text": "hello"}
+    assert await runner.run("contracts:workflow") == {"text": "hello"}
     assert runner.last_execution_id is not None
     project = await RunnerProject.open(workspace)
     database = SQLiteHistory(
@@ -136,7 +138,7 @@ async def test_replay_rejects_changed_contract_versions(
     path = workspace / "workflows" / "contracts.py"
     path.write_text(SOURCE)
     runner = WorkflowRunner(workspace, history)
-    await runner.run("contracts", workflow_id="root")
+    await runner.run("contracts:workflow", workflow_id="root")
     replacements = {
         "activity": (
             'namespace="customer.acme", version=2',
@@ -160,30 +162,27 @@ async def test_replay_rejects_changed_contract_versions(
         if declaration in ("activity", "stream"):
             child = next(w for w in history.workflows.values() if w.id != "root")
             await runner.run(
-                "contracts.py", "turn", continue_from_step_id=history.heads[child.id]
+                "contracts:turn", continue_from_step_id=history.heads[child.id]
             )
         else:
-            await runner.run("contracts", continue_from_step_id=history.heads["root"])
+            await runner.run(
+                "contracts:workflow", continue_from_step_id=history.heads["root"]
+            )
 
 
 async def test_manual_spawn_resolves_decorated_contract_and_replays(
     workspace: Path, history: MemoryHistory
 ) -> None:
     path = workspace / "workflows" / "contracts.py"
-    path.write_text(
-        SOURCE
-        + """
+    path.write_text(SOURCE + """
 async def manual(ctx):
-    handle = await ctx.spawn_workflow("contracts.py", "turn", input={"text": "hello"})
+    handle = await ctx.spawn_workflow("contracts:turn", input={"text": "hello"})
     return (await ctx.join_workflows([handle]))[0].result
-"""
-    )
+""")
     runner = WorkflowRunner(workspace, history)
-    assert await runner.run("contracts", "manual", workflow_id="root") == {
-        "text": "hello"
-    }
+    assert await runner.run("contracts:manual", workflow_id="root") == {"text": "hello"}
     child = next(w for w in history.workflows.values() if w.id != "root")
     assert (child.kind, child.version) == ("customer.acme.contracts.turn", 4)
     assert await runner.run(
-        "contracts", "manual", continue_from_step_id=history.heads["root"]
+        "contracts:manual", continue_from_step_id=history.heads["root"]
     ) == {"text": "hello"}

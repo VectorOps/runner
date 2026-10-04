@@ -89,7 +89,9 @@ async def test_root_owns_environment_until_shutdown(
 ) -> None:
     runner = WorkflowRunner(configured_workspace, MemoryHistory())
     task = asyncio.create_task(
-        runner.run("python:tests.fixtures.resource_workflows", input={"mode": mode})
+        runner.run(
+            "python:tests.fixtures.resource_workflows:workflow", input={"mode": mode}
+        )
     )
     pid = await asyncio.wait_for(workflows.probe.started.get(), 5)
     if mode == "wait":
@@ -120,7 +122,7 @@ async def test_concurrent_roots_have_separate_attachments(
     tasks = [
         asyncio.create_task(
             runner.run(
-                "python:tests.fixtures.resource_workflows",
+                "python:tests.fixtures.resource_workflows:workflow",
                 input={"mode": "wait"},
                 workflow_id=f"root-{index}",
             )
@@ -153,7 +155,9 @@ async def test_persistent_execution_closes_environment(
     configured_workspace: Path,
 ) -> None:
     runner = WorkflowRunner(configured_workspace)
-    assert await runner.run("python:tests.fixtures.resource_workflows") == "done"
+    assert (
+        await runner.run("python:tests.fixtures.resource_workflows:workflow") == "done"
+    )
     assert runner.last_execution_id is not None
     assert (
         await runner.execution_state(runner.last_execution_id)
@@ -196,7 +200,7 @@ async def test_root_registry_without_environment_and_repeated_cancellation(
 
     with patch.object(WorkflowExecutor, "_definition", definition):
         runner = WorkflowRunner(workspace, MemoryHistory())
-        task = asyncio.create_task(runner.run("resources"))
+        task = asyncio.create_task(runner.run("resources:workflow"))
         await asyncio.wait_for(cleaning.wait(), 5)
         for _ in range(3):
             task.cancel()

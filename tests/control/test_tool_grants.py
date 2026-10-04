@@ -7,7 +7,6 @@ from tests.control.test_mailbox import completed, pending
 from vectorops.runner.control import client, protocol as p
 from vectorops.runner.runner import mailbox
 
-
 WORKFLOW = """
 import asyncio
 import connect
@@ -34,7 +33,7 @@ async def workflow(ctx):
     await request_input("checkpoint")
     assert not (await invoke("test", 2)).is_error
     await invoke("other", 3)
-    handle = await ctx.spawn_workflow("workspace:flow.py", "child")
+    handle = await ctx.spawn_workflow("flow:child")
     await ctx.join_workflows([handle])
     return None
 
@@ -70,10 +69,11 @@ async def wait_channel(
 
 @pytest.mark.parametrize("scope", ["call", "workflow"])
 async def test_scope_recovery_and_child_isolation(tmp_path: Path, scope: str) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as host:
         run = await host.start(
-            p.Start(file="flow.py", callable="workflow", idempotency_key="start")
+            p.Start(reference="flow:workflow", idempotency_key="start")
         )
         first = (await pending(host, run.execution_id))[0]
         receipt = await host.answer_input(answer(first, scope=scope))
@@ -121,7 +121,7 @@ async def test_scope_recovery_and_child_isolation(tmp_path: Path, scope: str) ->
         await host.answer_input(answer(child))
         await completed(host, run.execution_id)
         fresh = await host.start(
-            p.Start(file="flow.py", callable="child", idempotency_key="fresh")
+            p.Start(reference="flow:child", idempotency_key="fresh")
         )
         fresh_request = (await pending(host, fresh.execution_id))[0]
         assert fresh_request.execution_id != first.execution_id
@@ -132,10 +132,11 @@ async def test_scope_recovery_and_child_isolation(tmp_path: Path, scope: str) ->
 async def test_workflow_grant_does_not_answer_existing_parallel_request(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as host:
         run = await host.start(
-            p.Start(file="flow.py", callable="parallel", idempotency_key="start")
+            p.Start(reference="flow:parallel", idempotency_key="start")
         )
         first, second = await pending(host, run.execution_id, 2)
         await host.answer_input(answer(first, scope="workflow"))

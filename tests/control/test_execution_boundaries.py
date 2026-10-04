@@ -29,12 +29,13 @@ async def test_recovery_ignores_unpublished_incomplete_history(tmp_path: Path) -
 async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with RunnerService(tmp_path) as service:
         accepted = p.Accepted.model_validate(
             await service.dispatch(
                 "executions.start",
-                {"file": "flow.py", "callable": "workflow", "idempotency_key": "first"},
+                {"reference": "flow:workflow", "idempotency_key": "first"},
             )
         )
         await service.dispatch(
@@ -69,8 +70,8 @@ async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
 
 
 async def test_authentication_shutdown_is_execution_specific(tmp_path: Path) -> None:
-    (tmp_path / "flow.py").write_text(
-        """
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text("""
 import asyncio
 from vectorops.runner.api.composition import activity
 
@@ -84,14 +85,13 @@ async def main(ctx):
 
 async def busy(ctx):
     await asyncio.sleep(60)
-"""
-    )
+""")
     async with client.embedded(tmp_path) as connection:
         waiting = await connection.start(
-            p.Start(file="flow.py", callable="main", idempotency_key="auth")
+            p.Start(reference="flow:main", idempotency_key="auth")
         )
         busy = await connection.start(
-            p.Start(file="flow.py", callable="busy", idempotency_key="busy")
+            p.Start(reference="flow:busy", idempotency_key="busy")
         )
         async with asyncio.timeout(10):
             while not await connection.pending_authentication():
@@ -120,7 +120,8 @@ async def busy(ctx):
 async def test_daemon_drain_allows_reconnect_and_finishes_all_executions(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     task = asyncio.create_task(daemon.serve(tmp_path))
     try:
         async with asyncio.timeout(10):
@@ -130,7 +131,7 @@ async def test_daemon_drain_allows_reconnect_and_finishes_all_executions(
         async with await client.RunnerClient.tcp(endpoint.port) as connection:
             accepted = [
                 await connection.start(
-                    p.Start(file="flow.py", callable="workflow", idempotency_key=str(i))
+                    p.Start(reference="flow:workflow", idempotency_key=str(i))
                 )
                 for i in range(2)
             ]
@@ -161,18 +162,19 @@ async def test_daemon_drain_allows_reconnect_and_finishes_all_executions(
 async def test_live_retention_preserves_waiters_and_resume_reservations(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(
         WORKFLOW + "\nasync def quick(ctx):\n    return 1\n"
     )
     (tmp_path / "config.toml").write_text("[retention]\nmax_completed_executions = 0\n")
     async with client.embedded(tmp_path) as connection:
         waiter = await connection.start(
-            p.Start(file="flow.py", callable="workflow", idempotency_key="wait")
+            p.Start(reference="flow:workflow", idempotency_key="wait")
         )
         request = (await pending(connection, waiter.execution_id))[0]
         for index in range(3):
             quick = await connection.start(
-                p.Start(file="flow.py", callable="quick", idempotency_key=str(index))
+                p.Start(reference="flow:quick", idempotency_key=str(index))
             )
             await settled(connection, quick.execution_id)
             assert (await connection.execution(waiter.execution_id)).status == "running"
@@ -195,11 +197,12 @@ async def test_live_retention_preserves_waiters_and_resume_reservations(
 async def test_execution_subscription_does_not_receive_other_root_events(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as connection:
         roots = [
             await connection.start(
-                p.Start(file="flow.py", callable="workflow", idempotency_key=str(i))
+                p.Start(reference="flow:workflow", idempotency_key=str(i))
             )
             for i in range(2)
         ]
@@ -222,12 +225,13 @@ async def test_execution_subscription_does_not_receive_other_root_events(
 async def test_repeated_close_and_cancellation_finish_owned_cleanup(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     service = await RunnerService(tmp_path).__aenter__()
     for index in range(3):
         await service.dispatch(
             "executions.start",
-            {"file": "flow.py", "callable": "workflow", "idempotency_key": str(index)},
+            {"reference": "flow:workflow", "idempotency_key": str(index)},
         )
     first = asyncio.create_task(service.aclose())
     second = asyncio.create_task(service.aclose())

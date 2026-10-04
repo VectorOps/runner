@@ -23,7 +23,8 @@ async def settled(connection: client.RunnerClient, identifier: str) -> None:
 
 @pytest.mark.parametrize("tcp", [False, True])
 async def test_concurrent_lifecycle_and_idempotency(tmp_path: Path, tcp: bool) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     token = secrets.token_urlsafe(32)
     async with RunnerService(tmp_path) as service:
         server = RunnerServer(service, token)
@@ -39,7 +40,7 @@ async def test_concurrent_lifecycle_and_idempotency(tmp_path: Path, tcp: bool) -
         try:
             async with await connect() as first, await connect() as second:
                 starts = [
-                    p.Start(file="flow.py", callable="workflow", idempotency_key=str(i))
+                    p.Start(reference="flow:workflow", idempotency_key=str(i))
                     for i in range(4)
                 ]
                 accepted = await asyncio.gather(
@@ -111,11 +112,12 @@ async def test_concurrent_lifecycle_and_idempotency(tmp_path: Path, tcp: bool) -
 async def test_shutdown_recovers_all_waiters_but_not_stopped_or_completed(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as connection:
         accepted = [
             await connection.start(
-                p.Start(file="flow.py", callable="workflow", idempotency_key=str(i))
+                p.Start(reference="flow:workflow", idempotency_key=str(i))
             )
             for i in range(4)
         ]
@@ -148,16 +150,17 @@ async def test_shutdown_recovers_all_waiters_but_not_stopped_or_completed(
 
 
 async def test_shutdown_waiter_does_not_suspend_unrelated_work(tmp_path: Path) -> None:
-    (tmp_path / "flow.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(
         WORKFLOW + "\nasync def busy(ctx):\n    await asyncio.sleep(60)\n"
     )
     async with client.embedded(tmp_path) as connection:
         waiter = await connection.start(
-            p.Start(file="flow.py", callable="workflow", idempotency_key="wait")
+            p.Start(reference="flow:workflow", idempotency_key="wait")
         )
         request = (await pending(connection, waiter.execution_id))[0]
         busy = await connection.start(
-            p.Start(file="flow.py", callable="busy", idempotency_key="busy")
+            p.Start(reference="flow:busy", idempotency_key="busy")
         )
         async with asyncio.timeout(10):
             while (
@@ -176,14 +179,15 @@ async def test_shutdown_waiter_does_not_suspend_unrelated_work(tmp_path: Path) -
 
 
 async def test_drain_waits_for_all_and_rejects_new_work(tmp_path: Path) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with RunnerService(tmp_path) as service:
         accepted = [
             p.Accepted.model_validate(
                 await service.dispatch(
                     "executions.start",
                     p.Start(
-                        file="flow.py", callable="workflow", idempotency_key=str(i)
+                        reference="flow:workflow", idempotency_key=str(i)
                     ).model_dump(mode="json"),
                 )
             )
@@ -196,9 +200,9 @@ async def test_drain_waits_for_all_and_rejects_new_work(tmp_path: Path) -> None:
         with pytest.raises(p.RemoteError) as error:
             await service.dispatch(
                 "executions.start",
-                p.Start(
-                    file="flow.py", callable="workflow", idempotency_key="new"
-                ).model_dump(mode="json"),
+                p.Start(reference="flow:workflow", idempotency_key="new").model_dump(
+                    mode="json"
+                ),
             )
         assert error.value.code == "runner_stopping"
         closing = asyncio.create_task(service.aclose())
@@ -212,14 +216,15 @@ async def test_drain_waits_for_all_and_rejects_new_work(tmp_path: Path) -> None:
 
 
 async def test_same_execution_cannot_resume_twice(tmp_path: Path) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with RunnerService(tmp_path) as service:
         accepted = p.Accepted.model_validate(
             await service.dispatch(
                 "executions.start",
-                p.Start(
-                    file="flow.py", callable="workflow", idempotency_key="one"
-                ).model_dump(mode="json"),
+                p.Start(reference="flow:workflow", idempotency_key="one").model_dump(
+                    mode="json"
+                ),
             )
         )
         async with asyncio.timeout(10):
@@ -235,7 +240,8 @@ async def test_same_execution_cannot_resume_twice(tmp_path: Path) -> None:
 async def test_crash_recovers_multiple_executions_without_manifest(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     script = """
 import asyncio, json, sys
 from pathlib import Path
@@ -245,7 +251,7 @@ from tests.control.test_mailbox import pending
 async def main():
     async with client.embedded(Path(sys.argv[1])) as connection:
         accepted = await asyncio.gather(*(
-            connection.start(p.Start(file="flow.py", callable="workflow", idempotency_key=str(i)))
+            connection.start(p.Start(reference="flow:workflow", idempotency_key=str(i)))
             for i in range(3)
         ))
         requests = [(await pending(connection, item.execution_id))[0] for item in accepted]
@@ -292,21 +298,22 @@ asyncio.run(main())
 async def test_immediate_stop_and_failure_do_not_affect_other_execution(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "flow.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(
         WORKFLOW + "\nasync def fail(ctx):\n    raise ValueError('failed root')\n"
     )
     async with client.embedded(tmp_path) as connection:
         survivor = await connection.start(
-            p.Start(file="flow.py", callable="workflow", idempotency_key="survivor")
+            p.Start(reference="flow:workflow", idempotency_key="survivor")
         )
         request = (await pending(connection, survivor.execution_id))[0]
         failed = await connection.start(
-            p.Start(file="flow.py", callable="fail", idempotency_key="failure")
+            p.Start(reference="flow:fail", idempotency_key="failure")
         )
         await settled(connection, failed.execution_id)
         assert (await connection.execution(failed.execution_id)).status == "failed"
         stopped = await connection.start(
-            p.Start(file="flow.py", callable="workflow", idempotency_key="stop")
+            p.Start(reference="flow:workflow", idempotency_key="stop")
         )
         await connection.stop(stopped.execution_id)
         await settled(connection, stopped.execution_id)

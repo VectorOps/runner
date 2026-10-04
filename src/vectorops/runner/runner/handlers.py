@@ -211,7 +211,7 @@ class SpawnHandler:
 
     async def execute(self, request: context.SpawnRequest) -> context.SpawnResponse:
         step = await self.runtime.recorded(None)
-        definition = f"{request.workflow_name}:{request.callable_name}"
+        definition = request.reference
         if step is not None:
             operation = require_spawn(step)
             child = await self.runtime.history.get_workflow(operation.child_workflow_id)

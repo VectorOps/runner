@@ -10,10 +10,10 @@ async def test_completed_children_replay_old_settings(workspace: Path) -> None:
     config = workspace / "config.toml"
     config.write_text('[components.llm]\nmodel = "first"\n')
     runner = WorkflowRunner(workspace)
-    result = await runner.run("configuration", "children")
+    result = await runner.run("configuration:children")
     config.write_text('[components.llm]\nmodel = "second"\n')
     assert await WorkflowRunner(workspace).resume() == result
-    updated = await WorkflowRunner(workspace).run("configuration", "main")
+    updated = await WorkflowRunner(workspace).run("configuration:main")
     assert isinstance(updated, dict) and updated["model"] == "second"
 
 
@@ -25,8 +25,7 @@ async def test_resume_replays_old_read_then_reads_fresh_settings(
     async with client.embedded(workspace) as host:
         accepted = await host.start(
             p.Start(
-                file="workflows/configuration.py",
-                callable="changing",
+                reference="configuration:changing",
                 idempotency_key="config",
             )
         )

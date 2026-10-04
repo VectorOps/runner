@@ -19,8 +19,8 @@ async def changing(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
 
 async def children(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     handles = await asyncio.gather(
-        ctx.spawn_workflow("configuration", "main"),
-        ctx.spawn_workflow("configuration", "main"),
+        ctx.spawn_workflow("configuration:main"),
+        ctx.spawn_workflow("configuration:main"),
     )
     outcomes = await ctx.join_workflows(list(handles))
     return [outcome.model_dump(mode="json") for outcome in outcomes]

@@ -14,6 +14,7 @@ import typing
 import pydantic
 
 from vectorops.runner import models
+from vectorops.runner.api import definitions
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.errors import ActivityError
@@ -346,6 +347,17 @@ class WorkflowDefinition(typing.Generic[P, T]):
     name: str
     kind: str = "workflow"
     version: int = 1
+    description: typing.Optional[str] = None
+
+    def describe(self, reference: str) -> definitions.WorkflowDescriptor:
+        return definitions.WorkflowDescriptor(
+            reference=reference,
+            name=self.name,
+            description=self.description,
+            kind=self.kind,
+            version=self.version,
+            input_schema=definitions.input_model(self.func).model_json_schema(),
+        )
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         context = _CURRENT_CONTEXT.get()
@@ -365,14 +377,13 @@ class WorkflowDefinition(typing.Generic[P, T]):
         source = inspect.getsourcefile(self.func)
         root = context.project.workflows_path.resolve()
         if source is not None and Path(source).resolve().is_relative_to(root):
-            target = Path(source).resolve().relative_to(root).as_posix()
+            target = Path(source).resolve().relative_to(root).with_suffix("").as_posix()
         else:
             if self.func.__module__.startswith("_runner_workflow_"):
                 raise ValueError("workflow source must remain inside the workspace")
             target = f"python:{self.func.__module__}"
         handle = await context.spawn_workflow(
-            target,
-            self.func.__qualname__,
+            f"{target}:{self.func.__qualname__}",
             input=configuration.input,
             kind=self.kind,
             version=self.version,
@@ -387,6 +398,7 @@ class WorkflowDefinition(typing.Generic[P, T]):
 def workflow(
     *,
     name: typing.Optional[str] = None,
+    description: typing.Optional[str] = None,
     kind: typing.Optional[str] = None,
     namespace: typing.Optional[str] = None,
     version: int = 1,
@@ -432,6 +444,7 @@ def workflow(
             name if name is not None else f"{module_name}.{func.__qualname__}",
             contract.kind,
             contract.version,
+            description,
         )
 
     return decorate

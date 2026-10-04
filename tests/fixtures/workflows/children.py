@@ -38,7 +38,7 @@ async def parent(
 ) -> pydantic.JsonValue:
     handles = [
         await ctx.spawn_workflow(
-            "children", "child", input={"value": value, "block": block}
+            "children:child", input={"value": value, "block": block}
         )
         for value in values
     ]
@@ -56,7 +56,7 @@ async def parent(
 async def sequential(ctx: WorkflowExecutionContext) -> list[pydantic.JsonValue]:
     results: list[pydantic.JsonValue] = []
     for value in (1, 2):
-        handle = await ctx.spawn_workflow("children", "child", input={"value": value})
+        handle = await ctx.spawn_workflow("children:child", input={"value": value})
         outcomes = await ctx.join_workflows([handle])
         if outcomes[0].kind == "completed":
             results.append(outcomes[0].result)
@@ -64,7 +64,7 @@ async def sequential(ctx: WorkflowExecutionContext) -> list[pydantic.JsonValue]:
 
 
 async def nested(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
-    handle = await ctx.spawn_workflow("children", "sequential")
+    handle = await ctx.spawn_workflow("children:sequential")
     outcomes = await ctx.join_workflows([handle])
     if outcomes[0].kind != "completed":
         raise AssertionError("child failed")
@@ -77,7 +77,7 @@ async def deep_leaf(ctx: WorkflowExecutionContext, value: int = 1) -> int:
 
 
 async def deep_child(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
-    handle = await ctx.spawn_workflow("children", "deep_leaf")
+    handle = await ctx.spawn_workflow("children:deep_leaf")
     outcomes = await ctx.join_workflows([handle])
     if outcomes[0].kind != "completed":
         raise AssertionError("grandchild failed")
@@ -85,7 +85,7 @@ async def deep_child(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
 
 
 async def deep_parent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
-    handle = await ctx.spawn_workflow("children", "deep_child")
+    handle = await ctx.spawn_workflow("children:deep_child")
     outcomes = await ctx.join_workflows([handle])
     if outcomes[0].kind != "completed":
         raise AssertionError("child failed")
@@ -93,7 +93,7 @@ async def deep_parent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
 
 
 async def catch(ctx: WorkflowExecutionContext) -> str:
-    handle = await ctx.spawn_workflow("children", "child", input={"value": -1})
+    handle = await ctx.spawn_workflow("children:child", input={"value": -1})
     try:
         await ctx.join_workflows([handle])
     except ActivityError as exc:
@@ -102,5 +102,5 @@ async def catch(ctx: WorkflowExecutionContext) -> str:
 
 
 async def abandon(ctx: WorkflowExecutionContext) -> None:
-    await ctx.spawn_workflow("activities", "wait")
+    await ctx.spawn_workflow("activities:wait")
     raise RuntimeError("parent failed")

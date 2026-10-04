@@ -20,7 +20,6 @@ class Arguments(argparse.Namespace):
     project: Path
     command: str
     workflow: str
-    callable: str
     input: dict[str, pydantic.JsonValue]
     execution_id: typing.Optional[str]
     output: Path
@@ -62,10 +61,7 @@ def parser() -> argparse.ArgumentParser:
     )
     start = commands.add_parser("start", help="start a new workflow in the foreground")
     start.add_argument(
-        "workflow", help="workflow file name relative to workflows/, without .py"
-    )
-    start.add_argument(
-        "--callable", default="workflow", help="async callable name (default: workflow)"
+        "workflow", help="workflow reference: path:callable or python:module:callable"
     )
     start.add_argument(
         "--input",
@@ -173,7 +169,6 @@ async def dispatch(args: Arguments) -> None:
     if args.command == "start":
         result = await runner.run(
             args.workflow,
-            args.callable,
             input=args.input,
             new_execution_id=args.execution_id,
         )

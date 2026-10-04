@@ -15,7 +15,7 @@ def records(workspace: Path) -> list[d.LogRecord]:
 
 async def test_parallel_activity_correlation_and_replay(workspace: Path) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("diagnostics", "main")
+    await runner.run("diagnostics:main")
     entries = records(workspace)
     bodies = [entry for entry in entries if entry.event == "activity.body"]
     assert len(bodies) == 6
@@ -41,7 +41,7 @@ async def test_parallel_activity_correlation_and_replay(workspace: Path) -> None
 
 async def test_cancellation_drains_workflow_logs(workspace: Path) -> None:
     runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(runner.run("diagnostics", "wait"))
+    task = asyncio.create_task(runner.run("diagnostics:wait"))
     async with asyncio.timeout(5):
         while not any(
             entry.event == "waiting"

@@ -9,13 +9,15 @@ from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.project import RunnerProject
 
 
-@pytest.mark.parametrize("name", ["activities", "activities.py"])
+@pytest.mark.parametrize(
+    "name", ["activities", "python:tests.fixtures.workflows.activities"]
+)
 async def test_resolve_async_callable(
     workspace: Path, history: MemoryHistory, name: str
 ) -> None:
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     before = set(sys.modules)
-    assert callable(await executor.load(name, "workflow"))
+    assert callable(await executor.load(f"{name}:workflow"))
     assert not {
         name
         for name in set(sys.modules) - before
@@ -44,7 +46,7 @@ async def test_invalid_targets(
 ) -> None:
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     with pytest.raises(error):
-        await executor.load(name, callable_name)
+        await executor.load(f"{name}:{callable_name}")
 
 
 async def test_absolute_and_symlink_targets(
@@ -52,12 +54,12 @@ async def test_absolute_and_symlink_targets(
 ) -> None:
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     with pytest.raises(ValueError):
-        await executor.load(str(workspace / "workflows/activities.py"), "workflow")
+        await executor.load(f"{workspace / 'workflows/activities'}:workflow")
     outside = workspace.parent / f"{workspace.name}-outside.py"
     outside.write_text("async def workflow(ctx): return 1")
     (workspace / "workflows/link.py").symlink_to(outside)
     with pytest.raises(ValueError):
-        await executor.load("link", "workflow")
+        await executor.load("link:workflow")
 
 
 async def test_import_exception_cleans_module(
@@ -69,7 +71,7 @@ async def test_import_exception_cleans_module(
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     before = set(sys.modules)
     with pytest.raises(RuntimeError, match="import failed"):
-        await executor.load("broken", "workflow")
+        await executor.load("broken:workflow")
     assert not {
         name
         for name in set(sys.modules) - before

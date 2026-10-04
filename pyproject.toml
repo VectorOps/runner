@@ -9,6 +9,7 @@ dependencies = [
     "connect",
     "cryptography>=44.0.0",
     "keyring>=25.0.0",
+    "jsonschema>=4.23.0",
     "pydantic>=2.7.0",
 ]
 
@@ -35,6 +36,8 @@ include = ["vectorops.runner*"]
 
 [dependency-groups]
 dev = [
+    "black>=25.0.0",
+    "types-jsonschema>=4.23.0",
     "mypy>=1.11.0,<2",
     "pytest>=8.0.0,<9",
     "pytest-asyncio>=0.23.0,<1",

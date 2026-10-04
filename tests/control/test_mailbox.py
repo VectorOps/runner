@@ -11,7 +11,6 @@ from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
 
-
 WORKFLOW = """
 import asyncio
 from vectorops.runner.api.mailbox import request_input
@@ -88,10 +87,11 @@ def response(request: mailbox.InputRequest, value: str = "hello") -> mailbox.Ans
 async def test_shutdown_restart_restores_same_wait(
     tmp_path: Path, callable_name: str, count: int
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as connection:
         accepted = await connection.start(
-            p.Start(file="flow.py", callable=callable_name, idempotency_key="start")
+            p.Start(reference=f"flow:{callable_name}", idempotency_key="start")
         )
         requests = await pending(connection, accepted.execution_id, count)
         if callable_name == "workflow":
@@ -123,7 +123,8 @@ async def test_shutdown_restart_restores_same_wait(
 async def test_disconnect_reconnect_parallel_channels(
     tmp_path: Path, tcp: bool
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     token = secrets.token_urlsafe(32)
     async with RunnerService(tmp_path) as service:
         server = RunnerServer(service, token)
@@ -139,9 +140,7 @@ async def test_disconnect_reconnect_parallel_channels(
         try:
             async with await connect() as first:
                 accepted = await first.start(
-                    p.Start(
-                        file="flow.py", callable="parallel", idempotency_key="start"
-                    )
+                    p.Start(reference="flow:parallel", idempotency_key="start")
                 )
                 requests = await pending(first, accepted.execution_id, 3)
             async with await connect() as second:
@@ -176,10 +175,11 @@ async def test_disconnect_reconnect_parallel_channels(
 
 @pytest.mark.parametrize("callable_name", ["workflow", "tool"])
 async def test_explicit_stop_closes_request(tmp_path: Path, callable_name: str) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     async with client.embedded(tmp_path) as connection:
         accepted = await connection.start(
-            p.Start(file="flow.py", callable=callable_name, idempotency_key="start")
+            p.Start(reference=f"flow:{callable_name}", idempotency_key="start")
         )
         request = (await pending(connection, accepted.execution_id))[0]
         await connection.stop(accepted.execution_id)
@@ -203,7 +203,8 @@ async def test_explicit_stop_closes_request(tmp_path: Path, callable_name: str) 
 async def test_process_crash_recovers_wait_and_undelivered_answer(
     tmp_path: Path, answered: bool, callable_name: str
 ) -> None:
-    (tmp_path / "flow.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
     script = """
 import asyncio, json, sys
 from pathlib import Path
@@ -215,7 +216,7 @@ from vectorops.runner.runner.sqlite_history import SQLiteHistory
 async def main():
     async with RunnerService(Path(sys.argv[1])) as service:
         accepted = p.Accepted.model_validate(await service.dispatch("executions.start", {
-            "file": "flow.py", "callable": sys.argv[3], "idempotency_key": "start"
+            "reference": f"flow:{sys.argv[3]}", "idempotency_key": "start"
         }))
         query = mailbox.RequestQuery(execution_id=accepted.execution_id)
         while True:

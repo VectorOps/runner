@@ -4,6 +4,8 @@ import typing
 
 import pydantic
 
+from vectorops.runner.references import WorkflowReference
+
 VERSION: typing.Final = 2
 MAX_FRAME: typing.Final = 8 * 1024 * 1024
 HANDSHAKE_TIMEOUT: typing.Final = 10.0
@@ -91,17 +93,14 @@ class Empty(Model):
 
 
 class Start(Model):
-    file: str = pydantic.Field(min_length=1, max_length=4096)
-    callable: str = pydantic.Field(min_length=1, max_length=256)
+    reference: str = pydantic.Field(min_length=1, max_length=4096)
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
 
-    @pydantic.field_validator("callable")
+    @pydantic.field_validator("reference", mode="after")
     @classmethod
     def identifier(cls, value: str) -> str:
-        if not value.isidentifier():
-            raise ValueError("callable must be an identifier")
-        return value
+        return str(WorkflowReference.parse(value))
 
 
 class Execution(Model):

@@ -25,10 +25,7 @@ def test_start_status_resume_and_export(
 ) -> None:
     prefix = ["--project", str(workspace)]
     assert (
-        cli.main(
-            prefix
-            + ["start", "activities", "--callable", "empty", "--execution-id", "sample"]
-        )
+        cli.main(prefix + ["start", "activities:empty", "--execution-id", "sample"])
         == 0
     )
     started = json.loads(capsys.readouterr().out)
@@ -61,7 +58,10 @@ def test_start_status_resume_and_export(
     assert cli.main(prefix + ["export", "sample", "--output", str(output)]) == 1
     assert output.read_bytes() == original
     assert "vops-runner:" in capsys.readouterr().err
-    assert cli.main(prefix + ["start", "activities", "--execution-id", "sample"]) == 1
+    assert (
+        cli.main(prefix + ["start", "activities:workflow", "--execution-id", "sample"])
+        == 1
+    )
     assert "execution already exists" in capsys.readouterr().err
 
 
@@ -70,7 +70,7 @@ def test_start_status_resume_and_export(
 )
 def test_invalid_input(tmp_path: Path, value: str) -> None:
     with pytest.raises(SystemExit) as error:
-        arguments(tmp_path, "start", "example", "--input", value)
+        arguments(tmp_path, "start", "example:workflow", "--input", value)
     assert error.value.code == 2
 
 
@@ -99,7 +99,7 @@ async def test_input_is_passed_to_workflow(
         "async def workflow(ctx, value):\n    return value\n"
     )
     await cli.dispatch(
-        arguments(workspace, "start", "echo", "--input", '{"value": [1, "a"]}')
+        arguments(workspace, "start", "echo:workflow", "--input", '{"value": [1, "a"]}')
     )
     assert json.loads(capsys.readouterr().out)["result"] == [1, "a"]
 
@@ -204,7 +204,7 @@ async def test_resume_after_process_crash(tmp_path: Path) -> None:
     process = await asyncio.create_subprocess_exec(
         *prefix,
         "start",
-        "crash",
+        "crash:workflow",
         "--execution-id",
         "crashed",
         stdout=asyncio.subprocess.PIPE,

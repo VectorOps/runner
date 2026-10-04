@@ -311,13 +311,14 @@ async def main(ctx):
 async def test_pending_workflow_recovers_and_completed_activity_replays(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "job.py").write_text(WORKFLOW)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/job.py").write_text(WORKFLOW)
     async with RunnerService(tmp_path) as runner:
         runner.authentication.adapters["chatgpt"] = OAuth()
         accepted = p.Accepted.model_validate(
             await runner.dispatch(
                 "executions.start",
-                {"file": "job.py", "callable": "main", "idempotency_key": "auth"},
+                {"reference": "job:main", "idempotency_key": "auth"},
             )
         )
         await pending(runner.authentication)

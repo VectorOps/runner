@@ -24,7 +24,7 @@ async def test_branch_delivery_order_survives_replay(
     execution_probe.gates = {1: asyncio.Event(), 2: asyncio.Event()}
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("composed", "branches", input={"mode": mode}, workflow_id="root")
+        runner.run("composed:branches", input={"mode": mode}, workflow_id="root")
     )
     assert {
         await asyncio.wait_for(execution_probe.started.get(), 2),
@@ -44,7 +44,7 @@ async def test_nested_fanout_executes_leaves_concurrently_and_replays(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(runner.run("composed", "fanout", workflow_id="root"))
+    task = asyncio.create_task(runner.run("composed:fanout", workflow_id="root"))
     started = {
         await asyncio.wait_for(execution_probe.started.get(), 2) for _ in range(4)
     }
@@ -62,7 +62,7 @@ async def test_multiple_pending_activities_recover_with_stable_identities(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("composed", "parallel_activities", workflow_id="root")
+        runner.run("composed:parallel_activities", workflow_id="root")
     )
     for _ in range(2):
         await asyncio.wait_for(execution_probe.started.get(), 2)
@@ -96,14 +96,14 @@ async def test_multiple_pending_activities_recover_with_stable_identities(
 async def test_mixed_streaming_and_child_calls_replay(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    assert await runner.run("composed", "mixed_streaming", workflow_id="root") == [
+    assert await runner.run("composed:mixed_streaming", workflow_id="root") == [
         1,
         4,
         3,
     ]
     before = list(execution_probe.calls)
     assert await runner.run(
-        "composed", "mixed_streaming", continue_from_step_id=history.heads["root"]
+        "composed:mixed_streaming", continue_from_step_id=history.heads["root"]
     ) == [1, 4, 3]
     assert execution_probe.calls == before
 
@@ -180,7 +180,7 @@ async def test_parallel_failure_replays_without_restarting_abandoned_children(
 ) -> None:
     runner = WorkflowRunner(workspace)
     with pytest.raises(ActivityError):
-        await asyncio.wait_for(runner.run("composed", callable_name), 2)
+        await asyncio.wait_for(runner.run(f"composed:{callable_name}"), 2)
     before = list(execution_probe.calls)
     with pytest.raises(ActivityError):
         await asyncio.wait_for(WorkflowRunner(workspace).resume(), 2)
@@ -193,7 +193,7 @@ async def test_first_completed_replays_the_same_winner(
 ) -> None:
     execution_probe.gates = {1: asyncio.Event(), 2: asyncio.Event()}
     runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(runner.run("composed", "first_completed"))
+    task = asyncio.create_task(runner.run("composed:first_completed"))
     for _ in range(2):
         await asyncio.wait_for(execution_probe.started.get(), 2)
     execution_probe.gates[2].set()
@@ -208,7 +208,7 @@ async def test_interrupted_nested_fanout_recovers(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    task = asyncio.create_task(runner.run("composed", "fanout"))
+    task = asyncio.create_task(runner.run("composed:fanout"))
     for _ in range(4):
         await asyncio.wait_for(execution_probe.started.get(), 2)
     task.cancel()

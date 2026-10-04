@@ -10,7 +10,7 @@ from vectorops.runner.runner.workflow import WorkflowRunner
 async def main(path: Path) -> None:
     runner = WorkflowRunner(path)
     task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+        runner.run("streaming:workflow", input={"mode": "blocked"}, workflow_id="root")
     )
     while True:
         pointer = await runner.project_state()

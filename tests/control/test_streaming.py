@@ -7,7 +7,8 @@ from vectorops.runner.runner import history_query as h
 
 
 async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> None:
-    (tmp_path / "stream.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/stream.py").write_text(
         "from vectorops.runner.api import composition as c\n"
         "@c.streamable_activity()\n"
         "async def progress(ctx):\n"
@@ -20,7 +21,7 @@ async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> Non
     async with client.embedded(tmp_path) as connection:
         await connection.subscribe()
         accepted = await connection.start(
-            p.Start(file="stream.py", callable="main", idempotency_key="stream")
+            p.Start(reference="stream:main", idempotency_key="stream")
         )
         steps: dict[str, list[models.WorkflowStep]] = {}
         async with asyncio.timeout(5):
@@ -44,13 +45,14 @@ async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> Non
 
 
 async def test_resume_and_filters(tmp_path: Path) -> None:
-    (tmp_path / "job.py").write_text("async def main(ctx):\n    return 42\n")
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/job.py").write_text("async def main(ctx):\n    return 42\n")
     async with client.embedded(tmp_path) as connection:
         subscription = await connection.subscribe(
             p.Subscribe(kinds=["execution.completed"])
         )
         accepted = await connection.start(
-            p.Start(file="job.py", callable="main", idempotency_key="start")
+            p.Start(reference="job:main", idempotency_key="start")
         )
         async with asyncio.timeout(5):
             assert (await connection.next_event()).event[
@@ -68,11 +70,12 @@ async def test_resume_and_filters(tmp_path: Path) -> None:
 
 
 async def test_shutdown_cancels_active_execution(tmp_path: Path) -> None:
-    (tmp_path / "wait.py").write_text(
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/wait.py").write_text(
         "import asyncio\nasync def main(ctx):\n    await asyncio.sleep(60)\n"
     )
     async with asyncio.timeout(5):
         async with client.embedded(tmp_path) as connection:
             await connection.start(
-                p.Start(file="wait.py", callable="main", idempotency_key="start")
+                p.Start(reference="wait:main", idempotency_key="start")
             )

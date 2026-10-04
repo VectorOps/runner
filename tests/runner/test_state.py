@@ -79,13 +79,13 @@ async def test_executions_are_isolated_and_old_history_survives(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     first_id = str(runner.last_execution_id)
     first = await runner.execution_state(first_id)
     original = await database(workspace, first_id).get_step(
         str(first.completion_step_id)
     )
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     second_id = str(runner.last_execution_id)
     assert first_id != second_id
     assert (await runner.project_state()).last_execution_id == second_id
@@ -99,7 +99,7 @@ async def test_history_resumes_without_global_state(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    assert await runner.run("children:deep_parent", workflow_id="root") == 4
     execution_id = str(runner.last_execution_id)
     (workspace / "data/runner-state.json").unlink()
     reopened = WorkflowRunner(workspace)
@@ -114,7 +114,7 @@ async def test_cancelled_stream_retains_latest_head_in_database(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("streaming", input={"mode": "blocked"}, workflow_id="root")
+        runner.run("streaming:workflow", input={"mode": "blocked"}, workflow_id="root")
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     execution_id = str(runner.last_execution_id)
@@ -142,7 +142,7 @@ async def test_nested_recovery_uses_database_child_heads(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("children", "parent", input={"values": [1, 2], "block": True})
+        runner.run("children:parent", input={"values": [1, 2], "block": True})
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     await asyncio.wait_for(execution_probe.started.get(), 2)
@@ -157,7 +157,7 @@ async def test_nested_completed_heads_are_self_contained(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    assert await runner.run("children", "deep_parent", workflow_id="root") == 4
+    assert await runner.run("children:deep_parent", workflow_id="root") == 4
     execution = await runner.execution_state(str(runner.last_execution_id))
     assert len(execution.checkpoint.heads) == 3
     history = database(workspace, execution.id)
@@ -174,7 +174,7 @@ async def test_stop_cascades_to_children_and_can_resume_from_history(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("children", "parent", input={"values": [1, 2], "block": True})
+        runner.run("children:parent", input={"values": [1, 2], "block": True})
     )
     for _ in range(2):
         await asyncio.wait_for(execution_probe.started.get(), 2)
@@ -196,7 +196,7 @@ async def test_failed_execution_status_lives_only_in_database(
 ) -> None:
     runner = WorkflowRunner(workspace)
     with pytest.raises(ActivityError):
-        await runner.run("activities", "unhandled")
+        await runner.run("activities:unhandled")
     execution = await runner.execution_state(str(runner.last_execution_id))
     assert execution.status == "failed"
     assert execution.completion_step_id is not None
@@ -212,7 +212,7 @@ async def test_restart_discovery_reads_status_from_database(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     execution_id = str(runner.last_execution_id)
     history = database(workspace, execution_id)
     record = await history.get_execution()
@@ -260,7 +260,7 @@ async def test_fork_preserves_old_history_and_changes_database_head(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     execution = await runner.execution_state(str(runner.last_execution_id))
     history = database(workspace, execution.id)
     path = [
@@ -269,7 +269,9 @@ async def test_fork_preserves_old_history_and_changes_database_head(
     ]
     assert (
         await runner.run(
-            "activities", execution_id=execution.id, continue_from_step_id=path[0].id
+            "activities:workflow",
+            execution_id=execution.id,
+            continue_from_step_id=path[0].id,
         )
         == 2
     )
@@ -283,9 +285,9 @@ async def test_cleanup_leaves_other_histories_and_clears_pointer_only_if_selecte
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     first_id = str(runner.last_execution_id)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     second_id = str(runner.last_execution_id)
     await runner.remove_execution(first_id)
     assert not database(workspace, first_id).path.parent.exists()
@@ -298,7 +300,7 @@ async def test_running_history_is_not_deleted(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     execution_id = str(runner.last_execution_id)
     history = database(workspace, execution_id)
     await history.save_execution(
@@ -312,11 +314,11 @@ async def test_running_history_is_not_deleted(
 async def test_second_runner_cannot_mutate_active_project(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
-    task = asyncio.create_task(WorkflowRunner(workspace).run("activities", "wait"))
+    task = asyncio.create_task(WorkflowRunner(workspace).run("activities:wait"))
     await asyncio.wait_for(execution_probe.started.get(), 2)
     try:
         with pytest.raises(RuntimeError, match="another runner"):
-            await WorkflowRunner(workspace).run("activities")
+            await WorkflowRunner(workspace).run("activities:workflow")
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -408,5 +410,5 @@ async def test_persistent_continuation_requires_execution_identity(
 ) -> None:
     with pytest.raises(ValueError, match="execution ID"):
         await WorkflowRunner(workspace).run(
-            "activities", continue_from_step_id="unknown"
+            "activities:workflow", continue_from_step_id="unknown"
         )

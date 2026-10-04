@@ -14,8 +14,7 @@ async def run():
     async with embedded(Path("/path/to/workspace")) as host:
         await host.subscribe()
         accepted = await host.start(Start(
-            file="workflows/report.py",
-            callable="main",
+            reference="report:main",
             input={"date": "2026-01-15"},
             idempotency_key="report-2026-01-15",
         ))
@@ -89,7 +88,7 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `executions.active` | `after`, `limit` (default 100, maximum 500) | Lexically ordered `executions` with ID/status and `next_after` |
 | `executions.list` | `after`, `limit` (default 100, maximum 500) | Lexically ordered execution IDs and `next_after` |
 | `executions.get` | `execution_id` | Persisted execution record and checkpoint |
-| `executions.start` | `file`, `callable`, `input`, `idempotency_key` | Execution ID and `starting` status |
+| `executions.start` | `reference`, `input`, `idempotency_key` | Execution ID and `starting` status |
 | `executions.resume` | `execution_id`, `idempotency_key` | Execution ID and `starting` status |
 | `executions.stop` | `execution_id` | Active execution with `stopping` status |
 | `history.query` | History query below | Ordered history items and `next_cursor` |
@@ -98,7 +97,7 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `logs.list` | None | Retained log filenames/sizes and dropped/write-error counters |
 | `logs.download` | `file`, `offset`, `limit`, optional `end` | Base64 bytes, `next_offset`, `end`, `eof` |
 
-There is no workflow catalog. `file` must identify a `.py` file within the workspace after symlink resolution. The callable must be an async workflow entry point. Import/callable/execution failures are reported through execution lifecycle events after acceptance. Existing runner references remain supported internally; the protocol does not accept Python objects or module imports in place of filenames.
+There is no static workflow catalog. `reference` is an explicit `path:callable` relative to the configured workflows directory, without `.py`, or `python:package.module:callable` for an importable library workflow. Paths must remain inside the workflows directory after symlink resolution. The callable must be an async workflow entry point. Resolution failures reject the request before acceptance; execution failures are reported through lifecycle events. The former `file` and `callable` fields are rejected. Discovery imports trusted Python code and is not a sandbox.
 
 Start and resume receipts are persisted before launch. Repeating the same idempotency key and arguments returns the original acceptance, even after restart; different arguments produce `idempotency_conflict`. Acceptance is not proof of successful execution. A crash between receipt persistence and launch can leave an accepted ID without execution history; retries do not automatically execute it. Retention can also remove history without removing its receipt. Use a new key only for an intentional new attempt.
 
@@ -116,8 +115,8 @@ from vectorops.runner.control.protocol import Start, Resume
 
 async def manage(host):
     first, second = await asyncio.gather(
-        host.start(Start(file="workflows/agent.py", callable="main", idempotency_key="agent-a")),
-        host.start(Start(file="workflows/agent.py", callable="main", idempotency_key="agent-b")),
+        host.start(Start(reference="agent:main", idempotency_key="agent-a")),
+        host.start(Start(reference="agent:main", idempotency_key="agent-b")),
     )
     await host.stop(first.execution_id)
     while await host.current(first.execution_id) is not None:
@@ -212,7 +211,8 @@ commit atomically, survive restart/resume, and persist for the workflow instance
 including continuations. They are not branch-local and cannot yet be revoked.
 Idempotent retries return the same receipt; a conflicting answer cannot create a
 grant. Ordinary mailbox inputs and legacy binding-local approval do not create
-workflow grants. No extra policy activities enter saga history.
+workflow grants. Ordinary tools keep their gate and implementation in one activity;
+workflow-side tools record a gate activity before durable child operations.
 
 See [Tool approval configuration](../config/components.md#tool-approval) for
 workspace defaults, extension points, and history compatibility.

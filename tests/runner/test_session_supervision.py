@@ -23,7 +23,7 @@ async def test_deferred_history_failure_is_fatal_not_a_child_exception(
     before = set(asyncio.all_tasks())
     with pytest.raises(OSError, match="join write"):
         await asyncio.wait_for(
-            WorkflowRunner(workspace, history).run("composed", "collected"), 2
+            WorkflowRunner(workspace, history).run("composed:collected"), 2
         )
     assert not set(asyncio.all_tasks()) - before
     assert any(step.outcome.kind == "waiting" for step in history.steps.values())
@@ -50,6 +50,8 @@ async def test_parent_exit_cleans_cancelled_and_abandoned_child_calls(
     expected: str,
 ) -> None:
     before = set(asyncio.all_tasks())
-    assert await asyncio.wait_for(runner.run("composed", callable_name), 2) == expected
+    assert (
+        await asyncio.wait_for(runner.run(f"composed:{callable_name}"), 2) == expected
+    )
     assert execution_probe.active == 0
     assert not set(asyncio.all_tasks()) - before

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from functools import partial
@@ -15,6 +16,8 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner import diagnostics
+from vectorops.runner.references import WorkflowReference
+from vectorops.runner.runner.resolver import WorkflowResolver
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment import factory as environments
 from vectorops.runner.environment.lifecycle import close_environment
@@ -60,11 +63,18 @@ class WorkflowRunner:
         self._stop_requests: set[str] = set()
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
+        self._resolvers: dict[Path, WorkflowResolver] = {}
+
+    async def project(self) -> RunnerProject:
+        project = await RunnerProject.open(self.path)
+        resolver = self._resolvers.setdefault(
+            project.workflows_path, WorkflowResolver(project.workflows_path)
+        )
+        return replace(project, workflow_resolver=resolver)
 
     async def run(
         self,
-        workflow_name: str,
-        callable_name: str = "workflow",
+        reference: str,
         *,
         input: typing.Optional[dict[str, pydantic.JsonValue]] = None,
         workflow_id: typing.Optional[str] = None,
@@ -77,8 +87,7 @@ class WorkflowRunner:
         """Replay through a selected step, then append new execution history."""
         task = asyncio.create_task(
             self._execute(
-                workflow_name,
-                callable_name,
+                str(WorkflowReference.parse(reference)),
                 input=input,
                 workflow_id=workflow_id,
                 continue_from_step_id=continue_from_step_id,
@@ -210,8 +219,7 @@ class WorkflowRunner:
 
     async def _execute(
         self,
-        workflow_name: str,
-        callable_name: str,
+        reference: str,
         *,
         input: typing.Optional[dict[str, pydantic.JsonValue]],
         workflow_id: typing.Optional[str],
@@ -221,7 +229,7 @@ class WorkflowRunner:
         new_execution_id: typing.Optional[str],
         on_started: typing.Optional[Callable[[], None]],
     ) -> pydantic.JsonValue:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         if new_execution_id is not None and (
             execution_id is not None or self.history is not None
         ):
@@ -246,7 +254,7 @@ class WorkflowRunner:
                         raise FileExistsError("execution already exists")
                     configuration = models.Workflow(
                         id=root_id,
-                        definition_ref=f"{workflow_name}:{callable_name}",
+                        definition_ref=reference,
                         input={} if input is None else input,
                     )
                     configuration = await WorkflowExecutor(
@@ -292,10 +300,7 @@ class WorkflowRunner:
                         configuration = await history.get_workflow(
                             record.root_workflow_id
                         )
-                        if (
-                            configuration.definition_ref
-                            != f"{workflow_name}:{callable_name}"
-                        ):
+                        if configuration.definition_ref != reference:
                             raise ValueError(
                                 "workflow target differs from execution configuration"
                             )
@@ -352,8 +357,7 @@ class WorkflowRunner:
                             result = await self._run(
                                 project,
                                 history,
-                                workflow_name,
-                                callable_name,
+                                reference,
                                 input=configuration.input,
                                 workflow_id=record.root_workflow_id,
                                 continue_from_step_id=root_head,
@@ -392,8 +396,7 @@ class WorkflowRunner:
         return await self._run(
             project,
             self.history,
-            workflow_name,
-            callable_name,
+            reference,
             input=input,
             workflow_id=workflow_id,
             continue_from_step_id=continue_from_step_id,
@@ -404,8 +407,7 @@ class WorkflowRunner:
         self,
         project: RunnerProject,
         history: WorkflowHistory,
-        workflow_name: str,
-        callable_name: str,
+        reference: str,
         *,
         input: typing.Optional[dict[str, pydantic.JsonValue]],
         workflow_id: typing.Optional[str],
@@ -420,7 +422,7 @@ class WorkflowRunner:
                 raise ValueError("continuation step ID must not be empty")
             step = await history.get_step(continue_from_step_id)
             configuration = await history.get_workflow(step.workflow_id)
-            if configuration.definition_ref != f"{workflow_name}:{callable_name}":
+            if configuration.definition_ref != reference:
                 raise ValueError("workflow target differs from recorded configuration")
             if workflow_id is not None and workflow_id != configuration.id:
                 raise ValueError("workflow ID differs from recorded configuration")
@@ -429,7 +431,7 @@ class WorkflowRunner:
         else:
             configuration = models.Workflow(
                 id=workflow_id if workflow_id is not None else uuid4().hex,
-                definition_ref=f"{workflow_name}:{callable_name}",
+                definition_ref=reference,
                 input={} if input is None else input,
             )
         async with ExecutionResources() as resources:
@@ -527,23 +529,6 @@ class WorkflowRunner:
 
         return await asyncio.to_thread(listing)
 
-    async def resolve_file(self, filename: str) -> str:
-        """Translate a workspace-relative file to the executor's workflow reference."""
-        project = await RunnerProject.open(self.path)
-
-        def resolve() -> str:
-            relative = Path(filename)
-            if relative.is_absolute() or relative.suffix != ".py":
-                raise ValueError("file must be a workspace-relative Python filename")
-            path = (project.root / relative).resolve()
-            if not path.is_relative_to(project.root):
-                raise ValueError("file must remain inside the workspace")
-            if not path.is_file():
-                raise FileNotFoundError(filename)
-            return "workspace:" + path.relative_to(project.root).as_posix()
-
-        return await asyncio.to_thread(resolve)
-
     async def export_execution(
         self, output: Path, execution_id: typing.Optional[str] = None
     ) -> None:
@@ -584,10 +569,8 @@ class WorkflowRunner:
         database = await self._database(project, execution_id)
         record = await database.get_execution()
         configuration = await database.get_workflow(record.root_workflow_id)
-        workflow_name, _, callable_name = configuration.definition_ref.rpartition(":")
         return await self.run(
-            workflow_name,
-            callable_name,
+            configuration.definition_ref,
             execution_id=execution_id,
             on_started=on_started,
         )

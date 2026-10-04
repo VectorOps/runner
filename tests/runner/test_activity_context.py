@@ -20,7 +20,7 @@ from vectorops.runner.runner.workflow import WorkflowRunner
 async def test_context_matches_durable_step_and_is_excluded_from_inputs(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
-    await runner.run("activities", input={"value": 3}, workflow_id="root")
+    await runner.run("activities:workflow", input={"value": 3}, workflow_id="root")
     records = history.path(history.heads["root"])
     assert [ctx.step_id for ctx in execution_probe.contexts] == [
         step.id for step in records if isinstance(step.operation, models.StepOperation)
@@ -31,9 +31,9 @@ async def test_context_matches_durable_step_and_is_excluded_from_inputs(
     )
     assert records[0].operation.model_dump()["input"] == {"value": 3, "amount": 1}
     before = list(execution_probe.contexts)
-    await runner.run("activities", continue_from_step_id=records[-1].id)
+    await runner.run("activities:workflow", continue_from_step_id=records[-1].id)
     assert execution_probe.contexts == before
-    await runner.run("activities", continue_from_step_id=records[0].id)
+    await runner.run("activities:workflow", continue_from_step_id=records[0].id)
     assert execution_probe.contexts[-1].step_id != records[2].id
 
 
@@ -48,7 +48,7 @@ async def test_persistent_recovery_reuses_same_context_identity(
 ) -> None:
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(
-        runner.run("idempotency", callable_name, workflow_id="root")
+        runner.run(f"idempotency:{callable_name}", workflow_id="root")
     )
     await asyncio.wait_for(execution_probe.started.get(), 2)
     first = execution_probe.contexts[-1]
@@ -80,7 +80,7 @@ async def test_child_context_shares_execution_but_has_distinct_workflow_and_step
 ) -> None:
     runner = WorkflowRunner(workspace)
     assert await runner.run(
-        "children", "parent", input={"values": [1, 2]}, workflow_id="root"
+        "children:parent", input={"values": [1, 2]}, workflow_id="root"
     ) == [2, 4]
     contexts = execution_probe.contexts
     assert len(contexts) == 2
@@ -95,7 +95,7 @@ async def test_failed_pending_append_never_invokes_activity(
 ) -> None:
     history.fail_append = True
     with pytest.raises(OSError):
-        await runner.run("activities")
+        await runner.run("activities:workflow")
     assert execution_probe.contexts == []
     assert execution_probe.calls == []
 
@@ -105,25 +105,28 @@ async def test_terminal_update_failure_leaves_recoverable_identity(
 ) -> None:
     history.fail_update = True
     with pytest.raises(OSError):
-        await runner.run("activities", workflow_id="root")
+        await runner.run("activities:workflow", workflow_id="root")
     first = execution_probe.contexts[-1]
     assert history.steps[first.step_id].outcome.kind == "pending"
     history.fail_update = False
-    assert await runner.run("activities", continue_from_step_id=first.step_id) == 2
+    assert (
+        await runner.run("activities:workflow", continue_from_step_id=first.step_id)
+        == 2
+    )
     assert execution_probe.contexts[1] == first
 
 
 async def test_pending_activity_cannot_have_recorded_delivery(
     runner: WorkflowRunner, history: MemoryHistory
 ) -> None:
-    await runner.run("activities", workflow_id="root")
+    await runner.run("activities:workflow", workflow_id="root")
     path = history.path(history.heads["root"])
     history.replay_override = [
         path[0].model_copy(update={"outcome": models.StepPending()}),
         *path[1:],
     ]
     with pytest.raises(ReplayMismatchError, match="unfinished invocation"):
-        await runner.run("activities", continue_from_step_id=path[-1].id)
+        await runner.run("activities:workflow", continue_from_step_id=path[-1].id)
 
 
 def test_activity_decorators_require_first_positional_context() -> None:

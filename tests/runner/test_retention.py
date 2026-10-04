@@ -251,9 +251,9 @@ async def test_successful_runner_applies_retention_and_keeps_minimal_global_stat
         "[retention]\nmax_completed_executions = 1\n"
     )
     runner = WorkflowRunner(workspace)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     first = str(runner.last_execution_id)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     second = str(runner.last_execution_id)
     assert not (workspace / "data/executions" / first).exists()
     assert (workspace / "data/executions" / second / "history.sqlite3").exists()
@@ -269,7 +269,7 @@ async def test_failed_run_does_not_trigger_retention(
         "[retention]\nmax_completed_executions = 0\n"
     )
     with pytest.raises(ActivityError):
-        await WorkflowRunner(workspace).run("activities", "unhandled")
+        await WorkflowRunner(workspace).run("activities:unhandled")
     assert old.exists()
 
 
@@ -277,9 +277,9 @@ async def test_default_runner_retains_all_completed_histories(
     workspace: Path, execution_probe: ExecutionProbe
 ) -> None:
     runner = WorkflowRunner(workspace)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     first = str(runner.last_execution_id)
-    await runner.run("activities")
+    await runner.run("activities:workflow")
     assert (workspace / "data/executions" / first).exists()
 
 
@@ -290,7 +290,9 @@ async def test_injected_history_bypasses_disk_retention(
     (workspace / "config.toml").write_text(
         "[retention]\nmax_completed_executions = 0\n"
     )
-    assert await WorkflowRunner(workspace, MemoryHistory()).run("activities") == 2
+    assert (
+        await WorkflowRunner(workspace, MemoryHistory()).run("activities:workflow") == 2
+    )
     assert old.exists()
 
 
@@ -308,5 +310,5 @@ async def test_scan_failure_does_not_change_successful_result(
         raise PermissionError("scan blocked")
 
     monkeypatch.setattr(ExecutionRetention, "_directories", fail)
-    assert await WorkflowRunner(workspace).run("activities") == 2
+    assert await WorkflowRunner(workspace).run("activities:workflow") == 2
     assert "Could not scan" in caplog.text

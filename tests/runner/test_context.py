@@ -60,7 +60,7 @@ async def test_activity_response_and_error(tmp_path: Path) -> None:
 async def test_spawn_response(tmp_path: Path) -> None:
     handle = context.ChildWorkflowHandle("parent", "child", "spawn")
     ctx = make_context(tmp_path, context.SpawnResponse(handle))
-    assert await ctx.spawn_workflow("file", "entry", input={"value": 1}) == handle
+    assert await ctx.spawn_workflow("file:entry", input={"value": 1}) == handle
 
 
 async def test_join_response_and_error(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ async def test_wrong_response_variant(tmp_path: Path, operation: str) -> None:
                 models.StepOperation(kind="activity", name="work"), invoke
             )
         elif operation == "spawn":
-            await ctx.spawn_workflow("file")
+            await ctx.spawn_workflow("file:workflow")
         else:
             await ctx.join_workflows(
                 [context.ChildWorkflowHandle("parent", "child", "spawn")]

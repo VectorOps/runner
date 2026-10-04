@@ -30,6 +30,80 @@ Workspace roots can remain undecorated async functions or use the same decorator
 Importable library functions are resolved by the executor through `python:<module>:<function>` references.
 Raw async helpers remain ordinary Python calls and do not create child histories.
 
+## References and discovery
+
+All runner entry points use one explicit reference: `foo/bar:buzz` resolves
+`workflows/foo/bar.py` and its `buzz` callable. Paths are relative to the configured
+workflows directory, extensionless, and slash-separated. The callable is required.
+Absolute paths, traversal, escaping symlinks, `.py` suffixes, and the former
+`workspace:` form are rejected. Library references use `python:package.module:main`.
+The runner, child spawning, CLI, and control protocol use the same format; split
+file/callable arguments and implicit callable defaults are not supported.
+
+```python
+from pathlib import Path
+from vectorops.runner.runner.workflow import WorkflowRunner
+
+async def run():
+    runner = WorkflowRunner(Path("/path/to/workspace"))
+    project = await runner.project()
+    descriptor = await project.resolver.describe("foo/bar:buzz")
+    return await runner.run(descriptor.reference, input={"text": "hello"})
+```
+
+Add `description="..."` to `@workflow` to explain its purpose. Discovery returns
+a `WorkflowDescriptor` with `reference`, display `name`, optional `description`,
+contract `kind` and `version`, and `input_schema`. Inputs exclude the injected
+context parameter. Undecorated async entry points are discoverable too.
+
+Discovery resolves references on demand, without a registration step or directory
+scan. Newly generated files are available immediately. A runner shares a resolver
+across executions. Each source file is imported once until its filesystem
+fingerprint changes; unchanged files are not reread or parsed. Changed files are
+hashed before reimporting, so timestamp-only changes reuse the loaded definition.
+Concurrent resolutions share the cache. Missing files are not negatively cached,
+and broken updates fail rather than using a stale definition.
+
+Use `await project.resolver.invalidate(reference)` to evict one file, or
+`await project.resolver.invalidate()` to clear all workspace entries. This cache
+does not track transitive imports; library and helper imports follow normal Python
+import caching. Imports execute trusted Python code, not sandboxed metadata parsing.
+Already selected callables remain stable while running; subsequent resolutions see
+updates. Arbitrary source changes are not made replay-safe by caching.
+
+## Subworkflow tools
+
+```python
+from vectorops.runner.api import llm
+
+async def agent(ctx, prompt: str):
+    tool = await llm.subworkflow_tool(["research:main", "reports:summary"])
+    conversation = llm.LLM("agent")
+    conversation.add_user_message(prompt)
+    answer = await conversation.run(tools=[tool])
+    return answer.model_dump(mode="json")
+```
+
+The async factory returns a ready binding, with available workflow descriptions
+and input schemas in its tool definition. `LLM.run` continues to accept bindings,
+not bare implementation callables or unawaited factories. Ordinary `Tool`
+construction remains synchronous.
+
+The tool accepts `reference` and an `input` object (default `{}`). The supplied
+list is a strict, nonempty allowlist with no duplicates. JSON Schema validation
+checks inputs before policy evaluation or host approval. Creating a file does not
+grant permission: call the factory again with an updated list to expose it.
+Descriptor snapshots are recorded as `workflow.describe` activities, so replay
+does not rediscover historical metadata from the current filesystem.
+
+Subworkflow calls use a recorded policy/approval gate followed by durable
+`workflow.spawn` and `workflow.join` operations. Child execution is not hidden
+inside a tool activity. Results are JSON text; child failures are tool errors.
+Cancellation, storage failures, and replay mismatches propagate. A completed
+replay reuses both the approval gate and child result without running them again.
+Custom workflow-side tools can implement `llm.WorkflowToolBinding`; their
+`execute_workflow` method must keep nondeterministic work inside activities.
+
 ## Workflow contracts
 
 The workflow decorator accepts the same `kind`, `namespace`, and positive `version` options as [activity contracts](activities.md#payload-contracts).

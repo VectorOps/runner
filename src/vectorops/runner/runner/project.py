@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 import tomllib
 import typing
@@ -13,6 +14,9 @@ import pydantic
 from vectorops.runner import diagnostics
 from vectorops.runner.environment.configuration import EnvironmentConfig
 from vectorops.runner.tool_policy import ToolPolicy
+
+if typing.TYPE_CHECKING:
+    from vectorops.runner.runner.resolver import WorkflowResolver
 
 
 class RetentionPolicy(pydantic.BaseModel):
@@ -55,6 +59,15 @@ class RunnerProject:
     tool_policy: ToolPolicy = field(
         default_factory=ToolPolicy, compare=False, repr=False
     )
+    workflow_resolver: typing.Optional[WorkflowResolver] = field(
+        default=None, compare=False, repr=False
+    )
+
+    @cached_property
+    def resolver(self) -> WorkflowResolver:
+        from vectorops.runner.runner.resolver import WorkflowResolver
+
+        return self.workflow_resolver or WorkflowResolver(self.workflows_path)
 
     @property
     def config_path(self) -> Path:
