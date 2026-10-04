@@ -6,6 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
+from functools import partial
 import shutil
 import typing
 from uuid import uuid4
@@ -15,6 +16,8 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.authentication.service import AuthenticationService
+from vectorops.runner.environment import factory as environments
+from vectorops.runner.environment.lifecycle import close_environment
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
@@ -30,6 +33,7 @@ from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.state_store import RunnerStateStore
+from vectorops.runner.runner.resources import ExecutionResources, finish_cleanup
 
 
 class WorkflowRunner:
@@ -82,7 +86,15 @@ class WorkflowRunner:
         )
         self._executions.add(task)
         try:
-            return await task
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+            try:
+                await finish_cleanup(task)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise
         finally:
             self._executions.discard(task)
 
@@ -353,27 +365,38 @@ class WorkflowRunner:
                 definition_ref=f"{workflow_name}:{callable_name}",
                 input={} if input is None else input,
             )
-        executor = WorkflowExecutor(
-            project,
-            history,
-            reporter,
-            execution_id,
-            self.event_sink,
-            mailbox_owner,
-            self.authentication,
-        )
-        if continue_from_step_id is None:
-            configuration = await executor.configure(configuration)
-        completion = await executor.execute(
-            configuration,
-            continue_from_step_id=continue_from_step_id,
-            child_heads=child_heads,
-        )
-        if completion.outcome.kind == "failed":
-            raise ActivityError(completion.outcome.error)
-        if completion.outcome.kind != "completed":
-            raise RuntimeError("executor returned an invalid workflow completion")
-        return completion.outcome.result
+        async with ExecutionResources() as resources:
+            environment = None
+            if project.config.environment is not None:
+                environment = await environments.open_environment(
+                    project.config.environment
+                )
+                resources.register(
+                    "environment", partial(close_environment, environment)
+                )
+            executor = WorkflowExecutor(
+                project,
+                history,
+                reporter,
+                execution_id,
+                self.event_sink,
+                mailbox_owner,
+                self.authentication,
+                environment=environment,
+                resources=resources,
+            )
+            if continue_from_step_id is None:
+                configuration = await executor.configure(configuration)
+            completion = await executor.execute(
+                configuration,
+                continue_from_step_id=continue_from_step_id,
+                child_heads=child_heads,
+            )
+            if completion.outcome.kind == "failed":
+                raise ActivityError(completion.outcome.error)
+            if completion.outcome.kind != "completed":
+                raise RuntimeError("executor returned an invalid workflow completion")
+            return completion.outcome.result
 
     async def project_state(self) -> state.RunnerState:
         project = await RunnerProject.open(self.path)

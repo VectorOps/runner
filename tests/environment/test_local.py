@@ -30,10 +30,10 @@ async def test_description(environment: TargetEnvironment) -> None:
     description = await environment.describe()
     assert description.identity.startswith("file:///")
     assert description.capabilities.atomic_file_replacement
-    assert not description.capabilities.processes
+    assert description.capabilities.processes
     assert not description.capabilities.patching
     assert not description.race_resistant_containment
-    assert not description.process_execution_allowed
+    assert description.process_execution_allowed
 
 
 async def test_attachment_requires_existing_directory(tmp_path: Path) -> None:

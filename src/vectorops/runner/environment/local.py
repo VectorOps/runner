@@ -14,12 +14,19 @@ import typing
 from . import models as m, text
 from .configuration import LocalEnvironmentConfig
 from .errors import EnvironmentError, ErrorCode
+from .processes import models as processes
+from .processes.local import LocalProcessDriver
+from .processes.manager import ProcessManager
 
 
 class LocalEnvironment:
     def __init__(self, root: Path, config: LocalEnvironmentConfig) -> None:
         self._root = root
         self._config = config
+        self._process_driver = LocalProcessDriver(
+            self._path, config.processes.environment
+        )
+        self._process_manager = ProcessManager(self._process_driver, config.processes)
 
     @classmethod
     async def open(cls, config: LocalEnvironmentConfig) -> typing.Self:
@@ -118,6 +125,10 @@ class LocalEnvironment:
             max_read_bytes=self._config.max_read_bytes,
             max_write_bytes=self._config.max_write_bytes,
             max_list_entries=self._config.max_list_entries,
+            capabilities=m.Capabilities(processes=True),
+            process_execution_allowed=True,
+            process_capabilities=self._process_driver.capabilities,
+            process_policy=self._config.processes.model_copy(deep=True),
         )
 
     async def stat(self, request: m.PathRequest) -> m.FileInfo:
@@ -243,3 +254,21 @@ class LocalEnvironment:
             source.rename(destination)
 
         await self._run(rename, mutation=True)
+
+    async def exec(self, request: processes.ExecRequest) -> processes.ProcessResult:
+        return await self._process_manager.exec(request)
+
+    async def poll(self, request: processes.PollRequest) -> processes.ProcessResult:
+        return await self._process_manager.poll(request)
+
+    async def write_stdin(self, request: processes.StdinRequest) -> None:
+        await self._process_manager.write_stdin(request)
+
+    async def kill(self, request: processes.SessionRequest) -> processes.KillResult:
+        return await self._process_manager.kill(request)
+
+    async def list_processes(self) -> list[processes.ProcessResult]:
+        return await self._process_manager.list_processes()
+
+    async def close(self) -> list[processes.KillResult]:
+        return await self._process_manager.close()

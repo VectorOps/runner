@@ -20,6 +20,7 @@ from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.api import composition
 from vectorops.runner.authentication.service import AuthenticationService
+from vectorops.runner.environment.protocol import TargetEnvironment
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
@@ -28,6 +29,7 @@ from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 from vectorops.runner.runner.mailbox import Mailbox
+from vectorops.runner.runner.resources import CleanupRegistry
 
 WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]]
 WorkflowEntryPoint: typing.TypeAlias = typing.Union[
@@ -45,6 +47,8 @@ class WorkflowExecutor:
         event_sink: typing.Optional[StepEventSink] = None,
         mailbox: typing.Optional[Mailbox] = None,
         authentication: typing.Optional[AuthenticationService] = None,
+        environment: typing.Optional[TargetEnvironment] = None,
+        resources: typing.Optional[CleanupRegistry] = None,
     ) -> None:
         self.project = project
         self.history = history
@@ -53,6 +57,8 @@ class WorkflowExecutor:
         self.event_sink = event_sink
         self.mailbox = mailbox
         self.authentication = authentication
+        self.environment = environment
+        self.resources = resources
         self._definitions: dict[str, WorkflowEntryPoint] = {}
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
@@ -116,6 +122,8 @@ class WorkflowExecutor:
             configure_workflow=self.configure,
             mailbox=self.mailbox,
             authentication=self.authentication,
+            environment=self.environment,
+            resources=self.resources,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)

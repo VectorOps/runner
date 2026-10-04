@@ -17,6 +17,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.authentication.service import AuthenticationService
+from vectorops.runner.environment.protocol import TargetEnvironment
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
 from vectorops.runner.runner.mailbox import Mailbox
@@ -25,6 +26,7 @@ from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEvent, StepEventSink
+from vectorops.runner.runner.resources import CleanupRegistry, finish_cleanup
 
 
 class ChildExecutor(typing.Protocol):
@@ -71,6 +73,8 @@ class ExecutionSession:
         ] = None,
         mailbox: typing.Optional[Mailbox] = None,
         authentication: typing.Optional[AuthenticationService] = None,
+        environment: typing.Optional[TargetEnvironment] = None,
+        resources: typing.Optional[CleanupRegistry] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -95,6 +99,8 @@ class ExecutionSession:
         self.configure_workflow = configure_workflow
         self.mailbox = mailbox
         self.authentication = authentication
+        self.environment = environment
+        self.resources = resources
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -143,8 +149,12 @@ class ExecutionSession:
             finally:
                 self.closed = True
                 task.cancel()
-                await self._stop_operations(dispatcher)
-                await asyncio.gather(task, return_exceptions=True)
+
+                async def teardown() -> None:
+                    await self._stop_operations(dispatcher)
+                    await asyncio.gather(task, return_exceptions=True)
+
+                await finish_cleanup(asyncio.create_task(teardown()))
             if fatal.done():
                 raise fatal.result()
             return await self._complete(task)
@@ -426,6 +436,8 @@ class ExecutionSession:
             step.id,
             self.mailbox,
             self.authentication,
+            self.environment,
+            self.resources,
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

@@ -1,12 +1,12 @@
 # Target environments
 
-Status: the filesystem foundation is implemented in `vectorops.runner.environment`. Process management, patching, and workflow integration below remain proposed design, not implemented APIs.
+Status: filesystem operations, local pipe processes, and root-workflow resource ownership are implemented. Patching, remote drivers, PTYs, and durable target-binding recovery remain proposed design.
 
 A target environment is the filesystem and execution context that agent tools can inspect and modify. This design separates target operations from the runner so the same tools can work locally or against future remote backends.
 
 ## Implemented filesystem foundation
 
-The initial package provides an async `TargetEnvironment` protocol, typed Pydantic requests/results, a POSIX `LocalEnvironment`, a backend factory, and shared bounded UTF-8 line reading. It has no saga, activity, persistence, patching, or process dependencies. Runner configuration selects a backend but does not attach it or inject consumers yet.
+The package provides an async `TargetEnvironment` protocol, typed Pydantic requests/results, a POSIX `LocalEnvironment`, a backend factory, and shared bounded UTF-8 line reading. It has no saga, activity, persistence, or patching dependencies. The runner attaches the configured environment per root execution and injects it into activity contexts.
 
 ### Configuration and attachment
 
@@ -38,7 +38,7 @@ result = await environment.read_lines(
 )
 ```
 
-The local backend holds no persistent file handles and needs no close operation. Blocking filesystem work runs off the event loop. Cancelling an await does not stop an in-flight filesystem operation; a cancelled mutation can still take effect.
+Call `await environment.close()` when releasing an attachment that has launched processes. Filesystem operations hold no persistent handles. Blocking filesystem work runs off the event loop. Cancelling an await does not stop an in-flight filesystem operation; a cancelled mutation can still take effect.
 
 ### Filesystem contracts
 
@@ -64,7 +64,88 @@ Byte reads return at most the requested limit, using up to one extra byte intern
 
 Per-request read limits and line byte budgets cannot exceed `max_read_bytes`; writes and listings similarly enforce their configured caps. Binary content serializes as base64 in JSON. `EnvironmentError` distinguishes missing paths, denied access, outside-root paths, invalid paths, conflicts, unsupported operations, resource limits, invalid UTF-8, and other I/O failures. Its `may_have_occurred` flag conservatively marks OS failures during mutations, which can leave partial effects, particularly recursive removal or parent creation.
 
-Race-resistant containment is not implemented. Resolved-path checks are not a sandbox or protection against hostile concurrent path replacement. Process and patch capabilities are false. There is no automatic workflow binding, replay handling, rollback, or consumer integration in this foundation.
+Race-resistant containment is not implemented. Resolved-path checks are not a sandbox or protection against hostile concurrent path replacement. The local process capability is true; patching is unsupported. Runtime workflow injection is implemented; durable target binding, process replay, rollback, and agent-facing tools are not.
+
+## Implemented process management
+
+Every `exec` allocates a fresh opaque session ID and starts a separate process. It never writes a new command into an existing shell. The environment owns a `ProcessManager` whose registry, output collection, and lifecycle tasks survive cancellation of individual requests and model turns. This is in-memory ownership, not runner-crash recovery.
+
+Local execution is available whenever a local environment is attached; it needs no additional enable flag. Commands have the runner account's permissions and are not confined by the project working directory. Shell variants require `allow_shell = true`; this is API policy, not a security boundary against an argv command that explicitly invokes a shell.
+
+### Process configuration
+
+These optional tables extend the existing environment configuration:
+
+```toml
+[environment.processes]
+allow_shell = false
+max_sessions = 32
+max_output_bytes = 1048576
+max_response_bytes = 65536
+max_stdin_bytes = 65536
+retention_seconds = 300
+termination_grace_seconds = 1
+io_timeout_seconds = 5
+
+[environment.processes.environment]
+inherit_parent = true
+```
+
+The values shown are defaults. Limits and durations must be positive. `max_sessions` counts starting, running, and retained completed sessions. `io_timeout_seconds` bounds attachment, stdin I/O, backend control/cleanup, and post-exit output draining; it is not a command runtime limit.
+
+Environment-variable handling matches `codeng`'s `EnvPolicy`: inherit the parent environment at spawn time by default, restrict inherited names with optional `allowlist`, remove inherited names in optional `denylist`, apply configured `defaults`, then apply the request's `env` overrides. Filters apply only to inheritance; explicit defaults and overrides can reintroduce filtered names. The parent environment is never mutated. Inheritance can include credentials: use `inherit_parent = false` or an explicit allowlist when that is not intended. Future remote drivers choose their own target-side parent environment rather than inheriting runner-host variables automatically.
+
+### Requests and results
+
+Process models live in `environment.processes.models`.
+
+| Environment method | Request | Contract |
+| --- | --- | --- |
+| `exec` | `ExecRequest` | Fresh command and session; waits up to `yield_timeout_ms` (default 1000, maximum 30000) for completion |
+| `poll` | `PollRequest` | Session ID, byte cursor (default 0), optional wait up to 30000 ms; reads the shared output buffer |
+| `write_stdin` | `StdinRequest` | Session ID, byte data, optional EOF; writes are serialized and concurrent submissions rejected |
+| `kill` | `SessionRequest` | Graceful termination followed by forced termination; returns confirmation and attempted scope |
+| `list_processes` | None | Non-consuming session status for inspection and recovery of IDs after cancelled calls |
+| `close` | None | Idempotent process-manager shutdown; rejects new executions and returns termination reports |
+
+`ExecRequest.command` is an `ArgvCommand(kind="argv", argv=[...])` or `ShellCommand(kind="shell", script="...")`. Local shell commands run in a fresh `/bin/sh -c`. `cwd` defaults to `.` and uses the filesystem path checks. `env` defaults to no overrides. `stdin` defaults to empty bytes and `keep_stdin_open` defaults to false; set it true for later interaction. `execution_timeout_ms` is optional and measures runtime after attachment, independently of the yield deadline. `mode` defaults to `pipe`; `pty` fails explicitly with the initial local driver.
+
+```python
+from vectorops.runner.environment.processes import models as processes
+
+session = await environment.exec(
+    processes.ExecRequest(
+        command=processes.ArgvCommand(argv=["python3", "-u", "server.py"]),
+        keep_stdin_open=True,
+        yield_timeout_ms=100,
+    )
+)
+if session.retained:
+    update = await environment.poll(
+        processes.PollRequest(
+            process_id=session.process_id, cursor=session.cursor, wait_timeout_ms=100
+        )
+    )
+await environment.close()
+```
+
+Results contain state (`starting`, `running`, `exited`, `failed`, or `unknown`), tagged byte chunks, the next byte cursor, dropped-byte count, exit code when known, an optional error, timeout status, and retention/output-completion flags. A nonzero exit code is a normal exit. Unknown outcomes never invent an exit code. Spawn failures return a failed result; invalid policies, unknown IDs, and resource-limit violations raise `EnvironmentError`. Binary payloads serialize as base64.
+
+Output collectors run continuously, even without polling. Bounded buffers evict oldest bytes and report gaps relative to the supplied cursor while continuing to drain pipes. Each response is capped by `max_response_bytes`. Stream order is preserved individually; interleaving stdout and stderr reflects collection order, not a guaranteed target-time ordering. `output_complete` means collection has ended and this response reaches the buffer end; inspect `error` and `dropped_bytes` for incomplete capture.
+
+Fully collected quick exits are forgotten immediately. Otherwise the session is retained before returning, including completed commands with unread output. Final polling releases a completed session; uncollected completed sessions expire after `retention_seconds`. Listing does not consume output; use cursor 0 to recover its retained output. IDs belong to one attachment, not an OS PID. Cancelling exec, poll, stdin, kill, or close does not implicitly kill a process; submitted lifecycle/control tasks remain manager-owned. A cancelled stdin call can still send bytes.
+
+### Reusable drivers and termination guarantees
+
+`ProcessDriver.spawn` returns a runtime `ProcessHandle` supporting output iteration, stdin/EOF, waiting, termination, and transport cleanup. Drivers report PTY, EOF, and termination-scope capabilities. The shared manager owns IDs, buffering, cursors, retention, deadlines, and escalation. `build_environment` is a pure helper accepting a parent mapping; only the local driver reads `os.environ`.
+
+Drivers must clean up or report uncertainty when spawning is cancelled or fails after an effect. `EnvironmentError(may_have_occurred=True)` during spawn produces an unknown outcome. A confirmed `ExitResult` requires a return code. Driver `close` releases transport resources; it must not silently claim termination. Cancellation of manager shutdown continues cleanup in the background.
+
+`ExecRequest.kill_tree` defaults to true. The local driver starts a fresh POSIX process group; kill, runtime timeout, and environment shutdown signal that group with SIGTERM and escalate to SIGKILL. When the command exits, remaining group members are forcibly cleaned up before the session is released, including children that ignored SIGTERM or closed their output pipes. This also applies on normal command exit: background children do not outlive a tree-owned command. Set `kill_tree=false` to signal only the command and leave its descendants unmanaged.
+
+Confirmation concerns the managed command's exit, while `scope` describes the signal target; it is not proof that every descendant is gone. Detached descendants can escape group cleanup. This flag does not provide automatic termination after runner SIGKILL or a crash. Pipes retained by unmanaged descendants are drained for a bounded interval after the main command exits, then closed with an explicit capture error. Shutdown does not delete target files or destroy an environment.
+
+Docker and SSH drivers are not implemented. Docker exec IDs and SSH channels can supply backend handles without changing shared polling or retention. Neither channel closure nor a remote PID alone proves termination. Reattachment across connection loss, PTYs, process isolation, LLM tools, and saga integration are outside this implementation.
 
 ## Scope and decisions
 
@@ -113,7 +194,7 @@ Method names below describe the proposed surface, not a finalized signature spec
 | `write_file` | Byte content, explicit create/replace behavior, and declared atomic-replacement guarantees |
 | `mkdir`, `remove`, `rename` | Explicit parent-creation, recursive, and overwrite options; non-destructive defaults |
 | `apply_patch` | Format-tagged patch request and structured per-file results, conflicts, and errors |
-| `start_process` | Explicit command request; returns a handle for output, completion, and cancellation |
+| `exec`, `poll`, `write_stdin`, `kill` | Implemented managed process sessions; backend handles remain private |
 
 Capabilities distinguish backend support from permission. For example, a backend can support execution while the configured policy disables it. Unsupported guarantees must fail explicitly, never silently fall back to runner-local I/O.
 
@@ -189,19 +270,31 @@ Transferring affected files is the tradeoff for avoiding target-side dependencie
 
 Process requests specify argv, target-relative working directory, environment overrides, optional stdin, timeout, and output limits. Shell scripts are a separate, explicitly permitted command variant. Do not use runner-global `chdir` or mutable shared command state.
 
-Do not implicitly forward the runner's entire environment or credentials. Define the base process environment and permitted overrides explicitly.
+The local backend inherits the runner's environment by default, with configurable filtering and overrides as described above. Remote backends must define their own environment policy explicitly.
 
 A process handle supports bounded stdout/stderr streaming, waiting, and cancellation. Preserve ordering within each output stream, without promising a total order across streams. Continue draining or terminate according to limit policy after captured output reaches its bound; do not deadlock the child on a full pipe.
 
-Nonzero exit status is a process result, distinct from transport failure. Timeouts and cancellation attempt termination and report whether it was confirmed. A future remote disconnect can leave a process running and must produce an unknown outcome rather than a false success.
+Nonzero exit status is a process result, distinct from transport failure. Execution timeouts and explicit kill attempt termination; request cancellation leaves the process managed and running. A future remote disconnect can leave a process running and must produce an unknown outcome rather than a false success.
 
-Directory-scoped filesystem access is not process isolation. Local commands can access anything permitted to the runner's OS account unless an actual sandbox is configured. V1 host execution is explicitly enabled, not enabled by default. Future SSH commands have remote-account permissions; Docker commands have the container's permissions and mounts. Backend names alone do not imply adequate isolation.
+Directory-scoped filesystem access is not process isolation. Local commands can access anything permitted to the runner's OS account unless an actual sandbox is configured. Selecting a local environment enables host execution. Future SSH commands have remote-account permissions; Docker commands have the container's permissions and mounts. Backend names alone do not imply adequate isolation.
 
 Enforce policy at the environment boundary as well as tool approval. Bind approvals to the operation and target identity; approval does not strengthen isolation guarantees.
 
 ## Runner integration and recovery
 
-Add an optional environment dependency to `ActivityExecutionContext`. Runner composition resolves the configuration and injects the bound environment through executor/session construction. Keep target side effects inside recorded activities and preserve existing tool validation and approval composition.
+### Implemented runtime ownership
+
+`WorkflowRunner` creates an `ExecutionResources` scope for each root run, attaches the optional configured environment, and passes both through `WorkflowExecutor` and `ExecutionSession`. Activities receive `ctx.environment` and `ctx.resources`; neither is serialized into history or compared as part of activity identity. Without environment configuration, `ctx.environment` is `None`, but the cleanup registry is still available. Direct executor/session construction accepts optional externally owned dependencies and does not close them.
+
+Child workflows borrow the root's attachment and registry. Finishing a child or a tool call does not close the environment. Concurrent root executions have independent attachments and process managers, even when their target path is the same.
+
+On root completion, failure, cancellation, or suspension, the engine first stops and awaits activities and child workflows. It then awaits registered cleanup callbacks in reverse registration order. Environment cleanup is registered first, so other resources can still use it while closing. Repeated cancellation does not interrupt owned teardown. `runner.stop()` requests cancellation and returns immediately; awaiting the run task waits for cleanup.
+
+Other activity-owned resources can register an async, no-argument finalizer with `ctx.resources.register("resource name", cleanup)`. Registration is synchronous, is rejected once closing starts, and each callback is invoked once. Finalizers must implement their own bounded I/O/timeouts. Cleanup continues after callback failures; failures are logged as `execution.cleanup_failed`. On an otherwise successful run they raise an exception group; an existing workflow failure or cancellation remains the primary outcome. Environment termination reports with unconfirmed processes become cleanup failures rather than being silently ignored.
+
+This is runtime resource ownership, not an event subscription or saga compensation. Step notifications remain observational. Forced runner termination cannot execute finalizers. On resume a new attachment is created; a recorded process ID is not restored or automatically respawned.
+
+### Deferred durable binding and recovery
 
 Persist the selected target identity and relevant configuration/policy fingerprint with the execution before effects. Child workflows inherit the binding by default. Resume must not silently switch targets after a profile changes. Older executions remain valid without an environment binding.
 
@@ -218,11 +311,11 @@ The manager owns resource release, not implicit target destruction. Closing an a
 1. Add typed contracts, a fake backend, optional activity-context injection, and additive target-binding persistence.
 2. Implement local filesystem operations, bounded byte reads, and the shared line-reading layer.
 3. Implement the shared patch engine and environment patch operation for the confirmed formats.
-4. Add explicitly enabled local execution, bounded output, timeouts, cancellation, and recovery handling.
+4. Local execution, bounded output, timeouts, and request-independent lifecycle are implemented; workflow recovery handling remains deferred.
 
 Run shared contract tests against fake and local environments. Cover path traversal, resolved symlink paths outside the root, creation and rename destinations outside the root, byte-range boundaries, EOF, multibyte decoding, oversized lines/files, newline preservation, patch add/update/delete/move behavior, conflicts, partial runtime failures, and unsupported guarantees. Concurrent path-replacement races are outside the validation scope.
 
-Extend activity/tool tests for dependency injection, child binding inheritance, approvals, replay without repeated effects, unknown outcomes, and target mismatch on resume. Process tests cover argv handling, cwd, environment leakage, output bounds, cancellation, and execution-disabled mode.
+Extend activity/tool tests for dependency injection, child binding inheritance, approvals, replay without repeated effects, unknown outcomes, and target mismatch on resume. Process tests cover argv handling, cwd, environment inheritance/filtering, output bounds, cancellation, retention, termination, and unsupported capabilities.
 
 Docker/SSH transports, provisioning, remote helpers, PTYs, snapshots, and distributed filesystem transactions are outside v1. Before implementation, finalize supported local platforms, exact patch formats, and concrete resource-limit defaults; none are implied by this proposal.
 

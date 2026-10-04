@@ -4,6 +4,8 @@ import typing
 
 import pydantic
 
+from .processes import models as processes
+
 
 class Model(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(
@@ -93,3 +95,5 @@ class EnvironmentDescription(Model):
     process_execution_allowed: bool = False
     race_resistant_containment: bool = False
     process_isolation: bool = False
+    process_capabilities: typing.Optional[processes.DriverCapabilities] = None
+    process_policy: typing.Optional[processes.ProcessConfig] = None
