@@ -223,6 +223,52 @@ async def test_close_stops_sessions_and_rejects_exec(
         await environment.exec(m.ExecRequest(command=command("pass")))
 
 
+@pytest.mark.parametrize("operation", ["poll", "stdin", "eof", "kill"])
+async def test_process_operations_fail_after_environment_restart(
+    environment: LocalEnvironment, tmp_path: Path, operation: str
+) -> None:
+    result = await environment.exec(
+        m.ExecRequest(
+            command=command("import time; time.sleep(60)"),
+            keep_stdin_open=True,
+            yield_timeout_ms=0,
+        )
+    )
+    reports = await environment.close()
+    assert reports[0].termination_confirmed
+    restarted = await LocalEnvironment.open(
+        LocalEnvironmentConfig(base_project_path=str(tmp_path))
+    )
+    try:
+        with pytest.raises(EnvironmentError) as error:
+            if operation == "poll":
+                await restarted.poll(
+                    m.PollRequest(process_id=result.process_id, wait_timeout_ms=30000)
+                )
+            elif operation == "kill":
+                await restarted.kill(m.SessionRequest(process_id=result.process_id))
+            else:
+                await restarted.write_stdin(
+                    m.StdinRequest(
+                        process_id=result.process_id,
+                        data=b"input" if operation == "stdin" else b"",
+                        eof=operation == "eof",
+                    )
+                )
+        assert error.value.code == ErrorCode.MISSING
+        assert not error.value.may_have_occurred
+        assert result.process_id in str(error.value)
+        assert "Start a new process with exec" in str(error.value)
+        assert await restarted.list_processes() == []
+        replacement = await restarted.exec(
+            m.ExecRequest(command=command("print('restarted')"), yield_timeout_ms=5000)
+        )
+        assert replacement.process_id != result.process_id
+        assert output(replacement) == b"restarted\n"
+    finally:
+        await restarted.close()
+
+
 def test_environment_policy_matches_codeng_precedence() -> None:
     parent = {"PATH": "/parent", "KEEP": "parent", "SECRET": "secret", "OMIT": "omit"}
     policy = m.EnvPolicy(

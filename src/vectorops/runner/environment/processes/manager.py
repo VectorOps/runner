@@ -47,7 +47,11 @@ class ProcessManager:
             return self._sessions[identifier]
         except KeyError as exc:
             raise EnvironmentError(
-                ErrorCode.MISSING, "unknown or expired process ID"
+                ErrorCode.MISSING,
+                f"unknown or expired process ID {identifier!r}; "
+                "process sessions do not survive environment restarts. "
+                "This session cannot be continued. Start a new process with exec "
+                "and use its new process ID.",
             ) from exc
 
     async def exec(self, request: m.ExecRequest) -> m.ProcessResult:
