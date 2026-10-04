@@ -163,6 +163,60 @@ Responses contain `execution_id`, `items` (`position`, `step`), and nullable `ne
 
 Cursors freeze the insertion boundary of a selection, not mutable record values. New inserts do not shift pages; newer revisions may appear on subsequent reads. All filters except `limit` must remain unchanged when continuing. SQLite applies filtering and limits before records are decoded, so a last-100 query does not load all steps into Python. A response exceeding the frame limit fails with `frame_too_large`; reduce the page size. A single oversized step requires a future chunked-content extension.
 
+## Workflow-scoped tool approval
+
+Tool confirmations use the existing mailbox methods over either transport:
+
+| Method | Parameters | Result |
+| --- | --- | --- |
+| `mailbox.list` | `execution_id`, optional `workflow_id`, `channel`, `after`, `limit` | Pending `requests` and `next_after` |
+| `mailbox.get` | `execution_id`, `request_id` | Durable request |
+| `mailbox.respond` | `execution_id`, `request_id`, `response`, `idempotency_key` | Accepted request/answer receipt |
+
+Each request identifies its `execution_id`, `workflow_id`, and `request_id`.
+For new tool workflows, the request ID is the recorded tool step ID. The default
+channel is `tool.approval`; tools can select custom channels. Payload fields
+`instance`, `call`, `tool`, and `tool_version` describe the invocation. Filter
+`mailbox.list` by workflow ID to present confirmations separately per workflow.
+Use durable queries on reconnect; `mailbox.requested` and `mailbox.answered`
+notifications are advisory.
+
+Approve once with `response: {"approved": true}`. To approve the current call
+and future calls to the same exact tool name in the requesting workflow:
+
+```json
+{
+  "kind": "request",
+  "id": "approve-1",
+  "method": "mailbox.respond",
+  "params": {
+    "execution_id": "exec-1",
+    "request_id": "tool-step-1",
+    "response": {"approved": true, "scope": "workflow"},
+    "idempotency_key": "approve-tool-step-1"
+  }
+}
+```
+
+The response schema has strict `approved: bool`, optional `reason: str`, and
+`scope: "call" | "workflow"` defaulting to `call`. Workflow scope requires
+`approved: true`. Reject a single call with `{"approved": false, "reason": "..."}`.
+Malformed responses fail the tool without granting permission; mailbox acceptance
+is a delivery receipt, not proof that a tool response passed validation or executed.
+
+The runner derives the tool name and workflow from the stored request. A grant
+covers all arguments for that exact name, not children, siblings, or other
+executions. It never bypasses argument validation or mandatory policy checks.
+Already-pending confirmations still require individual answers. Grants and answers
+commit atomically, survive restart/resume, and persist for the workflow instance,
+including continuations. They are not branch-local and cannot yet be revoked.
+Idempotent retries return the same receipt; a conflicting answer cannot create a
+grant. Ordinary mailbox inputs and legacy binding-local approval do not create
+workflow grants. No extra policy activities enter saga history.
+
+See [Tool approval configuration](../config/components.md#tool-approval) for
+workspace defaults, extension points, and history compatibility.
+
 ## Related
 
 - [Provider authentication RPCs and global configuration](../config/authentication.md)

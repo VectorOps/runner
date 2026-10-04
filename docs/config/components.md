@@ -219,9 +219,28 @@ absence no longer determines authorization in new workflows.
 Hosts use `mailbox.list`, `mailbox.get`, and `mailbox.respond`, supplemented by
 `mailbox.requested` and `mailbox.answered` notifications. Request payloads retain
 `instance`, `call`, `tool`, and `tool_version`. The JSON response contains strict
-`approved: bool` and optional `reason: str`; unknown fields are rejected.
+`approved: bool`, optional `reason: str`, and optional `scope: "call" | "workflow"`;
+scope defaults to `call`, and unknown fields are rejected.
 Rejection and malformed answers become tool errors, just like implementation
 exceptions. Missing mailbox support and mailbox/storage failures propagate.
+
+To approve the current call and future calls of the same tool in this workflow,
+respond with `{"approved": true, "scope": "workflow"}`. Workflow scope requires
+approval; it cannot express a persistent rejection. The grant matches the exact
+tool name regardless of arguments, version, or schema, and applies only to the
+request's workflow instance within its execution. Children, siblings, and other
+root executions do not inherit it. Hosts identify the scope through the request's
+`execution_id` and `workflow_id`; they cannot redirect a grant by supplying a tool
+name or workflow ID in the response. `mailbox.list` supports workflow filtering.
+
+The winning answer and grant commit atomically in the execution database, so grants
+survive disconnects, crashes, and resume, even if the approved call subsequently
+fails. Grants also remain in force on continuations of the same workflow instance;
+they are not branch-local and have no revocation API yet. History cleanup removes
+them with the execution. This stores an explicit host permission, not a policy
+evaluation or activity. Mandatory checks still run before future granted calls.
+Existing pending confirmations must be answered individually and are not bulk-approved.
+Legacy binding-local workflows retain single-call behavior and do not create grants.
 
 The gate executes inside `llm.tool` version 3. There is no policy activity,
 configuration-read activity, or recorded policy decision. Completed tool outcomes,

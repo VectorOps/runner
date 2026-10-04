@@ -9,6 +9,42 @@ import typing
 import pydantic
 
 
+class ToolApprovalResponse(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+
+    approved: bool = pydantic.Field(strict=True)
+    reason: typing.Optional[str] = None
+    scope: typing.Literal["call", "workflow"] = "call"
+
+    @pydantic.model_validator(mode="after")
+    def validate_scope(self) -> typing.Self:
+        if self.scope == "workflow" and not self.approved:
+            raise ValueError("workflow scope requires approval")
+        return self
+
+
+def workflow_grant(
+    payload: pydantic.JsonValue, response: pydantic.JsonValue
+) -> typing.Optional[str]:
+    """Interpret a tool approval answer without trusting host-supplied identities."""
+    try:
+        decision = ToolApprovalResponse.model_validate(response)
+    except pydantic.ValidationError:
+        return None
+    if not decision.approved or decision.scope != "workflow":
+        return None
+    if not isinstance(payload, dict):
+        return None
+    call = payload.get("call")
+    tool = payload.get("tool")
+    if not isinstance(call, dict) or not isinstance(tool, dict):
+        return None
+    name = call.get("name")
+    if not isinstance(name, str) or not name or tool.get("name") != name:
+        return None
+    return name
+
+
 class ApprovalSettings(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 

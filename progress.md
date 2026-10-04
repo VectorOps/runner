@@ -4,6 +4,7 @@ Current implementation status and suggested next development horizon.
 
 ## Implemented
 
+- Tool approval responses accept optional `scope: "call" | "workflow"`, defaulting to a single call. Workflow approval atomically grants the exact tool name for the requesting workflow instance, without inheriting into children, siblings, or other executions. Grants survive restart/resume alongside mailbox answers, preserve mandatory checks and explicit pending confirmations, and add no policy activities. Coverage includes competing answers, malformed scopes, workflow filtering, isolation, outcome replay, and hard-crash recovery before tool-result commit. See [Workflow-scoped tool approval](docs/reference/control-protocol.md#workflow-scoped-tool-approval).
 - The Python 3.13 uv project preserves the old project's dependency requirements and package layout.
 - Pydantic models provide JSON-serializable workflow configuration and normalized step records.
 - Predecessor references represent branching histories without copying existing steps.

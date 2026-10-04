@@ -9,7 +9,7 @@ from pathlib import Path
 import sqlite3
 import typing
 
-from vectorops.runner import models
+from vectorops.runner import models, tool_policy
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
@@ -96,6 +96,12 @@ class SQLiteHistory:
                 CREATE TABLE IF NOT EXISTS input_requests (
                     request_id TEXT PRIMARY KEY REFERENCES steps(id),
                     payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tool_approval_grants (
+                    workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    tool_name TEXT NOT NULL,
+                    request_id TEXT NOT NULL REFERENCES input_requests(request_id),
+                    PRIMARY KEY (workflow_id, tool_name)
                 );
                 PRAGMA user_version = 1;
                 COMMIT;
@@ -424,6 +430,15 @@ class SQLiteHistory:
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
         return await self._run(lambda connection: self._input(connection, request_id))
 
+    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
+        return await self._run(
+            lambda connection: connection.execute(
+                "SELECT 1 FROM tool_approval_grants WHERE workflow_id = ? AND tool_name = ?",
+                (workflow_id, tool_name),
+            ).fetchone()
+            is not None
+        )
+
     async def list_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
         def read(connection: sqlite3.Connection) -> mailbox.RequestPage:
             with connection:
@@ -497,6 +512,17 @@ class SQLiteHistory:
                     "UPDATE input_requests SET payload = ? WHERE request_id = ?",
                     (request.model_dump_json(), request.request_id),
                 )
+                step = self._step(connection, request.request_id)
+                if step.operation.kind == "llm.tool":
+                    tool_name = tool_policy.workflow_grant(
+                        request.payload, answer.response
+                    )
+                    if tool_name is not None:
+                        connection.execute(
+                            "INSERT INTO tool_approval_grants VALUES (?, ?, ?) "
+                            "ON CONFLICT(workflow_id, tool_name) DO NOTHING",
+                            (step.workflow_id, tool_name, request.request_id),
+                        )
                 return request
 
         return await self._run(respond)

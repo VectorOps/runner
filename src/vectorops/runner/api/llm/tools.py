@@ -24,11 +24,7 @@ class ToolApproval(pydantic.BaseModel):
     )
 
 
-class ToolApprovalResponse(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
-
-    approved: bool = pydantic.Field(strict=True)
-    reason: typing.Optional[str] = None
+ToolApprovalResponse = tool_policy.ToolApprovalResponse
 
 
 class ToolResponse(pydantic.BaseModel):
@@ -128,7 +124,8 @@ async def invoke_tool(
     """Validate, optionally await host approval, and execute a recorded tool call.
 
     Approval uses a JSON mailbox response with a strict ``approved`` boolean and
-    optional ``reason``. Decisions apply to one call, not future invocations.
+    optional ``reason`` and ``scope``. Workflow scope grants future calls by name
+    within that workflow instance; the default scope approves only this call.
     The helper runs in workflow context; validation, the runtime policy gate,
     and implementation run in one activity for new workflows. Legacy histories
     retain binding-local approval. Tool exceptions return their unchanged text by default. Cancellation,
@@ -281,6 +278,15 @@ async def _gated_tool(
                 )
         except Exception as exc:
             error = exc
+
+        if (
+            error is None
+            and existing is None
+            and decision.action == "require_confirmation"
+            and ctx.mailbox is not None
+            and await ctx.mailbox.tool_approved(ctx.workflow_id, request.name)
+        ):
+            decision = tool_policy.Decision(action="allow")
 
         if error is None and decision.action == "require_confirmation":
             if ctx.mailbox is None:

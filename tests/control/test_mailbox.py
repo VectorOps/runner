@@ -42,6 +42,10 @@ async def tool(ctx):
         connect.ToolCallBlock(id="call", name="test", arguments={"value": 1}),
     )
     return result.model_dump(mode="json")
+
+async def tool_twice(ctx):
+    await tool(ctx)
+    return await tool(ctx)
 """
 
 
@@ -195,7 +199,7 @@ async def test_explicit_stop_closes_request(tmp_path: Path, callable_name: str) 
 
 
 @pytest.mark.parametrize("answered", [False, True])
-@pytest.mark.parametrize("callable_name", ["workflow", "tool"])
+@pytest.mark.parametrize("callable_name", ["workflow", "tool", "tool_twice"])
 async def test_process_crash_recovers_wait_and_undelivered_answer(
     tmp_path: Path, answered: bool, callable_name: str
 ) -> None:
@@ -233,7 +237,7 @@ async def main():
             SQLiteHistory.update_step = hold
             await service.runner.answer_input(mailbox.Answer(
                 execution_id=request.execution_id, request_id=request.request_id,
-                response={"approved": True} if sys.argv[3] == "tool" else "before crash", idempotency_key="answer"
+                response={"approved": True, "scope": "workflow"} if sys.argv[3].startswith("tool") else "before crash", idempotency_key="answer"
             ))
         print(request.model_dump_json(), flush=True)
         await asyncio.Event().wait()
@@ -264,8 +268,10 @@ asyncio.run(main())
         if not answered:
             assert (await pending(connection, request.execution_id))[0] == request
             answer = response(request)
-            if callable_name == "tool":
-                answer = answer.model_copy(update={"response": {"approved": True}})
+            if callable_name.startswith("tool"):
+                answer = answer.model_copy(
+                    update={"response": {"approved": True, "scope": "workflow"}}
+                )
             await connection.answer_input(answer)
         await completed(connection, request.execution_id)
         restored = await connection.input_request(
@@ -274,7 +280,7 @@ asyncio.run(main())
             )
         )
         assert restored.response == (
-            {"approved": True}
-            if callable_name == "tool"
+            {"approved": True, "scope": "workflow"}
+            if callable_name.startswith("tool")
             else "before crash" if answered else "hello"
         )

@@ -7,7 +7,7 @@ import pytest
 
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import models
+from vectorops.runner import models, tool_policy
 from vectorops.runner.api import composition, llm
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -40,6 +40,15 @@ class ApprovalStore:
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
         return self.requests[request_id]
+
+    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
+        return any(
+            request.workflow_id == workflow_id
+            and request.status == "answered"
+            and tool_policy.workflow_grant(request.payload, request.response)
+            == tool_name
+            for request in self.requests.values()
+        )
 
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
         request = self.requests[answer.request_id]
