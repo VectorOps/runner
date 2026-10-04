@@ -11,6 +11,7 @@ import typing
 import pydantic
 
 from vectorops.runner import diagnostics
+from vectorops.runner.environment.configuration import EnvironmentConfig
 
 
 class RetentionPolicy(pydantic.BaseModel):
@@ -35,6 +36,7 @@ class RunnerConfig(pydantic.BaseModel):
         default_factory=diagnostics.LogConfig
     )
     components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+    environment: typing.Optional[EnvironmentConfig] = None
 
     @pydantic.field_validator("workflows_directory", "data_directory", mode="after")
     @classmethod
