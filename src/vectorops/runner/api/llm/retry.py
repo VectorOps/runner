@@ -11,6 +11,7 @@ import pydantic
 
 from vectorops.runner import diagnostics
 from vectorops.runner.api.llm import deadlines, models, provider
+from vectorops.runner.api.llm import observability
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
 
@@ -57,6 +58,7 @@ async def stream(
     settings: models.Settings,
     request: connect.GenerateRequest,
     policy: models.RetryPolicy,
+    observation: Optional[observability.Observation] = None,
 ) -> AsyncGenerator[streaming.StreamItem, None]:
     """Discard failed attempts, retain one final response, and propagate cancellation.
 
@@ -66,6 +68,10 @@ async def stream(
     """
     for attempt in range(policy.max_retries + 1):
         final: Optional[streaming.ActivityFinal[pydantic.JsonValue]] = None
+        if observation is not None:
+            yield streaming.ActivityDelta(
+                {"content": []}, observation.snapshot({"content": []}, attempt + 1)
+            )
         try:
             async with aclosing(
                 deadlines.stream(
@@ -89,7 +95,14 @@ async def stream(
                             response.model_dump(mode="json")
                         )
                     elif isinstance(item, streaming.ActivityDelta):
-                        yield item
+                        yield streaming.ActivityDelta(
+                            item.value,
+                            (
+                                observation.snapshot(item.value, attempt + 1)
+                                if observation is not None
+                                else item.metrics
+                            ),
+                        )
                     else:
                         raise models.LLMResponseError("invalid LLM stream item")
             if final is None:
@@ -121,8 +134,22 @@ async def stream(
                 },
                 error=exc,
             )
-            yield streaming.ActivityDelta({"content": []})
+            yield streaming.ActivityDelta(
+                {"content": []},
+                (
+                    observation.snapshot({"content": []}, attempt + 1)
+                    if observation is not None
+                    else None
+                ),
+            )
             await asyncio.sleep(delay)
             continue
-        yield final
+        yield streaming.ActivityFinal(
+            final.value,
+            (
+                observation.snapshot(final.value, attempt + 1)
+                if observation is not None
+                else final.metrics
+            ),
+        )
         return

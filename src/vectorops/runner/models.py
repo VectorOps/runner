@@ -198,6 +198,7 @@ class WorkflowStep(_JsonModel):
     previous_step_id: typing.Optional[str] = pydantic.Field(default=None, min_length=1)
     operation: WorkflowOperation
     outcome: StepOutcome
+    metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
     deferred_delivery: bool = False
     revision: int = pydantic.Field(default=1, ge=1, strict=True)
 

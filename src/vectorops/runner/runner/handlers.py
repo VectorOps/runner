@@ -198,7 +198,14 @@ class StreamingActivityHandler:
                         step.model_copy(update={"outcome": outcome})
                     )
                     return context.ActivityResponse(outcome)
-                step = step.model_copy(update={"outcome": snapshot})
+                step = step.model_copy(
+                    update={
+                        "outcome": snapshot,
+                        "metrics": (
+                            item.metrics if item.metrics is not None else step.metrics
+                        ),
+                    }
+                )
                 await self.runtime.update(step)
         completed = models.StepCompleted(result=final_result)
         await self.runtime.update(step.model_copy(update={"outcome": completed}))

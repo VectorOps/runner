@@ -230,6 +230,72 @@ bounded retry budget with its recorded settings and existing identity. This is n
 an exactly-once provider guarantee. Storage failures are outside the retry boundary.
 Exhaustion propagates as the ordinary recorded `ActivityError`.
 
+## LLM observability
+
+Generation and compaction activities attach a versioned `metrics.llm` object to
+their existing step snapshots. Live `step.updated`, `step.completed`, and
+`step.failed` events carry the same metrics as persisted history. Inspect them
+through `RunnerClient.history()` (`history.query`) or the existing JSONL export:
+
+```bash
+vops-runner --project ./workspace export execution-id --output execution.jsonl
+jq -c 'select(.metrics.llm != null) | {id, kind: .operation.kind, metrics: .metrics.llm}' execution.jsonl
+```
+
+Metrics are separate from activity results and inputs. They contain numeric
+observations, fixed labels, and resolved catalog model/provider names, not prompts,
+tool arguments, transcripts, credential profiles, headers, URLs, or provider
+metadata. The original response remains the activity result; metrics do not add
+another transcript. Generic activity metrics are a trusted implementation surface;
+custom activity authors must not put secrets in them.
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Metric schema version, currently 1 |
+| `catalog_model`, `catalog_provider` | Connect catalog identity; null for unknown or ambiguous models |
+| `token_estimation` | `json_characters_div_4`: rounded-up compact JSON character count divided by four, not a tokenizer |
+| `input_tokens_estimate` | Request estimate including message content, system prompt, tool schemas, and structural overhead |
+| `output_tokens_estimate` | Current attempt's text, reasoning text, and tool-call content estimate |
+| `context_window`, `model_max_output_tokens` | Limits from the resolved Connect model catalog, or null |
+| `output_budget` | Minimum of configured output limit and catalog output limit when available; null if neither is known |
+| `input_budget` | Context window minus output budget, clamped to zero; null if either limit is unknown |
+| `context_remaining_estimate` | Context window minus estimated input, clamped to zero |
+| `context_overflow_estimate` | Estimated input plus output reservation exceeding the context window, clamped to zero |
+| `remaining_output_headroom_estimate` | Tightest known output/context capacity minus current output, clamped to zero; uses provider output tokens when usage is available |
+| `provider_usage` | Allowlisted provider token counters and their `partial`/`final` completeness, or null when unavailable; never filled with local estimates |
+| `cost_estimate_usd` | Decimal string using Connect catalog prices and accounting, or null when the model/pricing or a used token category's rate is unknown |
+| `cost_basis` | `provider_usage` or `token_estimate`; null when no cost estimate is available |
+| `attempt`, `retries` | One-based current attempt and preceding retries in this invocation |
+| `compaction` | Successful summary's before/after input token estimates and signed `saved_tokens_estimate`; null on ordinary generation or unusable summaries |
+
+Cost is always an estimate, even when calculated from final provider-reported
+usage. It is not a provider invoice or a total billed execution cost. Partial
+usage stays partial; usage with completeness `none` is unavailable. Missing usage
+falls back to local input/output estimates when possible. Pricing uses Connect's
+normalized input/output/cache categories; reasoning counters are not charged again
+on top of output tokens. Subscription plans, custom routing/pricing, and provider
+charges for earlier failed attempts are not accounted for. The requested catalog
+model supplies pricing; custom providers must use a matching catalog identity for
+meaningful estimates.
+
+Estimates do not enforce context limits, change output settings, or trigger
+compaction. Provider framing, tokenization, and hidden reasoning can differ from
+the heuristic. Images make input/output estimates for that content unknown rather
+than treating base64 length as token usage. Headroom based only on an output cap is
+an upper bound when context capacity is unknown. Null means unavailable, not zero.
+Compaction savings compare the full continuation request before and after summary
+replacement, including unchanged system/tools/recent messages. Negative savings
+expose summaries that increased context; no automatic corrective compaction is added.
+
+Each retry clears attempt-local usage, cost, and output estimates while retaining
+the activity identity. The latest metrics remain attached on failure or
+cancellation, even if no provider output arrived. Attempts count entries into the
+provider attempt lifecycle, including authentication waits, not confirmed billable
+requests. Unfinished recovery starts again at attempt 1 with its fresh bounded
+retry budget. Terminal replay preserves stored metrics without consulting today's
+catalog or recomputing prices. Old steps without metrics remain valid and are not
+backfilled. Events are advisory; reconnecting hosts should query durable history.
+
 ## Tool approval
 
 New workflows require host confirmation for tools unless their stable names are

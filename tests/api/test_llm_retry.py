@@ -336,14 +336,17 @@ async def test_compaction_retries_inside_its_activity(history: MemoryHistory) ->
     assert len(backend.identities) == 3
 
 
+@pytest.mark.parametrize("after_provider", [False, True])
 async def test_storage_failure_is_not_retried(
-    history: MemoryHistory, monkeypatch: pytest.MonkeyPatch
+    history: MemoryHistory, monkeypatch: pytest.MonkeyPatch, after_provider: bool
 ) -> None:
     backend = FlakyProvider([TimeoutError("provider")])
     original = history.update_step
 
     async def update(step: models.WorkflowStep) -> None:
-        if step.operation.kind == "llm.generate":
+        if step.operation.kind == "llm.generate" and (
+            not after_provider or backend.identities
+        ):
             raise ConnectionError("storage unavailable")
         await original(step)
 
@@ -362,7 +365,7 @@ async def test_storage_failure_is_not_retried(
 
     with pytest.raises(ConnectionError, match="storage unavailable"):
         await replay.run(history, workflow)
-    assert len(backend.identities) == 1
+    assert len(backend.identities) == int(after_provider)
 
 
 @pytest.mark.parametrize(

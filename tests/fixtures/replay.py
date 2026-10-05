@@ -8,6 +8,7 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models, tool_policy
 from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.events import StepEventSink
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.project import RunnerConfig, RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
@@ -22,6 +23,7 @@ async def run(
     workspace: Optional[Path] = None,
     tool_policy_version: Optional[Literal[1]] = None,
     policy: Optional[tool_policy.ToolPolicy] = None,
+    event_sink: Optional[StepEventSink] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -44,6 +46,7 @@ async def run(
         continue_from_step_id=head,
         child_heads={},
         mailbox=mailbox,
+        event_sink=event_sink,
     )
     context = WorkflowExecutionContext(
         RunnerProject(

@@ -14,6 +14,7 @@ import pydantic
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm import models, provider, tools as tool_api
 from vectorops.runner.api.llm import retry as retry_api
+from vectorops.runner.api.llm import observability
 from vectorops.runner.api.llm.configuration import (
     explicit_options,
     resolve_configuration,
@@ -154,18 +155,63 @@ class LLM:
         }
 
     async def _invoke(
-        self, call: c.ActivityCall, request: connect.GenerateRequest
+        self,
+        call: c.ActivityCall,
+        request: connect.GenerateRequest,
+        *,
+        compaction_request: Optional[connect.GenerateRequest] = None,
+        cut: int = 0,
     ) -> connect.AssistantMessage:
         async def invoke(
             ctx: ActivityExecutionContext,
         ) -> AsyncGenerator[StreamItem, None]:
             assert self._settings is not None
+            observation = observability.Observation(self._settings, request)
             async with aclosing(
                 retry_api.stream(
-                    self._backend, ctx, self._settings, request, self._retry
+                    self._backend,
+                    ctx,
+                    self._settings,
+                    request,
+                    self._retry,
+                    observation,
                 )
             ) as stream:
                 async for item in stream:
+                    if (
+                        isinstance(item, c.ActivityFinal)
+                        and compaction_request is not None
+                    ):
+                        response = connect.AssistantMessage.model_validate(item.value)
+                        text = "".join(
+                            block.text
+                            for block in response.content
+                            if block.type == "text"
+                        )
+                        if text.strip() and not any(
+                            block.type == "tool_call" for block in response.content
+                        ):
+                            after = compaction_request.model_copy(
+                                update={
+                                    "messages": [
+                                        connect.UserMessage(
+                                            content="Summary of earlier conversation:\n"
+                                            + text
+                                        ),
+                                        *compaction_request.messages[cut:],
+                                    ]
+                                }
+                            )
+                            assert item.metrics is not None
+                            metric = observability.Metrics.model_validate(
+                                item.metrics["llm"]
+                            )
+                            metric.compaction = observability.compaction_savings(
+                                compaction_request, after
+                            )
+                            item = c.ActivityFinal(
+                                item.value, {"llm": metric.model_dump(mode="json")}
+                            )
                     yield item
 
         result = await call.stream(input=self._input(request), invoke=invoke)
@@ -188,7 +234,7 @@ class LLM:
     ) -> connect.AssistantMessage:
         with self._mutation():
             await self._configure()
-            await self._maybe_compact()
+            await self._maybe_compact(tools)
             return await self._generate(tools)
 
     async def run(
@@ -219,7 +265,7 @@ class LLM:
             for index in range(limit):
                 if index:
                     await self._configure()
-                await self._maybe_compact()
+                await self._maybe_compact(definitions)
                 response = await self._generate(definitions)
                 calls = [
                     block for block in response.content if block.type == "tool_call"
@@ -248,7 +294,7 @@ class LLM:
                 )
         raise models.RoundLimitError(f"LLM exceeded max_rounds={limit}")
 
-    async def _maybe_compact(self) -> None:
+    async def _maybe_compact(self, definitions: Sequence[connect.ToolSpec]) -> None:
         """Compact an old prefix without splitting assistant/tool exchanges."""
         policy = self._compaction
         if policy is None:
@@ -271,10 +317,16 @@ class LLM:
             if not pending and index <= limit:
                 boundaries.append(index)
         if boundaries:
-            await self._compact(max(boundaries), policy.instruction)
+            await self._compact(max(boundaries), policy.instruction, definitions)
 
     @c.activity_wrapper(kind="llm.compact", version=1)
-    async def _compact(self, call: c.ActivityCall, cut: int, instruction: str) -> None:
+    async def _compact(
+        self,
+        call: c.ActivityCall,
+        cut: int,
+        instruction: str,
+        definitions: Sequence[connect.ToolSpec],
+    ) -> None:
         assert self._settings is not None
         prefix: list[pydantic.JsonValue] = [
             message.model_dump(mode="json") for message in self._messages[:cut]
@@ -286,7 +338,9 @@ class LLM:
             max_output_tokens=self._settings.max_output_tokens,
             reasoning=self._settings.reasoning,
         )
-        response = await self._invoke(call, request)
+        response = await self._invoke(
+            call, request, compaction_request=self._request(definitions), cut=cut
+        )
         text = "".join(block.text for block in response.content if block.type == "text")
         if not text.strip() or any(
             block.type == "tool_call" for block in response.content

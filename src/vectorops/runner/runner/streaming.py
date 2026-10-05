@@ -14,12 +14,14 @@ class ActivityDelta:
 
     kind: typing.ClassVar[typing.Literal["delta"]] = "delta"
     value: pydantic.JsonValue
+    metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
 
 
 @dataclass(frozen=True)
 class ActivityFinal(typing.Generic[T]):
     kind: typing.ClassVar[typing.Literal["final"]] = "final"
     value: T
+    metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
 
 
 StreamItem: typing.TypeAlias = typing.Union[
