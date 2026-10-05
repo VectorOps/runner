@@ -71,13 +71,50 @@ import caching. Imports execute trusted Python code, not sandboxed metadata pars
 Already selected callables remain stable while running; subsequent resolutions see
 updates. Arbitrary source changes are not made replay-safe by caching.
 
-## Subworkflow tools
+## LLM tools
+
+Import `llm` for conversations and `tools` for tool factories and contracts:
 
 ```python
-from vectorops.runner.api import llm
+from vectorops.runner.api import llm, tools
+```
+
+The `tools` module re-exports the existing implementations; importing it does not
+create environments, register tools, or grant permissions. Pass selected bindings
+explicitly to `LLM.run(tools=[...])`. Existing imports through `api.llm` and the
+individual implementation modules remain supported.
+
+| Entry point | Purpose |
+| --- | --- |
+| `tools.apply_patch_tool(service, format="v4a", approval=None)` | Synchronous factory for patch application; accepts `v4a` or `patch` (SEARCH/REPLACE). |
+| `await tools.subworkflow_tool(references, name="subworkflow", approval=None)` | Async factory exposing an explicit set of child workflows. |
+| `tools.Tool` | Construct a custom tool from a Pydantic argument model and async callback. |
+| `tools.ToolBinding`, `tools.WorkflowToolBinding` | Contracts for activity-backed and workflow-composed tools. |
+| `tools.ToolResponse`, `tools.ToolExecutionError` | Return tool results or report execution errors. |
+| `tools.ToolApproval`, `tools.ToolApprovalResponse` | Approval configuration and response schema. |
+| `tools.invoke_tool` | Invoke a binding through the existing recorded approval/execution machinery. |
+
+Patch tools require a `PatchService` from `vectorops.runner.patch`, constructed
+with an existing target environment. The facade does not own its lifecycle; see
+[target environments](target-environments.md). Given an existing service and
+conversation, select the patch binding explicitly:
+
+```python
+from vectorops.runner.api import llm, tools
+from vectorops.runner.patch import PatchService
+
+
+async def edit(conversation: llm.LLM, service: PatchService):
+    return await conversation.run(tools=[tools.apply_patch_tool(service)])
+```
+
+### Subworkflow tools
+
+```python
+from vectorops.runner.api import llm, tools
 
 async def agent(ctx, prompt: str):
-    tool = await llm.subworkflow_tool(["research:main", "reports:summary"])
+    tool = await tools.subworkflow_tool(["research:main", "reports:summary"])
     conversation = llm.LLM("agent")
     conversation.add_user_message(prompt)
     answer = await conversation.run(tools=[tool])
@@ -101,7 +138,7 @@ Subworkflow calls use a recorded policy/approval gate followed by durable
 inside a tool activity. Results are JSON text; child failures are tool errors.
 Cancellation, storage failures, and replay mismatches propagate. A completed
 replay reuses both the approval gate and child result without running them again.
-Custom workflow-side tools can implement `llm.WorkflowToolBinding`; their
+Custom workflow-side tools can implement `tools.WorkflowToolBinding`; their
 `execute_workflow` method must keep nondeterministic work inside activities.
 
 ## Workflow contracts
