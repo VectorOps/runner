@@ -11,11 +11,13 @@ import pydantic
 
 from vectorops.runner import diagnostics
 from vectorops.runner import global_config
+from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.authentication import models as am
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import execution_state, history_query, mailbox
+from vectorops.runner.runner import inspection
 
 
 class RunnerClient:
@@ -170,6 +172,35 @@ class RunnerClient:
             await self.request(
                 "executions.list", (params or p.ExecutionList()).model_dump(mode="json")
             )
+        )
+
+    async def workflows(
+        self, params: typing.Optional[p.ExecutionList] = None
+    ) -> p.WorkflowPage:
+        return p.WorkflowPage.model_validate(
+            await self.request(
+                "workflows.list", (params or p.ExecutionList()).model_dump(mode="json")
+            )
+        )
+
+    async def describe_workflow(self, reference: str) -> WorkflowDescriptor:
+        return WorkflowDescriptor.model_validate(
+            await self.request("workflows.describe", {"reference": reference})
+        )
+
+    async def execution_summaries(
+        self, params: typing.Optional[p.SummaryQuery] = None
+    ) -> p.SummaryPage:
+        return p.SummaryPage.model_validate(
+            await self.request(
+                "executions.summaries",
+                (params or p.SummaryQuery()).model_dump(mode="json"),
+            )
+        )
+
+    async def execution_summary(self, execution_id: str) -> inspection.ExecutionSummary:
+        return inspection.ExecutionSummary.model_validate(
+            await self.request("executions.summary", {"execution_id": execution_id})
         )
 
     async def active(

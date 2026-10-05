@@ -84,6 +84,10 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | --- | --- | --- |
 | `runner.info` | None | Identity, workspace, protocol version, limits |
 | `runner.shutdown` | `mode`: `cancel` (default) or `drain` | Shutdown accepted |
+| `workflows.list` | `after`, `limit` (default 100, maximum 500) | Decorated workspace descriptors, active execution/input/auth counts, discovery errors, and `next_after` |
+| `workflows.describe` | `reference` | Workflow descriptor including input schema |
+| `executions.summaries` | `after`, `limit`, `active_only` (default false) | Execution summaries and `next_after` |
+| `executions.summary` | `execution_id` | Root reference, lifecycle status, pending-input count, active flag, authentication wait |
 | `executions.current` | Optional `execution_id` | Selected active execution/status, or null; without an ID, conflicts when multiple executions are active |
 | `executions.active` | `after`, `limit` (default 100, maximum 500) | Lexically ordered `executions` with ID/status and `next_after` |
 | `executions.list` | `after`, `limit` (default 100, maximum 500) | Lexically ordered execution IDs and `next_after` |
@@ -98,6 +102,31 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `logs.download` | `file`, `offset`, `limit`, optional `end` | Base64 bytes, `next_offset`, `end`, `eof` |
 
 There is no static workflow catalog. `reference` is an explicit `path:callable` relative to the configured workflows directory, without `.py`, or `python:package.module:callable` for an importable library workflow. Paths must remain inside the workflows directory after symlink resolution. The callable must be an async workflow entry point. Resolution failures reject the request before acceptance; execution failures are reported through lifecycle events. The former `file` and `callable` fields are rejected. Discovery imports trusted Python code and is not a sandbox.
+
+`workflows.list` dynamically scans Python files under the configured workflows
+directory and returns only locally defined `@workflow` bindings. Hidden paths and
+`__pycache__` are skipped; symlink directories are not traversed. Unchanged files use
+the existing resolver cache. Per-source failures appear in `errors` with `source`
+and `error`; other files remain discoverable. `after` is the last canonical reference,
+and definitions are sorted by reference. Errors are returned on each page.
+`workflows.describe` also accepts explicit undecorated and library references.
+
+Each catalog entry contains `descriptor`, `active_executions`, `pending_inputs`,
+and `awaiting_authentication` (number of active executions awaiting authentication).
+Counts aggregate active root executions matching that definition; pending inputs
+include all children of those roots. An unavailable definition does not hide its
+running executions from `executions.summaries`.
+
+Execution summaries contain `execution_id`, nullable `reference` and
+`root_workflow_id`, `status`, `active`, `pending_inputs`, and
+`awaiting_authentication` (boolean). Startup entries can lack root identity before
+history is initialized. `status` includes live `starting`/`stopping` states as well
+as persisted lifecycle states. `active` identifies current service ownership;
+persisted `running` alone is not proof of active execution. The input count is
+queried across root and child mailbox records without decoding step histories.
+Authentication is not a mailbox request. Pagination is lexical by execution ID
+and views can change between requests. Existing `executions.list` and
+`executions.get` response shapes remain unchanged.
 
 Start and resume receipts are persisted before launch. Repeating the same idempotency key and arguments returns the original acceptance, even after restart; different arguments produce `idempotency_conflict`. Acceptance is not proof of successful execution. A crash between receipt persistence and launch can leave an accepted ID without execution history; retries do not automatically execute it. Retention can also remove history without removing its receipt. Use a new key only for an intentional new attempt.
 

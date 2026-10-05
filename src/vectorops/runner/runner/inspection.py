@@ -20,6 +20,18 @@ class ExecutionStatus(pydantic.BaseModel):
     stats: ExecutionStats
 
 
+class ExecutionSummary(pydantic.BaseModel):
+    execution_id: str
+    reference: typing.Optional[str] = None
+    root_workflow_id: typing.Optional[str] = None
+    status: typing.Literal[
+        "starting", "running", "stopping", "completed", "failed", "cancelled"
+    ]
+    pending_inputs: int = 0
+    awaiting_authentication: bool = False
+    active: bool = False
+
+
 class ExportHeader(pydantic.BaseModel):
     kind: typing.Literal["execution.header"] = "execution.header"
     version: typing.Literal[1] = 1

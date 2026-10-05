@@ -16,6 +16,7 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
+from vectorops.runner.runner import inspection
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.resources import finish_cleanup
 from vectorops.runner.runner.state_store import RunnerStateStore
@@ -39,6 +40,7 @@ class RunnerService:
         self._runner: typing.Optional[WorkflowRunner] = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._active: dict[str, p.Active] = {}
+        self._references: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._listeners: set[EventSink] = set()
         self._suspending: set[str] = set()
@@ -171,6 +173,8 @@ class RunnerService:
         reference: typing.Optional[str],
     ) -> None:
         identifier = accepted.execution_id
+        if reference is not None:
+            self._references[identifier] = reference
         self._active[identifier] = p.Active(execution_id=identifier)
         self._tasks[identifier] = asyncio.create_task(
             self._execute(accepted, start, reference)
@@ -223,6 +227,7 @@ class RunnerService:
             assert self._store is not None
             self._store.scheduled.discard(accepted.execution_id)
             self._active.pop(accepted.execution_id, None)
+            self._references.pop(accepted.execution_id, None)
             self._tasks.pop(accepted.execution_id, None)
             self._suspending.discard(accepted.execution_id)
             self._emit(
@@ -272,6 +277,58 @@ class RunnerService:
                 raise
             self._schedule(accepted, start, reference)
             return accepted
+
+    async def _summary(self, identifier: str) -> inspection.ExecutionSummary:
+        active = self._active.get(identifier)
+        if active is not None and active.status == "starting":
+            return inspection.ExecutionSummary(
+                execution_id=identifier,
+                reference=self._references.get(identifier),
+                status="starting",
+                active=True,
+                awaiting_authentication=self.authentication.waiting_for(identifier),
+            )
+        try:
+            summary = await self.runner.execution_summary(identifier)
+        except (FileNotFoundError, KeyError):
+            if active is None:
+                raise
+            summary = inspection.ExecutionSummary(
+                execution_id=identifier,
+                reference=self._references.get(identifier),
+                status=active.status,
+            )
+        active = self._active.get(identifier)
+        return summary.model_copy(
+            update={
+                "active": active is not None,
+                "status": active.status if active is not None else summary.status,
+                "awaiting_authentication": self.authentication.waiting_for(identifier),
+            }
+        )
+
+    async def _summaries(self, query: p.SummaryQuery) -> p.SummaryPage:
+        identifiers = set(self._active)
+        if not query.active_only:
+            identifiers.update(
+                await self.runner.execution_ids(
+                    after=query.after, limit=query.limit + 1
+                )
+            )
+        selected = sorted(
+            identifier
+            for identifier in identifiers
+            if query.after is None or identifier > query.after
+        )
+        return p.SummaryPage(
+            executions=[
+                await self._summary(identifier)
+                for identifier in selected[: query.limit]
+            ],
+            next_after=(
+                selected[query.limit - 1] if len(selected) > query.limit else None
+            ),
+        )
 
     async def dispatch(
         self,
@@ -324,6 +381,57 @@ class RunnerService:
                 ) from None
             except am.AuthenticationError as exc:
                 raise p.RemoteError("authentication_error", str(exc)) from None
+        if method == "workflows.describe":
+            description_query = p.DescribeWorkflow.model_validate(params)
+            return p.json_value(
+                await (await self.runner.project()).resolver.describe(
+                    description_query.reference
+                )
+            )
+        if method == "workflows.list":
+            listing = p.ExecutionList.model_validate(params)
+            discovered = await (await self.runner.project()).resolver.discover(
+                after=listing.after, limit=listing.limit
+            )
+            active_summaries = [
+                await self._summary(identifier) for identifier in tuple(self._active)
+            ]
+            return p.json_value(
+                p.WorkflowPage(
+                    workflows=[
+                        p.WorkflowListing(
+                            descriptor=descriptor,
+                            active_executions=sum(
+                                item.active and item.reference == descriptor.reference
+                                for item in active_summaries
+                            ),
+                            pending_inputs=sum(
+                                item.pending_inputs
+                                for item in active_summaries
+                                if item.active
+                                and item.reference == descriptor.reference
+                            ),
+                            awaiting_authentication=sum(
+                                item.awaiting_authentication
+                                for item in active_summaries
+                                if item.active
+                                and item.reference == descriptor.reference
+                            ),
+                        )
+                        for descriptor in discovered.workflows
+                    ],
+                    errors=discovered.errors,
+                    next_after=discovered.next_after,
+                )
+            )
+        if method == "executions.summaries":
+            return p.json_value(
+                await self._summaries(p.SummaryQuery.model_validate(params))
+            )
+        if method == "executions.summary":
+            return p.json_value(
+                await self._summary(p.Execution.model_validate(params).execution_id)
+            )
         if method == "logs.list":
             p.Empty.model_validate(params)
             return p.json_value(await self.logs.listing())

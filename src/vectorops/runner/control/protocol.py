@@ -5,6 +5,8 @@ import typing
 import pydantic
 
 from vectorops.runner.references import WorkflowReference
+from vectorops.runner.api.definitions import WorkflowDescriptor
+from vectorops.runner.runner import catalog, inspection
 
 VERSION: typing.Final = 2
 MAX_FRAME: typing.Final = 8 * 1024 * 1024
@@ -120,6 +122,32 @@ class Current(Model):
 class ExecutionList(Model):
     after: typing.Optional[str] = None
     limit: int = pydantic.Field(default=100, ge=1, le=500, strict=True)
+
+
+class DescribeWorkflow(Model):
+    reference: str = pydantic.Field(min_length=1, max_length=4096)
+
+
+class WorkflowListing(Model):
+    descriptor: WorkflowDescriptor
+    active_executions: int = 0
+    pending_inputs: int = 0
+    awaiting_authentication: int = 0
+
+
+class WorkflowPage(Model):
+    workflows: list[WorkflowListing]
+    errors: list[catalog.DiscoveryError] = pydantic.Field(default_factory=list)
+    next_after: typing.Optional[str] = None
+
+
+class SummaryQuery(ExecutionList):
+    active_only: bool = False
+
+
+class SummaryPage(Model):
+    executions: list[inspection.ExecutionSummary]
+    next_after: typing.Optional[str] = None
 
 
 class Subscribe(Model):

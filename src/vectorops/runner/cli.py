@@ -14,6 +14,7 @@ from vectorops.runner import global_config
 from vectorops.runner.authentication import models as am
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.control import daemon, provisioning
+from vectorops.runner.control import cli as client_cli
 
 
 class Arguments(argparse.Namespace):
@@ -88,6 +89,10 @@ def parser() -> argparse.ArgumentParser:
                 type=Path,
                 help="new JSONL file; existing files are not overwritten",
             )
+    client_parser = commands.add_parser(
+        "client", help="run commands against an existing runner"
+    )
+    client_cli.configure(client_parser)
     daemon_parser = commands.add_parser(
         "daemon", help="control a workspace runner daemon"
     )
@@ -133,6 +138,9 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def dispatch(args: Arguments) -> None:
+    if args.command == "client":
+        await client_cli.dispatch(client_cli.Options(**vars(args)), args.config_dir)
+        return
     configuration = global_config.GlobalConfiguration(args.config_dir)
     if args.command == "credentials-import":
         data = await asyncio.to_thread(sys.stdin.buffer.read, 262145)

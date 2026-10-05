@@ -34,6 +34,106 @@ uv run vops-runner --project /path/to/workspace resume example-run
 
 This foreground CLI owns the workspace writer lock. For concurrent independent executions in one workspace, run a [daemon](daemon.md) and use its [execution-oriented control API](../reference/control-protocol.md#concurrent-execution-lifecycle) instead of launching competing foreground writers.
 
+## Connect to an existing runner
+
+Start a daemon in one terminal, then use its reported port from another:
+
+```bash
+uv run vops-runner --project /path/to/workspace daemon serve --port 8765
+uv run vops-runner client --port 8765 workflow list
+uv run vops-runner client --port 8765 workflow show mass_validator:main
+uv run vops-runner client --port 8765 execution start mass_validator:main --input-file args.json
+uv run vops-runner client --port 8765 execution list --active
+```
+
+Client commands never acquire the workspace writer lock or start an embedded
+runner. They reuse the existing authenticated control client. `--project` does not
+select the remote workspace; the connected daemon owns it. Use `client info` to
+verify the workspace and instance. Place connection options before the command:
+`--host` defaults to `127.0.0.1`, `--port` is required, and `--token-file` or
+`--token-stdin` can replace the configured token. `--config-dir` remains a global
+option. Remote runners require an SSH-forwarded loopback port, not direct
+unencrypted network access.
+
+| Command after `client --port PORT` | Behavior |
+| --- | --- |
+| `info` | Show runner identity and workspace |
+| `workflow list` | Discover decorated definitions with active execution, pending-input, and authentication-wait counts |
+| `workflow show REFERENCE` | Show descriptor and input schema; explicit undecorated/library references are supported |
+| `execution start REFERENCE --input JSON` | Start a background execution; `--input-file FILE` is an alternative |
+| `execution list [--active]` | Show root reference, lifecycle status, live ownership, and pending waits |
+| `execution show EXECUTION_ID` | Show one execution summary |
+| `execution resume EXECUTION_ID` | Resume persisted configuration and history |
+| `execution stop EXECUTION_ID` | Request cancellation, including children |
+| `execution watch EXECUTION_ID` | Print current summary and live JSONL events until terminal notification or Ctrl-C |
+| `input list EXECUTION_ID` | List pending requests, including child workflows; filter with `--workflow-id` or `--channel` |
+| `input show EXECUTION_ID REQUEST_ID` | Show full request payload and expected response type |
+| `input send EXECUTION_ID REQUEST_ID ...` | Answer an existing pending request |
+| `shell` | Run repeated commands on one connection |
+
+Lists accept `--limit` (default 100, maximum 500) and `--after`; output identifies
+the next cursor when more results exist. Add `--json` before the command family
+or after a leaf command for machine-readable output. Ordinary output is compact;
+`show` provides full details. `workflow list` imports trusted workspace Python and
+reports per-file or per-callable discovery errors without hiding valid definitions.
+It rescans filenames and reuses unchanged source modules. Imported workflow aliases
+and undecorated helpers are not enumerated. Definitions and executions are distinct:
+starting the same reference twice creates two independent executions.
+
+Pending counts include child mailbox requests and tool confirmations. They do not
+replace lifecycle status: an execution with a waiting child can also be doing work.
+Authentication waits are reported separately. Catalog counts aggregate active
+executions by their root reference, not child-definition reference. Summaries are
+live views, not a globally atomic snapshot across all execution databases.
+
+### Send input
+
+```bash
+uv run vops-runner client --port 8765 input list EXECUTION_ID
+uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --text-file ghidra.txt
+uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value '{"approved":true}'
+```
+
+Choose exactly one of `--text`, `--text-file`, `--value` (JSON), or `--json-file`.
+Files are local to the client, read as UTF-8, and bounded by the control frame size;
+JSON escaping and packet overhead can further reduce the effective payload limit.
+Text files preserve newlines. JSON responses may be objects, arrays, or scalars.
+The request's declared response type is checked before sending. Input is an answer
+to a specific pending request, not an unsolicited message queue. Acceptance confirms
+delivery, not successful workflow completion.
+
+Start, resume, and input send accept `--idempotency-key`. A generated key is printed
+to stderr before mutation. If a request times out or disconnects, its outcome may
+be unknown: retry with that same key and arguments, not a newly generated key.
+The client never automatically resends mutations.
+
+### Connected shell
+
+```bash
+uv run vops-runner client --port 8765 shell
+```
+
+```text
+/workflow list
+/execution start mass_validator:main --input-file args.json
+/execution list
+/input list EXECUTION_ID
+/input send EXECUTION_ID REQUEST_ID --text "Continue"
+/execution watch EXECUTION_ID
+/help
+/exit
+```
+
+Shell commands share the one-shot parser and support shell-like quoting; the leading
+slash is optional. A bare family such as `/input` shows its help, and leaf commands
+accept `--help`. Invalid commands report errors without ending the session.
+There is no implicit selected execution. No live events are subscribed to until an
+explicit `execution watch`. Watching occupies the shell until completion; use another
+client to answer inputs meanwhile. EOF, `/exit`, Ctrl-C, or disconnect closes only
+the client, never the daemon or its executions. Reconnect explicitly after a lost
+connection and refresh lists/history. Shell authentication uses configured credentials
+or `--token-file`; `--token-stdin` is rejected because stdin carries commands.
+
 ## Inspect status and statistics
 
 ```bash

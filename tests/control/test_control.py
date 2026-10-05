@@ -72,7 +72,7 @@ async def test_execution_history_events_and_reconnect(
                         params.model_copy(update={"input": {"value": 12}})
                     )
                 with pytest.raises(p.RemoteError) as error:
-                    await connection.request("workflows.list")
+                    await connection.request("unsupported.method")
                 assert error.value.code == "unsupported_method"
                 assert await connection.request("executions.list") == {
                     "execution_ids": [accepted.execution_id],

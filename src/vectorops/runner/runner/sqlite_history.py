@@ -70,8 +70,7 @@ class SQLiteHistory:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
                 raise ValueError(f"unsupported history schema version: {version}")
-            connection.executescript(
-                """
+            connection.executescript("""
                 BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS workflows (
                     id TEXT PRIMARY KEY,
@@ -105,8 +104,7 @@ class SQLiteHistory:
                 );
                 PRAGMA user_version = 1;
                 COMMIT;
-                """
-            )
+                """)
 
     async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         await self._prepare()
@@ -238,6 +236,31 @@ class SQLiteHistory:
         except BaseException:
             connection.close()
             raise
+
+    async def execution_summary(self) -> inspection.ExecutionSummary:
+        """Read root identity and all pending mailbox counts without scanning step history."""
+
+        def read() -> inspection.ExecutionSummary:
+            with closing(self._connect_readonly()) as connection:
+                row = connection.execute(
+                    "SELECT payload FROM execution WHERE singleton = 1"
+                ).fetchone()
+                if row is None:
+                    raise KeyError("execution state")
+                execution = state.ExecutionRecord.model_validate_json(row[0])
+                workflow = self._workflow(connection, execution.root_workflow_id)
+                pending = connection.execute(
+                    "SELECT COUNT(*) FROM input_requests WHERE json_extract(payload, '$.status') = 'pending'"
+                ).fetchone()[0]
+                return inspection.ExecutionSummary(
+                    execution_id=execution.id,
+                    reference=workflow.definition_ref,
+                    root_workflow_id=workflow.id,
+                    status=execution.status,
+                    pending_inputs=pending,
+                )
+
+        return await _offload(read)
 
     async def inspect_execution(self) -> inspection.ExecutionStatus:
         """Count all retained steps from one committed, read-only database snapshot."""

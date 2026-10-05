@@ -20,6 +20,7 @@ import pydantic
 
 from vectorops.runner.api import composition, definitions
 from vectorops.runner.references import WorkflowReference
+from vectorops.runner.runner import catalog
 
 WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]]
 WorkflowEntryPoint: typing.TypeAlias = typing.Union[
@@ -50,6 +51,57 @@ class WorkflowResolver:
         return await asyncio.to_thread(
             self._describe, WorkflowReference.parse(reference)
         )
+
+    async def discover(
+        self, *, after: typing.Optional[str] = None, limit: int = 100
+    ) -> catalog.WorkflowCatalog:
+        """Enumerate local decorated definitions, isolating invalid files and callables."""
+        if not 1 <= limit <= 500:
+            raise ValueError("catalog limit must be between 1 and 500")
+
+        def scan() -> catalog.WorkflowCatalog:
+            result = catalog.WorkflowCatalog()
+            with self._lock:
+                for path in sorted(self.root.rglob("*.py")):
+                    relative = path.relative_to(self.root)
+                    if any(
+                        part.startswith(".") or part == "__pycache__"
+                        for part in relative.parts
+                    ):
+                        continue
+                    source = relative.with_suffix("").as_posix()
+                    try:
+                        reference = WorkflowReference.parse(f"{source}:workflow")
+                        module = self._source(reference).module
+                    except Exception as exc:
+                        result.errors.append(
+                            catalog.DiscoveryError(source=source, error=str(exc))
+                        )
+                        continue
+                    for name, entry in sorted(vars(module).items()):
+                        if (
+                            not isinstance(entry, composition.WorkflowDefinition)
+                            or entry.func.__module__ != module.__name__
+                        ):
+                            continue
+                        target = f"{source}:{name}"
+                        if after is not None and target <= after:
+                            continue
+                        try:
+                            result.workflows.append(
+                                self._describe(WorkflowReference.parse(target))
+                            )
+                        except Exception as exc:
+                            result.errors.append(
+                                catalog.DiscoveryError(source=target, error=str(exc))
+                            )
+                result.workflows.sort(key=lambda descriptor: descriptor.reference)
+                if len(result.workflows) > limit:
+                    result.next_after = result.workflows[limit - 1].reference
+                    result.workflows = result.workflows[:limit]
+            return result
+
+        return await asyncio.to_thread(scan)
 
     async def invalidate(self, reference: typing.Optional[str] = None) -> None:
         def clear() -> None:

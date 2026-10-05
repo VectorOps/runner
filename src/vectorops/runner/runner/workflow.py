@@ -506,6 +506,9 @@ class WorkflowRunner:
     ) -> inspection.ExecutionStatus:
         return await (await self._selected_database(execution_id)).inspect_execution()
 
+    async def execution_summary(self, execution_id: str) -> inspection.ExecutionSummary:
+        return await (await self._selected_database(execution_id)).execution_summary()
+
     async def query_history(
         self, query: history_query.HistoryQuery
     ) -> history_query.HistoryPage:
