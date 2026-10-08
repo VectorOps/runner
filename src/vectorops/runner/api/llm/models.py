@@ -66,10 +66,18 @@ class SettingsParameters(typing.TypedDict, total=False):
 
 
 class Compaction(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    max_context_characters: int = pydantic.Field(gt=0)
+    max_context_characters: Optional[int] = pydantic.Field(default=None, gt=0)
     keep_recent_messages: int = pydantic.Field(default=4, ge=1)
+    context_window: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
+    trigger_threshold_ratio: float = pydantic.Field(default=0.7, gt=0, le=1)
+    keep_recent_tokens: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
+    keep_recent_ratio: float = pydantic.Field(default=0.25, gt=0, lt=1)
+    summary_settings: SettingsOverrides = pydantic.Field(
+        default_factory=SettingsOverrides
+    )
+    summary_max_output_tokens: int = pydantic.Field(default=4096, gt=0, strict=True)
     instruction: str = pydantic.Field(
         default=(
             "Summarize this conversation for continuation. Preserve decisions, "
@@ -78,6 +86,20 @@ class Compaction(pydantic.BaseModel):
         ),
         min_length=1,
     )
+
+    @pydantic.model_validator(mode="after")
+    def validate_policy(self) -> typing.Self:
+        if self.max_context_characters is None and self.keep_recent_messages != 4:
+            raise ValueError(
+                "keep_recent_messages requires legacy character compaction"
+            )
+        if (
+            self.max_context_characters is None
+            and self.keep_recent_tokens is None
+            and self.keep_recent_ratio >= self.trigger_threshold_ratio
+        ):
+            raise ValueError("keep_recent_ratio must be below trigger_threshold_ratio")
+        return self
 
 
 class RetryPolicy(pydantic.BaseModel):

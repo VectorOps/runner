@@ -15,11 +15,13 @@ from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm import models, provider, tools as tool_api
 from vectorops.runner.api.llm import retry as retry_api
 from vectorops.runner.api.llm import observability
+from vectorops.runner.api.llm import compaction as compaction_api
 from vectorops.runner.api.llm.configuration import (
     explicit_options,
     resolve_configuration,
 )
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.streaming import StreamItem
 
 
@@ -63,6 +65,7 @@ class LLM:
         self._backend = backend if backend is not None else provider.ConnectProvider()
         self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
+        self._compaction_history = compaction_api.History()
         self._usage = connect.Usage()
         self._busy = False
 
@@ -127,29 +130,43 @@ class LLM:
         self.add_message(connect.UserMessage(content=text))
 
     def _request(
-        self, definitions: Sequence[connect.ToolSpec]
+        self, definitions: Sequence[connect.ToolSpec], *, snapshot: bool = False
     ) -> connect.GenerateRequest:
         assert self._settings is not None
-        return connect.GenerateRequest(
-            messages=[message.model_copy(deep=True) for message in self._messages],
+        messages = [message.model_copy(deep=True) for message in self._messages]
+        factory = (
+            connect.GenerateRequest.model_construct
+            if snapshot
+            else connect.GenerateRequest
+        )
+        request = factory(
+            messages=messages,
             system_prompt=self._system_prompt,
             tools=[definition.model_copy(deep=True) for definition in definitions],
             temperature=self._settings.temperature,
             max_output_tokens=self._settings.max_output_tokens,
             reasoning=self._settings.reasoning,
         )
+        return (
+            request.model_copy(update={"messages": messages}) if snapshot else request
+        )
 
-    def _input(self, request: connect.GenerateRequest) -> dict[str, pydantic.JsonValue]:
+    def _input(
+        self,
+        request: connect.GenerateRequest,
+        settings: Optional[models.Settings] = None,
+    ) -> dict[str, pydantic.JsonValue]:
         assert self._settings is not None
-        settings = self._settings.model_dump(mode="json")
-        if self._settings.credential_profile is None:
-            settings.pop("credential_profile", None)
+        selected = self._settings if settings is None else settings
+        payload = selected.model_dump(mode="json")
+        if selected.credential_profile is None:
+            payload.pop("credential_profile", None)
         return {
             "instance": self._identity,
             "request_digest": _digest(
                 {
                     "request": request.model_dump(mode="json"),
-                    "settings": settings,
+                    "settings": payload,
                 }
             ),
         }
@@ -161,23 +178,46 @@ class LLM:
         *,
         compaction_request: Optional[connect.GenerateRequest] = None,
         cut: int = 0,
-    ) -> connect.AssistantMessage:
+        settings: Optional[models.Settings] = None,
+        measured: bool = False,
+        summary: bool = False,
+        prefix_tokens: Optional[int] = None,
+    ) -> compaction_api.Generation:
+        assert self._settings is not None
+        selected = self._settings if settings is None else settings
+
         async def invoke(
             ctx: ActivityExecutionContext,
         ) -> AsyncGenerator[StreamItem, None]:
-            assert self._settings is not None
-            observation = observability.Observation(self._settings, request)
+            observation = observability.Observation(selected, request)
             async with aclosing(
                 retry_api.stream(
                     self._backend,
                     ctx,
-                    self._settings,
+                    selected,
                     request,
                     self._retry,
                     observation,
                 )
             ) as stream:
                 async for item in stream:
+                    if summary and isinstance(item, c.ActivityFinal):
+                        summary_response = connect.AssistantMessage.model_validate(
+                            item.value
+                        )
+                        self._summary_text(summary_response)
+                        assert self._settings is not None
+                        size = compaction_api.summary_tokens(
+                            summary_response, selected, self._settings
+                        )
+                        if (
+                            size is not None
+                            and prefix_tokens is not None
+                            and size >= prefix_tokens
+                        ):
+                            raise models.LLMResponseError(
+                                "compaction summary did not reduce the selected prefix"
+                            )
                     if (
                         isinstance(item, c.ActivityFinal)
                         and compaction_request is not None
@@ -212,10 +252,28 @@ class LLM:
                             item = c.ActivityFinal(
                                 item.value, {"llm": metric.model_dump(mode="json")}
                             )
+                    if measured and isinstance(item, c.ActivityFinal):
+                        assert self._compaction is not None
+                        generation = compaction_api.Generation(
+                            response=connect.AssistantMessage.model_validate(
+                                item.value
+                            ),
+                            message_id=ctx.step_id,
+                            context_window=compaction_api.context_window(
+                                selected, self._compaction
+                            ),
+                        )
+                        item = c.ActivityFinal(
+                            generation.model_dump(mode="json"), item.metrics
+                        )
                     yield item
 
-        result = await call.stream(input=self._input(request), invoke=invoke)
-        return connect.AssistantMessage.model_validate(result)
+        result = await call.stream(input=self._input(request, selected), invoke=invoke)
+        if measured:
+            return compaction_api.Generation.model_validate(result)
+        return compaction_api.Generation(
+            response=connect.AssistantMessage.model_validate(result), message_id=""
+        )
 
     def _account(self, response: connect.AssistantMessage) -> None:
         self._usage = connect.accumulate_usage(self._usage, response.usage)
@@ -224,9 +282,65 @@ class LLM:
     async def _generate(
         self, call: c.ActivityCall, definitions: Sequence[connect.ToolSpec]
     ) -> connect.AssistantMessage:
-        response = await self._invoke(call, self._request(definitions))
+        response = (await self._invoke(call, self._request(definitions))).response
         self._messages.append(response.model_copy(deep=True))
         self._account(response)
+        return response
+
+    def _signature(self, definitions: Sequence[connect.ToolSpec]) -> str:
+        assert self._settings is not None
+        return _digest(
+            {
+                "model": self._settings.model,
+                "provider": self._settings.provider,
+                "system_prompt": self._system_prompt,
+                "tools": [
+                    definition.model_dump(mode="json") for definition in definitions
+                ],
+                "reasoning": (
+                    None
+                    if self._settings.reasoning is None
+                    else self._settings.reasoning.model_dump(mode="json")
+                ),
+            }
+        )
+
+    @c.activity_wrapper(kind="llm.generate", name="_generate", version=2)
+    async def _generate_measured(
+        self, call: c.ActivityCall, definitions: Sequence[connect.ToolSpec]
+    ) -> connect.AssistantMessage:
+        generation = await self._invoke(call, self._request(definitions), measured=True)
+        self._compaction_history.record(
+            generation, len(self._messages), self._signature(definitions)
+        )
+        self._messages.append(generation.response.model_copy(deep=True))
+        self._account(generation.response)
+        return generation.response
+
+    async def _round(
+        self, definitions: Sequence[connect.ToolSpec]
+    ) -> connect.AssistantMessage:
+        """Recover one recorded overflow without repeating tools or predicting fit."""
+        policy = self._compaction
+        if policy is None or policy.max_context_characters is not None:
+            await self._maybe_compact(definitions)
+            return await self._generate(definitions)
+        try:
+            response = await self._generate_measured(definitions)
+        except ActivityError as exc:
+            if (
+                exc.error.type != "ContextLengthError"
+                or not self._compaction_history.checkpoints
+            ):
+                raise
+            anchor = self._compaction_history.checkpoints[-1]
+            if not await self._compact_at(anchor.message_id, definitions, force=True):
+                raise
+            response = await self._generate_measured(definitions)
+        if self._compaction_history.checkpoints:
+            anchor = self._compaction_history.checkpoints[-1]
+            if anchor.index == len(self._messages) - 1:
+                await self._compact_at(anchor.message_id, definitions)
         return response
 
     async def generate(
@@ -234,8 +348,7 @@ class LLM:
     ) -> connect.AssistantMessage:
         with self._mutation():
             await self._configure()
-            await self._maybe_compact(tools)
-            return await self._generate(tools)
+            return await self._round(tools)
 
     async def run(
         self,
@@ -265,8 +378,7 @@ class LLM:
             for index in range(limit):
                 if index:
                     await self._configure()
-                await self._maybe_compact(definitions)
-                response = await self._generate(definitions)
+                response = await self._round(definitions)
                 calls = [
                     block for block in response.content if block.type == "tool_call"
                 ]
@@ -297,7 +409,7 @@ class LLM:
     async def _maybe_compact(self, definitions: Sequence[connect.ToolSpec]) -> None:
         """Compact an old prefix without splitting assistant/tool exchanges."""
         policy = self._compaction
-        if policy is None:
+        if policy is None or policy.max_context_characters is None:
             return
         transcript: list[pydantic.JsonValue] = [
             message.model_dump(mode="json") for message in self._messages
@@ -338,9 +450,20 @@ class LLM:
             max_output_tokens=self._settings.max_output_tokens,
             reasoning=self._settings.reasoning,
         )
-        response = await self._invoke(
-            call, request, compaction_request=self._request(definitions), cut=cut
-        )
+        response = (
+            await self._invoke(
+                call, request, compaction_request=self._request(definitions), cut=cut
+            )
+        ).response
+        text = self._summary_text(response)
+        self._messages = [
+            connect.UserMessage(content="Summary of earlier conversation:\n" + text),
+            *self._messages[cut:],
+        ]
+        self._account(response)
+
+    @staticmethod
+    def _summary_text(response: connect.AssistantMessage) -> str:
         text = "".join(block.text for block in response.content if block.type == "text")
         if not text.strip() or any(
             block.type == "tool_call" for block in response.content
@@ -348,8 +471,88 @@ class LLM:
             raise models.LLMResponseError(
                 "compaction requires a nonempty tool-free summary"
             )
+        return text
+
+    async def _compact_at(
+        self,
+        message_id: str,
+        definitions: Sequence[connect.ToolSpec],
+        *,
+        force: bool = False,
+    ) -> bool:
+        assert self._compaction is not None
+        selection = self._compaction_history.select(
+            self._messages,
+            message_id,
+            self._compaction,
+            self._signature(definitions),
+            force=force,
+        )
+        if selection is None:
+            return False
+        await self._compact_measured(selection, definitions)
+        return True
+
+    @c.activity_wrapper(kind="llm.compact", name="_compact", version=2)
+    async def _compact_measured(
+        self,
+        call: c.ActivityCall,
+        selection: compaction_api.Selection,
+        definitions: Sequence[connect.ToolSpec],
+    ) -> None:
+        """Record one summary update, then atomically replace only its selected prefix."""
+        assert self._settings is not None and self._compaction is not None
+        policy = self._compaction
+        values = self._settings.model_dump()
+        values["max_output_tokens"] = policy.summary_max_output_tokens
+        values.update(policy.summary_settings.model_dump(exclude_unset=True))
+        if values["max_output_tokens"] is None:
+            values["max_output_tokens"] = policy.summary_max_output_tokens
+        settings = models.Settings.model_validate(values)
+        start = int(self._compaction_history.has_summary)
+        previous: pydantic.JsonValue = None
+        if start:
+            previous = self._messages[0].model_dump(mode="json")
+        transcript: list[pydantic.JsonValue] = [
+            message.model_dump(mode="json")
+            for message in self._messages[start : selection.cut]
+        ]
+        request = connect.GenerateRequest(
+            system_prompt=policy.instruction
+            + (
+                "\nUpdate the previous summary with the transcript. Preserve task intent, "
+                "constraints, decisions, and unfinished work; remove superseded details. "
+                "Use sections: Goal, Constraints, Progress, Decisions, Next steps, Critical context."
+            ),
+            messages=[
+                connect.UserMessage(
+                    content=_encoded(
+                        {"previous_summary": previous, "transcript": transcript}
+                    )
+                )
+            ],
+            temperature=settings.temperature,
+            max_output_tokens=settings.max_output_tokens,
+            reasoning=settings.reasoning,
+        )
+        response = (
+            await self._invoke(
+                call,
+                request,
+                settings=settings,
+                summary=True,
+                prefix_tokens=selection.prefix_tokens,
+                compaction_request=self._request(definitions, snapshot=True),
+                cut=selection.cut,
+            )
+        ).response
+        text = self._summary_text(response)
+        summary_tokens = compaction_api.summary_tokens(
+            response, settings, self._settings
+        )
+        self._compaction_history.commit(selection, summary_tokens)
         self._messages = [
             connect.UserMessage(content="Summary of earlier conversation:\n" + text),
-            *self._messages[cut:],
+            *self._messages[selection.cut :],
         ]
         self._account(response)

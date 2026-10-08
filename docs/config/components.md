@@ -148,14 +148,77 @@ temperature, or reasoning capability is inferred from a model name.
 
 ```toml
 [components.llm.compaction]
-max_context_characters = 100000
-keep_recent_messages = 4
+trigger_threshold_ratio = 0.7
+keep_recent_ratio = 0.25
+summary_max_output_tokens = 4096
 ```
 
-Compaction requires a positive `max_context_characters`. `keep_recent_messages`
-defaults to 4 and must be positive. Optional `instruction` overrides the existing
-summary prompt. Generation and compaction both use the resolved model, reasoning,
-output budget, temperature, and timeouts.
+### Measured compaction
+
+Compaction is opt-in. An empty compaction table or `llm.Compaction()` enables the
+token policy. After a successful response with final provider usage, the runner
+compares measured input tokens (including normalized cache categories) with the
+configured fraction of the model context window. It does not predict the size of
+the next request or reserve output headroom for this trigger.
+
+| Compaction field | Default | Meaning |
+| --- | --- | --- |
+| `trigger_threshold_ratio` | 0.7 | Trigger fraction, greater than 0 and at most 1 |
+| `context_window` | Connect catalog | Optional positive override; unknown limits disable the normal trigger |
+| `keep_recent_tokens` | None | Positive recent-tail token target; takes precedence over the ratio |
+| `keep_recent_ratio` | 0.25 | Recent-tail target as a fraction of context; below the trigger when no absolute target is set |
+| `summary_max_output_tokens` | 4096 | Positive summary output cap, independent of generation's output cap |
+| `summary_settings` | Inherit generation | Partial generation settings, including model, provider, reasoning, temperature, timeouts, and output cap |
+| `instruction` | Built-in continuation instructions | Summary instructions; structured update instructions are appended |
+
+For a dedicated summarizer, add `[components.llm.compaction.summary_settings]`
+with `model` and, if necessary, `provider`. Set `keep_recent_tokens = 16000` to
+retain a fixed target rather than a fraction. A null summary output override falls
+back to `summary_max_output_tokens`; it never disables the cap.
+
+The successful response's activity ID anchors compaction. Input usage measures the
+prefix before that response. The response itself, complete recent tool exchanges,
+and everything appended after the anchor remain unchanged. Selection walks backward
+through measured checkpoints and stops at the previous summary. Retention is a
+target, not a hard cap: whole exchanges and measured boundaries can retain more.
+If there is no eligible boundary that satisfies the target, compaction is skipped.
+The latest response is always retained, including pending tool calls.
+
+One summary call updates the previous summary with the newly excluded prefix.
+The continuation is the new summary followed by the unchanged tail and newer
+messages. Original provider usage is never rewritten. Separate derived context
+coordinates subtract the selected prefix and add summary output usage, not the
+configured retention target. These coordinates are approximate replay costs, not
+new provider measurements. Unknown summary usage or a different summary model
+discards those coordinates until fresh measured checkpoints become available.
+Missing/partial generation usage and changed model/system/tool/reasoning signatures
+are not bridged with character estimates.
+
+On a provider context-length error, the runner forces the same operation at the
+last measured successful response and retries generation once. New input and tool
+results survive unchanged; tools are never reexecuted. No eligible prefix, an
+already-compacted anchor, summary failure, or another overflow surfaces an error.
+Recovery does not consume another tool-loop round. Transient retries remain bounded
+within each generation or summary activity; there is no measurement roundtrip.
+
+Summary validation precedes history replacement. Empty, tool-calling, truncated,
+or failed summaries leave the active history intact. Comparable final summary
+output usage that is at least the selected prefix size is also rejected. This is
+not a guarantee that the rebuilt request fits: tokenizers, framing, and reasoning
+can differ, particularly with a dedicated summary model. No automatic second summary
+call or silent shrinking of the protected tail is performed.
+
+Token-mode `llm.generate` and `llm.compact` use activity version 2. Generation
+results contain the response, stable message ID, and resolved context limit so
+replay decisions do not depend on a later catalog. Request inputs remain digests,
+not transcripts. Completed summaries reconstruct state outside the activity callback;
+interrupted summaries restart under their existing activity identity.
+
+Existing policies with `max_context_characters` retain version-1 pre-request
+character triggering and `keep_recent_messages` behavior for replay compatibility.
+They continue to use generation settings and do not gain overflow recovery.
+Remove those legacy fields to opt into measured compaction for new executions;
+do not change explicit policy or activity order while replaying existing history.
 
 ## Stalled LLM calls
 
@@ -215,7 +278,8 @@ Retryable failures include timeouts, connection resets/disconnects, truncated
 transport payloads, Connect rate limits, transient provider errors, retryable
 Connect errors, and HTTP 408/429/5xx errors. Authentication, certificate/TLS
 configuration, context-length, permanent provider, and invalid response errors
-are not retried. Custom providers participate by raising the same exception types.
+are not retried by the transient retry loop. Token compaction separately handles
+one context-length recovery as described above. Custom providers participate by raising the same exception types.
 Direct `ConnectProvider.stream()` calls remain single-attempt; `LLM` owns retries.
 
 Every attempt closes its stream, uses detached copies of the original request,
@@ -245,7 +309,8 @@ jq -c 'select(.metrics.llm != null) | {id, kind: .operation.kind, metrics: .metr
 Metrics are separate from activity results and inputs. They contain numeric
 observations, fixed labels, and resolved catalog model/provider names, not prompts,
 tool arguments, transcripts, credential profiles, headers, URLs, or provider
-metadata. The original response remains the activity result; metrics do not add
+metadata. The original response remains in the activity result (inside a checkpoint
+envelope for token-mode generation); metrics do not add
 another transcript. Generic activity metrics are a trusted implementation surface;
 custom activity authors must not put secrets in them.
 
