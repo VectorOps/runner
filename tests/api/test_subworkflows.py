@@ -24,12 +24,12 @@ async def double(ctx, value: int) -> int:
 
 PARENT = """
 import connect
-from vectorops.runner.api import llm
+from vectorops.runner.api import tools
 
 async def main(ctx, reference: str = "child:double", value: int = 3):
-    tool = await llm.subworkflow_tool(["child:double"])
-    result = await llm.invoke_tool(tool, connect.ToolCallBlock(
-        id="call", name="subworkflow", arguments={"reference": reference, "input": {"value": value}}
+    tool = await tools.run_agent(["child:double"])
+    result = await tools.invoke_tool(tool, connect.ToolCallBlock(
+        id="call", name="run_agent", arguments={"reference": reference, "input": {"value": value}}
     ))
     return result.model_dump(mode="json")
 """

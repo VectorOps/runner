@@ -129,3 +129,13 @@ async def subworkflow_tool(
         list[definitions.WorkflowDescriptor]
     ).validate_python(snapshot)
     return SubworkflowTool(descriptors, name=name, approval=approval)
+
+
+async def run_agent(
+    references: Sequence[str],
+    *,
+    name: str = "run_agent",
+    approval: typing.Optional[tools.ToolApproval] = None,
+) -> SubworkflowTool:
+    """Expose permitted agents using durable child workflow discovery and execution."""
+    return await subworkflow_tool(references, name=name, approval=approval)

@@ -1,8 +1,21 @@
 """Workflow-facing tool factories and contracts, without resource initialization."""
 
 from .llm import tools as _tools
+from .llm import environment_tools as _environment
 from .llm.patch import apply_patch_tool as apply_patch_tool
-from .llm.subworkflows import subworkflow_tool as subworkflow_tool
+from .llm.subworkflows import (
+    run_agent as run_agent,
+    subworkflow_tool as subworkflow_tool,
+)
+from .llm.read_file import read_file_tool as read_file_tool
+from .llm.plan import update_plan_tool as update_plan_tool
+from .llm.web_fetch import web_fetch_tool as web_fetch_tool
+
+exec_tool = _environment.exec_tool
+poll_process_tool = _environment.poll_process_tool
+write_stdin_tool = _environment.write_stdin_tool
+kill_process_tool = _environment.kill_process_tool
+list_processes_tool = _environment.list_processes_tool
 
 Tool = _tools.Tool
 ToolBinding = _tools.ToolBinding
@@ -24,4 +37,13 @@ __all__ = [
     "invoke_tool",
     "apply_patch_tool",
     "subworkflow_tool",
+    "run_agent",
+    "exec_tool",
+    "poll_process_tool",
+    "write_stdin_tool",
+    "kill_process_tool",
+    "list_processes_tool",
+    "read_file_tool",
+    "update_plan_tool",
+    "web_fetch_tool",
 ]
