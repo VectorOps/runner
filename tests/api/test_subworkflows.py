@@ -27,7 +27,7 @@ import connect
 from vectorops.runner.api import tools
 
 async def main(ctx, reference: str = "child:double", value: int = 3):
-    tool = await tools.run_agent(["child:double"])
+    tool = await tools.subagent_tool(["child:double"])
     result = await tools.invoke_tool(tool, connect.ToolCallBlock(
         id="call", name="run_agent", arguments={"reference": reference, "input": {"value": value}}
     ))
@@ -42,6 +42,31 @@ def prepare(workspace: Path, *, allow: bool = True) -> None:
         (workspace / "config.toml").write_text(
             "[components.tools.approval]\napprove_all = true\n"
         )
+
+
+@pytest.mark.parametrize("name", ["run_agent", "review_code"])
+async def test_subagent_factory_does_not_spawn(
+    workspace: Path, history: MemoryHistory, name: str
+) -> None:
+    prepare(workspace)
+    (workspace / "workflows/parent.py").write_text("""
+from vectorops.runner.api import llm
+
+async def main(ctx, name: str):
+    if name == "run_agent":
+        tool = await llm.subagent_tool(["child:double"])
+    else:
+        tool = await llm.subagent_tool(["child:double"], name=name)
+    return tool.definition.name
+""")
+    result = await WorkflowRunner(workspace, history).run(
+        "parent:main", input={"name": name}, workflow_id="root"
+    )
+    assert result == name
+    assert len(history.workflows) == 1
+    kinds = [step.operation.kind for step in history.path(history.heads["root"])]
+    assert kinds.count("workflow.describe") == 1
+    assert "workflow.spawn" not in kinds
 
 
 async def test_subworkflow_history_and_descriptor_replay(

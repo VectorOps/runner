@@ -26,7 +26,7 @@ def test_exports_preserve_implementation_identity() -> None:
         "invoke_tool": llm.invoke_tool,
         "apply_patch_tool": patch.apply_patch_tool,
         "subworkflow_tool": subworkflows.subworkflow_tool,
-        "run_agent": subworkflows.run_agent,
+        "subagent_tool": subworkflows.subagent_tool,
         "exec_tool": environment_tools.exec_tool,
         "poll_process_tool": environment_tools.poll_process_tool,
         "write_stdin_tool": environment_tools.write_stdin_tool,
@@ -40,7 +40,7 @@ def test_exports_preserve_implementation_identity() -> None:
     for name, implementation in expected.items():
         assert vars(tools)[name] is implementation
     assert tools.subworkflow_tool is llm.subworkflow_tool
-    assert tools.run_agent is llm.run_agent
+    assert tools.subagent_tool is llm.subagent_tool
 
 
 async def test_patch_factory_through_facade(tmp_path: Path) -> None:

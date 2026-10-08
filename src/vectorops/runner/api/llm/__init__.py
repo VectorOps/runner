@@ -5,7 +5,10 @@ from . import models
 from .configuration import resolve_settings as resolve_settings
 from .provider import ConnectProvider as ConnectProvider, Provider as Provider
 from . import tools
-from .subworkflows import run_agent as run_agent, subworkflow_tool as subworkflow_tool
+from .subworkflows import (
+    subagent_tool as subagent_tool,
+    subworkflow_tool as subworkflow_tool,
+)
 
 Compaction = models.Compaction
 Settings = models.Settings

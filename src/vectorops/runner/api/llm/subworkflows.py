@@ -131,11 +131,11 @@ async def subworkflow_tool(
     return SubworkflowTool(descriptors, name=name, approval=approval)
 
 
-async def run_agent(
+async def subagent_tool(
     references: Sequence[str],
     *,
     name: str = "run_agent",
     approval: typing.Optional[tools.ToolApproval] = None,
 ) -> SubworkflowTool:
-    """Expose permitted agents using durable child workflow discovery and execution."""
+    """Create a tool for permitted agents without starting a child workflow."""
     return await subworkflow_tool(references, name=name, approval=approval)

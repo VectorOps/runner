@@ -4,7 +4,7 @@ from .llm import tools as _tools
 from .llm import environment_tools as _environment
 from .llm.patch import apply_patch_tool as apply_patch_tool
 from .llm.subworkflows import (
-    run_agent as run_agent,
+    subagent_tool as subagent_tool,
     subworkflow_tool as subworkflow_tool,
 )
 from .llm.read_file import read_file_tool as read_file_tool
@@ -37,7 +37,7 @@ __all__ = [
     "invoke_tool",
     "apply_patch_tool",
     "subworkflow_tool",
-    "run_agent",
+    "subagent_tool",
     "exec_tool",
     "poll_process_tool",
     "write_stdin_tool",
