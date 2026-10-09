@@ -14,6 +14,7 @@ from vectorops.runner import diagnostics
 from vectorops.runner.api import composition
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
@@ -38,6 +39,7 @@ class WorkflowExecutor:
         authentication: typing.Optional[AuthenticationService] = None,
         environment: typing.Optional[TargetEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
+        mcp: typing.Optional[MCPRuntime] = None,
     ) -> None:
         self.project = project
         self.history = history
@@ -48,6 +50,7 @@ class WorkflowExecutor:
         self.authentication = authentication
         self.environment = environment
         self.resources = resources
+        self.mcp = mcp
         self._configured: dict[str, WorkflowEntryPoint] = {}
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
@@ -108,6 +111,7 @@ class WorkflowExecutor:
             authentication=self.authentication,
             environment=self.environment,
             resources=self.resources,
+            mcp=self.mcp,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
         inspect.signature(workflow).bind(context, **configuration.input)

@@ -18,6 +18,7 @@ from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
 from vectorops.runner.runner.mailbox import Mailbox
@@ -75,6 +76,7 @@ class ExecutionSession:
         authentication: typing.Optional[AuthenticationService] = None,
         environment: typing.Optional[TargetEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
+        mcp: typing.Optional[MCPRuntime] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -101,6 +103,7 @@ class ExecutionSession:
         self.authentication = authentication
         self.environment = environment
         self.resources = resources
+        self.mcp = mcp
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -442,6 +445,7 @@ class ExecutionSession:
             self.authentication,
             self.environment,
             self.resources,
+            self.mcp,
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

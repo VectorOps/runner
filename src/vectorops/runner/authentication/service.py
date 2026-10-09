@@ -14,6 +14,7 @@ import pydantic
 
 from vectorops.runner import global_config
 from vectorops.runner.authentication import models as m, oauth
+from vectorops.runner.authentication import mcp_oauth
 from vectorops.runner.authentication.store import CredentialStore
 
 EventSink = Callable[[dict[str, pydantic.JsonValue]], None]
@@ -43,7 +44,9 @@ class AuthenticationService:
     ) -> None:
         self.configuration = configuration or global_config.GlobalConfiguration()
         self.store = CredentialStore(self.configuration)
-        self.adapters = {"chatgpt": oauth.ChatGPT()} if adapters is None else adapters
+        self.adapters: dict[str, oauth.OAuthAdapter] = (
+            {"chatgpt": oauth.ChatGPT()} if adapters is None else adapters
+        )
         self.event_sink = event_sink
         self._pending: dict[str, Pending] = {}
         self._users: dict[str, int] = {}
@@ -244,6 +247,7 @@ class AuthenticationService:
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
+        interactive: bool = True,
     ) -> m.Credential:
         """Serialize refresh across processes; wait outside the lock for user consent."""
         invalid: Optional[str] = None
@@ -287,12 +291,32 @@ class AuthenticationService:
                         raise m.AuthenticationError(
                             "provider API key is not configured"
                         )
+                if not interactive:
+                    raise m.LoginRequired(
+                        "OAuth authorization required before retrying MCP"
+                    )
                 await self._wait(profile, execution_id)
         finally:
             self._users[profile.key] -= 1
             if not self._users[profile.key]:
                 del self._users[profile.key]
                 self._pending.pop(profile.key, None)
+
+    async def mcp_secret(self, profile: str) -> str:
+        """Resolve a provisioned MCP API key without interactive provider login."""
+        reference = m.Profile(provider="mcp", profile=profile)
+        async with self.store.locked(reference):
+            value = await self.store.load(reference)
+        if value is None or value.kind != "api_key":
+            raise m.AuthenticationError("MCP API key is not configured")
+        if value.expires_at is not None and value.expires_at <= time.time():
+            raise m.AuthenticationError("MCP API key has expired")
+        return value.secret
+
+    async def mcp_adapter(self, settings: mcp_oauth.Settings) -> mcp_oauth.MCPAdapter:
+        adapter = await mcp_oauth.MCPAdapter.discover(settings)
+        self.adapters[adapter.profile.provider] = adapter
+        return adapter
 
     async def transport(
         self,

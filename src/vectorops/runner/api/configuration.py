@@ -2,6 +2,8 @@
 
 import asyncio
 from copy import deepcopy
+import hashlib
+import json
 import math
 from pathlib import Path
 import tomllib
@@ -65,3 +67,40 @@ async def get(
 
     result = await call.run(input={"name": name, "default": fallback}, invoke=invoke)
     return deepcopy(result)
+
+
+@c.activity_wrapper(name="get_validated", kind="configuration.validated", version=1)
+async def get_validated(
+    call: c.ActivityCall,
+    name: str,
+    model: type[pydantic.BaseModel],
+    *,
+    contract_digest: typing.Optional[str] = None,
+) -> pydantic.JsonValue:
+    """Record only owner-validated settings, with payload-free validation failures."""
+    if not name or any(not part.strip() for part in name.split(".")):
+        raise ValueError(
+            "configuration name must contain nonempty dotted path segments"
+        )
+    path = c.workflow_context().project.config_path
+    schema = json.dumps(
+        model.model_json_schema(), sort_keys=True, separators=(",", ":")
+    )
+
+    def read() -> pydantic.JsonValue:
+        try:
+            return model.model_validate(_read(path, name, {})).model_dump(mode="json")
+        except Exception:
+            raise ValueError("component configuration is invalid") from None
+
+    async def invoke(context: ActivityExecutionContext) -> pydantic.JsonValue:
+        return await asyncio.to_thread(read)
+
+    return await call.run(
+        input={
+            "name": name,
+            "schema_digest": contract_digest
+            or hashlib.sha256(schema.encode()).hexdigest(),
+        },
+        invoke=invoke,
+    )

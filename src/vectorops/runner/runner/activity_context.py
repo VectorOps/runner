@@ -5,6 +5,7 @@ from typing import Optional
 
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.resources import CleanupRegistry
 
@@ -24,3 +25,4 @@ class ActivityExecutionContext:
     resources: Optional[CleanupRegistry] = field(
         default=None, compare=False, repr=False
     )
+    mcp: Optional[MCPRuntime] = field(default=None, compare=False, repr=False)

@@ -10,7 +10,11 @@ dependencies = [
     "cryptography>=44.0.0",
     "keyring>=25.0.0",
     "jsonschema>=4.23.0",
-    "pydantic>=2.7.0",
+    "mcp==1.26.0",
+    "httpx>=0.28.1",
+    "anyio>=4.5",
+    "referencing>=0.36",
+    "pydantic>=2.12.0",
 ]
 
 [project.scripts]

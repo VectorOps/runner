@@ -21,6 +21,7 @@ from vectorops.runner.runner.resolver import WorkflowResolver
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment import factory as environments
 from vectorops.runner.environment.lifecycle import close_environment
+from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
@@ -435,6 +436,8 @@ class WorkflowRunner:
                 input={} if input is None else input,
             )
         async with ExecutionResources() as resources:
+            mcp = MCPRuntime(self.authentication, execution_id)
+            resources.register("mcp", mcp.close)
             environment = None
             if project.config.environment is not None:
                 environment = await environments.open_environment(
@@ -453,6 +456,7 @@ class WorkflowRunner:
                 self.authentication,
                 environment=environment,
                 resources=resources,
+                mcp=mcp,
             )
             if continue_from_step_id is None:
                 configuration = await executor.configure(configuration)
