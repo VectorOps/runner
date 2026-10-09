@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pydantic
 
-from vectorops.runner import diagnostics
+from vectorops.runner import diagnostics, input_schema
 from vectorops.runner import global_config
 from vectorops.runner.authentication import models as am
 from vectorops.runner.authentication.service import AuthenticationService
@@ -563,6 +563,10 @@ class RunnerService:
                     raise p.RemoteError("runner_stopping", "runner is shutting down")
                 try:
                     return p.json_value(await self.runner.answer_input(answer))
+                except input_schema.InputValidationError as exc:
+                    raise p.RemoteError(
+                        "input_validation", str(exc), exc.details()
+                    ) from exc
                 except mailbox.MailboxConflict as exc:
                     raise p.RemoteError("mailbox_conflict", str(exc)) from exc
         raise p.RemoteError("unsupported_method", "unknown method: " + method)

@@ -5,6 +5,7 @@ from . import models
 from .configuration import resolve_settings as resolve_settings
 from .provider import ConnectProvider as ConnectProvider, Provider as Provider
 from . import tools
+from . import input
 from .subworkflows import (
     subagent_tool as subagent_tool,
     subworkflow_tool as subworkflow_tool,
@@ -23,4 +24,9 @@ ToolExecutionError = tools.ToolExecutionError
 ToolResponse = tools.ToolResponse
 ToolApproval = tools.ToolApproval
 ToolApprovalResponse = tools.ToolApprovalResponse
+ToolApprovalRequest = tools.ToolApprovalRequest
 invoke_tool = tools.invoke_tool
+
+UserMessageInput = input.UserMessageInput
+UserMessageRequest = input.UserMessageRequest
+request_user_message = input.request_user_message

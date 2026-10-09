@@ -8,7 +8,7 @@ import pytest
 
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import models, tool_policy
+from vectorops.runner import input_schema, models, tool_policy
 from vectorops.runner.api import composition, llm
 from vectorops.runner.api.llm.patch import apply_patch_tool
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
@@ -150,6 +150,9 @@ async def test_standalone_tool_approval_and_replay(
     request = next(iter(store.requests.values()))
     assert request.channel == "tool.approval"
     assert request.response_type == "json"
+    assert request.request_type == "tool.approval.v1"
+    assert request.request_schema is not None
+    assert request.response_schema is not None
     assert isinstance(request.payload, dict)
     assert isinstance(request.payload["call"], dict)
     assert request.payload["call"]["arguments"] == {"value": 1}
@@ -274,7 +277,14 @@ async def test_pending_approval_reattaches_after_interruption(
 
 
 @pytest.mark.parametrize(
-    "answer", [{"approved": "yes"}, {}, {"approved": True, "extra": 1}]
+    "answer",
+    [
+        {"approved": "yes"},
+        {},
+        {"approved": True, "extra": 1},
+        {"approved": False, "scope": "workflow"},
+        {"approved": True, "scope": "all"},
+    ],
 )
 async def test_invalid_approval_fails_closed(
     history: MemoryHistory, answer: dict[str, pydantic.JsonValue]
@@ -297,7 +307,12 @@ async def test_invalid_approval_fails_closed(
 
     task = asyncio.create_task(replay.run(history, workflow, mailbox=box))
     await asyncio.wait_for(store.registered.wait(), 2)
-    await approve(box, next(iter(store.requests.values())), answer)
+    request = next(iter(store.requests.values()))
+    with pytest.raises(input_schema.InputValidationError):
+        await approve(box, request, answer)
+    assert store.requests[request.request_id].status == "pending"
+    assert not task.done()
+    await approve(box, request, {"approved": False})
     result = await task
     assert result.outcome.kind == "completed"
     assert (await replay.run(history, workflow, result.id)).outcome.kind == "completed"

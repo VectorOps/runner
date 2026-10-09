@@ -79,7 +79,9 @@ class RunnerClient:
                     if future is not None and not future.done():
                         if isinstance(packet, p.Error):
                             future.set_exception(
-                                p.RemoteError(packet.code, packet.message)
+                                p.RemoteError(
+                                    packet.code, packet.message, packet.details
+                                )
                             )
                         else:
                             future.set_result(

@@ -8,7 +8,7 @@ import pytest
 from tests.api.test_tools import ApprovalStore, approve
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import tool_policy
+from vectorops.runner import input_schema, tool_policy
 from vectorops.runner.api import llm
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -64,8 +64,12 @@ async def test_grants_and_replay_without_policy_reads(
     "answer",
     [{"approved": True}, {"approved": False, "reason": "no"}, {"approved": "yes"}],
 )
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_host_gate_recovery_and_result_replay(
-    history: MemoryHistory, tmp_path: Path, answer: dict[str, pydantic.JsonValue]
+    history: MemoryHistory,
+    tmp_path: Path,
+    answer: dict[str, pydantic.JsonValue],
+    legacy: bool,
 ) -> None:
     store = ApprovalStore()
     box = mailbox.Mailbox(store)
@@ -97,9 +101,23 @@ async def test_host_gate_recovery_and_result_replay(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    if legacy:
+        request = request.model_copy(
+            update={
+                "request_type": None,
+                "request_schema": None,
+                "response_schema": None,
+            }
+        )
+        store.requests[request.request_id] = request
     (tmp_path / "config.toml").write_text(
         "[components.tools.approval]\napprove_all = true"
     )
+    if not legacy and answer.get("approved") == "yes":
+        with pytest.raises(input_schema.InputValidationError):
+            await approve(box, request, answer)
+        assert store.requests[request.request_id].status == "pending"
+        answer = {"approved": False}
     await approve(box, request, answer)
     first = await replay.run(
         history,

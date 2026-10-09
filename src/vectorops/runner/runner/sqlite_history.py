@@ -426,14 +426,7 @@ class SQLiteHistory:
                 except KeyError:
                     existing = None
                 if existing is not None:
-                    if (
-                        mailbox.InputSpec.model_validate(
-                            existing.model_dump(
-                                include=set(mailbox.InputSpec.model_fields)
-                            )
-                        )
-                        != spec
-                    ):
+                    if existing.specification() != spec:
                         raise mailbox.MailboxConflict("input request contract changed")
                     return existing
                 request = mailbox.InputRequest(

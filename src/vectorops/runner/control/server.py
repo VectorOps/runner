@@ -73,7 +73,9 @@ class Session:
             await self.connection.send(p.Response(id=request.id, result=result))
         except p.RemoteError as exc:
             await self.connection.send(
-                p.Error(id=request.id, code=exc.code, message=str(exc))
+                p.Error(
+                    id=request.id, code=exc.code, message=str(exc), details=exc.details
+                )
             )
         except (ValueError, TypeError) as exc:
             await self.connection.send(

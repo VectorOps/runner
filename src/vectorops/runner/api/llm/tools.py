@@ -10,7 +10,7 @@ import connect
 import pydantic
 
 from vectorops.runner import diagnostics, tool_policy
-from vectorops.runner.api import composition as c, mailbox
+from vectorops.runner.api import composition as c
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
@@ -28,6 +28,7 @@ class ToolApproval(pydantic.BaseModel):
 
 
 ToolApprovalResponse = tool_policy.ToolApprovalResponse
+ToolApprovalRequest = tool_policy.ToolApprovalRequest
 
 
 class ToolResponse(pydantic.BaseModel):
@@ -203,7 +204,7 @@ async def invoke_tool(
         error = str(exc)
 
     if error is None and approval is not None:
-        answer = await mailbox.request_input(
+        answer = await _request_approval(
             approval.channel,
             payload={
                 "instance": instance,
@@ -211,7 +212,6 @@ async def invoke_tool(
                 "tool": definition.model_dump(mode="json") if definition else None,
                 "tool_version": binding.version if binding is not None else None,
             },
-            response_type="json",
         )
         try:
             decision = ToolApprovalResponse.model_validate(answer)
@@ -236,6 +236,29 @@ async def invoke_tool(
             **({"raise_errors": True} if raise_errors else {}),
         },
         raise_errors,
+    )
+
+
+@c.activity_wrapper(name="request_input", kind=runtime_mailbox.KIND)
+async def _request_approval(
+    call: c.ActivityCall, channel: str, payload: pydantic.JsonValue
+) -> pydantic.JsonValue:
+    """Preserve legacy activity identity while typing newly registered approvals."""
+
+    async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        if ctx.mailbox is None:
+            raise RuntimeError("tool approval requires a persistent workflow runner")
+        existing = await ctx.mailbox.existing(ctx.step_id)
+        spec = (
+            existing.specification()
+            if existing is not None
+            else ToolApprovalRequest.model_validate(payload).input_spec(channel)
+        )
+        return await ctx.mailbox.wait(ctx.step_id, spec)
+
+    return await call.run(
+        input={"channel": channel, "payload": payload, "response_type": "json"},
+        invoke=invoke,
     )
 
 
@@ -349,22 +372,16 @@ async def _gated_tool(
                     "tool approval requires a persistent workflow runner"
                 )
             approval = binding.approval if binding is not None else None
-            spec = runtime_mailbox.InputSpec(
-                channel=approval.channel if approval else "tool.approval",
-                payload={
-                    "instance": instance,
-                    "call": request.model_dump(mode="json"),
-                    "tool": definition.model_dump(mode="json") if definition else None,
-                    "tool_version": binding.version if binding is not None else None,
-                },
-                response_type="json",
-            )
             if existing is not None:
-                spec = runtime_mailbox.InputSpec(
-                    channel=existing.channel,
-                    payload=existing.payload,
-                    response_type=existing.response_type,
-                )
+                spec = existing.specification()
+            else:
+                assert binding is not None and definition is not None
+                spec = ToolApprovalRequest(
+                    instance=instance,
+                    call=request,
+                    tool=definition,
+                    tool_version=binding.version,
+                ).input_spec(approval.channel if approval else "tool.approval")
             answer = await ctx.mailbox.wait(ctx.step_id, spec)
             try:
                 response = ToolApprovalResponse.model_validate(answer)

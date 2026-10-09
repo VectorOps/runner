@@ -6,11 +6,58 @@ from pathlib import Path
 import tomllib
 import typing
 
+import connect
 import pydantic
+
+from vectorops.runner.runner import mailbox
+
+
+class ToolApprovalRequest(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+
+    instance: typing.Optional[str] = None
+    call: connect.ToolCallBlock
+    tool: connect.ToolSpec
+    tool_version: int = pydantic.Field(ge=1, strict=True)
+
+    @pydantic.model_validator(mode="after")
+    def validate_identity(self) -> typing.Self:
+        if not self.call.name or self.call.name != self.tool.name:
+            raise ValueError("approval call and tool names must match")
+        return self
+
+    def input_spec(self, channel: str = "tool.approval") -> mailbox.InputSpec:
+        schema = self.model_json_schema()
+        schema["allOf"] = [
+            {
+                "properties": {
+                    key: {"properties": {"name": {"const": self.tool.name}}}
+                    for key in ("call", "tool")
+                }
+            }
+        ]
+        return mailbox.InputSpec(
+            channel=channel,
+            payload=self.model_dump(mode="json"),
+            response_type="json",
+            request_type="tool.approval.v1",
+            request_schema=schema,
+            response_schema=ToolApprovalResponse.model_json_schema(),
+        )
 
 
 class ToolApprovalResponse(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+    model_config = pydantic.ConfigDict(
+        extra="forbid",
+        frozen=True,
+        json_schema_extra={
+            "if": {
+                "properties": {"scope": {"const": "workflow"}},
+                "required": ["scope"],
+            },
+            "then": {"properties": {"approved": {"const": True}}},
+        },
+    )
 
     approved: bool = pydantic.Field(strict=True)
     reason: typing.Optional[str] = None

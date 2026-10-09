@@ -52,6 +52,7 @@ class Error(Model):
     id: typing.Optional[str] = None
     code: str
     message: str
+    details: pydantic.JsonValue = None
 
 
 class Event(Model):
@@ -184,9 +185,12 @@ class ExecutionPage(Model):
 
 
 class RemoteError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, details: pydantic.JsonValue = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 def json_value(model: pydantic.BaseModel) -> pydantic.JsonValue:

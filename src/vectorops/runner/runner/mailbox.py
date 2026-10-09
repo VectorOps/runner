@@ -9,6 +9,7 @@ import typing
 
 import pydantic
 
+from vectorops.runner import input_schema
 from vectorops.runner.runner.execution_state import timestamp
 
 KIND: typing.Final = "mailbox.input"
@@ -22,10 +23,37 @@ class InputSpec(Model):
     channel: str = pydantic.Field(min_length=1, max_length=256, pattern=r"^\S+$")
     payload: pydantic.JsonValue = None
     response_type: typing.Literal["text", "json"] = "text"
+    request_type: typing.Optional[str] = pydantic.Field(
+        default=None, min_length=1, max_length=256, pattern=r"^\S+$"
+    )
+    request_schema: typing.Optional[input_schema.Schema] = None
+    response_schema: typing.Optional[input_schema.Schema] = None
+
+    @pydantic.field_validator("request_schema", "response_schema", mode="after")
+    @classmethod
+    def validate_schema(
+        cls, value: typing.Optional[input_schema.Schema]
+    ) -> typing.Optional[input_schema.Schema]:
+        if value is not None:
+            input_schema.validator(value)
+        return value
+
+    @pydantic.model_validator(mode="after")
+    def validate_payload(self) -> typing.Self:
+        if self.request_schema is not None:
+            input_schema.validate(self.request_schema, self.payload, field="payload")
+        return self
+
+    def specification(self) -> InputSpec:
+        return InputSpec.model_validate(
+            self.model_dump(include=set(InputSpec.model_fields))
+        )
 
     def validate_response(self, value: pydantic.JsonValue) -> None:
         if self.response_type == "text" and not isinstance(value, str):
             raise ValueError("input request requires a text response")
+        if self.response_schema is not None:
+            input_schema.validate(self.response_schema, value, field="response")
 
 
 class InputRequest(InputSpec):
