@@ -18,6 +18,7 @@ def test_exports_preserve_implementation_identity() -> None:
     expected = {
         "Tool": llm.Tool,
         "ToolBinding": llm.ToolBinding,
+        "ToolSet": llm.ToolSet,
         "WorkflowToolBinding": llm.WorkflowToolBinding,
         "ToolExecutionError": llm.ToolExecutionError,
         "ToolResponse": llm.ToolResponse,

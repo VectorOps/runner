@@ -13,6 +13,9 @@ from vectorops.runner import diagnostics
 from vectorops.runner import global_config
 from vectorops.runner.authentication import models as am
 from vectorops.runner.authentication.service import AuthenticationService
+from vectorops.runner.mcp import management as mcp_management
+from vectorops.runner.mcp.pool import SharedPool
+from vectorops.runner.mcp.transport import MCPError
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
@@ -46,11 +49,14 @@ class RunnerService:
         self._suspending: set[str] = set()
         self._close_task: typing.Optional[asyncio.Task[None]] = None
         self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
+        self.mcp_pool = SharedPool(self.authentication, self._emit)
+        self.mcp = mcp_management.Management(path / "config.toml", self.mcp_pool)
 
     async def __aenter__(self) -> typing.Self:
         await self.configuration.load()
         project = await RunnerProject.open(self.path)
         self.path = project.root
+        self.mcp.path = project.config_path
         self._store = RunnerStateStore(project.data_path)
         await self._store.__aenter__()
         self._logs = diagnostics.DiagnosticLog(
@@ -70,6 +76,7 @@ class RunnerService:
             mailbox_sink=self._emit,
             diagnostic_log=self._logs,
             authentication=self.authentication,
+            mcp_pool=self.mcp_pool,
         )
         try:
             candidates = await self.runner.recovery_candidates()
@@ -106,6 +113,8 @@ class RunnerService:
             await asyncio.gather(*self._tasks.values())
         finally:
             try:
+                await self.mcp.close()
+                await self.mcp_pool.close()
                 if self._logs is not None:
                     self._logs.emit("runner.stopped")
                     await self._logs.aclose()
@@ -337,6 +346,22 @@ class RunnerService:
         *,
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
+        if method.startswith("mcp."):
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            try:
+                result = await self.mcp.dispatch(method, params)
+                if len(json.dumps(result).encode()) > p.MAX_FRAME // 2:
+                    raise MCPError(
+                        "MCP management result exceeds the control response limit"
+                    )
+                return result
+            except pydantic.ValidationError:
+                raise p.RemoteError(
+                    "invalid_argument", "invalid MCP parameters"
+                ) from None
+            except (MCPError, am.AuthenticationError) as exc:
+                raise p.RemoteError("mcp_error", str(exc)) from None
         if method.startswith("auth."):
             if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                 raise p.RemoteError("runner_stopping", "runner is shutting down")

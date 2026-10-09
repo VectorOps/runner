@@ -1,6 +1,6 @@
 """Typed tool bindings and workflow-side approval/execution composition."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from abc import ABC, abstractmethod
 import hashlib
 import json
@@ -58,6 +58,20 @@ class ToolBinding(typing.Protocol):
         context: ActivityExecutionContext,
         arguments: dict[str, pydantic.JsonValue],
     ) -> ToolResponse: ...
+
+
+class ToolSet(typing.Protocol):
+    """Pure, immutable tool selection advanced only by completed round outcomes.
+
+    Implementations must not perform I/O or mutate themselves in advance().
+    Results include replayed outcomes; selection must be deterministic and return
+    a new set so failed rounds and overlapping LLMs cannot leak activation state.
+    """
+
+    @property
+    def bindings(self) -> Sequence[ToolBinding]: ...
+
+    def advance(self, results: Sequence[connect.ToolResultMessage]) -> "ToolSet": ...
 
 
 class Tool(typing.Generic[A]):

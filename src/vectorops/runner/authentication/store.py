@@ -67,3 +67,10 @@ class CredentialStore:
     async def provision(self, value: m.Credential) -> None:
         async with self.locked(value):
             await self.save(value)
+
+    async def delete(self, profile: m.Profile) -> None:
+        """Remove a local credential under its profile lock, without remote revocation."""
+        async with self.locked(profile):
+            await asyncio.to_thread(
+                (self.path / (profile.key + ".encrypted")).unlink, missing_ok=True
+            )

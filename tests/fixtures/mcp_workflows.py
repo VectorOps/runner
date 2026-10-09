@@ -1,11 +1,33 @@
 """MCP workflows for persistent discovery and tool replay tests."""
 
 import connect
+import asyncio
 import pydantic
 
 from vectorops.runner.api import composition, mcp, tools
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
+
+connected = asyncio.Event()
+release = asyncio.Event()
+
+
+async def shared(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
+    await mcp.tools("test", "echo")
+    connected.set()
+    await release.wait()
+    return [name for name in await mcp.servers()]
+
+
+async def helpers(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
+    prompts = await mcp.list_prompts("test")
+    resources = await mcp.list_resources("test")
+    prompt = await mcp.get_prompt("test", prompts[0].name, {"who": "world"})
+    resource = await mcp.read_resource("test", resources[0].uri)
+    return {
+        "prompt": prompt.model_dump(mode="json"),
+        "resource": resource.model_dump(mode="json"),
+    }
 
 
 @composition.activity(name="mcp_runtime_identity")

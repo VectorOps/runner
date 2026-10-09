@@ -15,6 +15,7 @@ import pydantic
 from vectorops.runner import global_config
 from vectorops.runner.authentication import models as m, oauth
 from vectorops.runner.authentication import mcp_oauth
+from vectorops.runner.authentication import mcp_client_credentials, mcp_settings
 from vectorops.runner.authentication.store import CredentialStore
 
 EventSink = Callable[[dict[str, pydantic.JsonValue]], None]
@@ -317,6 +318,37 @@ class AuthenticationService:
         adapter = await mcp_oauth.MCPAdapter.discover(settings)
         self.adapters[adapter.profile.provider] = adapter
         return adapter
+
+    async def mcp_client_token(
+        self,
+        settings: mcp_settings.ClientCredentials,
+        *,
+        rejected: Optional[str] = None,
+    ) -> m.Credential:
+        reference = mcp_client_credentials.profile(settings)
+        async with self.store.locked(reference):
+            value = await self.store.load(reference)
+            if (
+                value is not None
+                and value.kind == "oauth2"
+                and value.secret != rejected
+                and value.expires_at is not None
+                and value.expires_at > time.time() + 60
+            ):
+                return value
+            secret = await self.mcp_secret(settings.client_secret)
+
+            async def acquire() -> m.Credential:
+                token = await mcp_client_credentials.request(settings, secret)
+                await self.store.save(token)
+                return token
+
+            task = asyncio.create_task(acquire())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
 
     async def transport(
         self,

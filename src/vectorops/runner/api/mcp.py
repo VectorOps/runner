@@ -10,6 +10,7 @@ from vectorops.runner.api.llm.tools import ToolBinding
 from vectorops.runner.mcp import models
 from vectorops.runner.mcp import content, content_binding
 from vectorops.runner.mcp.binding import MCPTool
+from vectorops.runner.mcp.discovery import Discovery, Ranking
 from vectorops.runner.mcp.transport import MCPError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
@@ -57,6 +58,26 @@ async def discover(
     return bindings
 
 
+async def dynamic(
+    selections: Sequence[Selection],
+    *,
+    component: str = "mcp",
+    max_active: int = 32,
+    ranking: Optional[Ranking] = None,
+) -> Discovery:
+    """Snapshot permitted tools for LLM.run(tool_set=...), initially search-only.
+
+    Search calls are recorded and approved normally. Their successful results
+    activate concrete bindings at the next round boundary, never bypassing the
+    concrete tool's approval. Call again explicitly for a fresh catalog.
+    """
+    return Discovery(
+        await discover(selections, component=component),
+        max_active=max_active,
+        ranking=ranking,
+    )
+
+
 @c.activity_wrapper(name="discover", kind="mcp.discover", version=1)
 async def _discover(
     call: c.ActivityCall, name: str, server: models.ServerConfig
@@ -64,7 +85,10 @@ async def _discover(
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         if ctx.mcp is None:
             raise MCPError("MCP discovery requires an execution-owned runtime")
-        return (await ctx.mcp.discover(name, server)).model_dump(mode="json")
+        effective = (
+            ctx.mcp.pool.effective(server) if ctx.mcp.pool is not None else server
+        )
+        return (await ctx.mcp.discover(name, effective)).model_dump(mode="json")
 
     value = await call.run(
         input={"server_name": name, "server": server.model_dump(mode="json")},
@@ -156,13 +180,64 @@ async def _content_catalog(
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         if ctx.mcp is None:
             raise MCPError("MCP discovery requires an execution-owned runtime")
-        return (await ctx.mcp.discover_content(name, server)).model_dump(mode="json")
+        effective = (
+            ctx.mcp.pool.effective(server) if ctx.mcp.pool is not None else server
+        )
+        return (await ctx.mcp.discover_content(name, effective)).model_dump(mode="json")
 
     result = await call.run(
         input={"server_name": name, "server": server.model_dump(mode="json")},
         invoke=invoke,
     )
     return content.ContentCatalog.model_validate(result)
+
+
+async def tools(server: str, *names: str, component: str = "mcp") -> list[ToolBinding]:
+    """Discover all tools on one server, or an explicit set of remote names."""
+    return await discover(
+        [Selection(server=server, tools=list(names) or ["*"])], component=component
+    )
+
+
+async def get_prompt(
+    server: str,
+    name: str,
+    arguments: Optional[dict[str, str]] = None,
+    *,
+    component: str = "mcp",
+) -> content.PromptResult:
+    selected = await discover_content(server, prompts=[name], component=component)
+    return await selected.get_prompt(name, arguments)
+
+
+async def read_resource(
+    server: str, uri: str, *, component: str = "mcp"
+) -> content.ResourceResult:
+    selected = await discover_content(server, resources=[uri], component=component)
+    return await selected.read_resource(uri)
+
+
+async def list_prompts(server: str, *, component: str = "mcp") -> list[content.Prompt]:
+    return (
+        await discover_content(server, prompts=["*"], component=component)
+    ).catalog.prompts
+
+
+async def list_resources(
+    server: str, *, component: str = "mcp"
+) -> list[content.Resource]:
+    return (
+        await discover_content(server, resources=["*"], component=component)
+    ).catalog.resources
+
+
+async def servers(*, component: str = "mcp") -> list[str]:
+    settings = models.Settings.model_validate(
+        await configuration.get_validated(
+            component, models.Settings, contract_digest=_SETTINGS_CONTRACT
+        )
+    )
+    return sorted(settings.servers)
 
 
 @c.activity_wrapper(name="retrieve", kind="mcp.content", version=1)

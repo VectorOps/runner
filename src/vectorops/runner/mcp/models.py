@@ -3,11 +3,13 @@
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Annotated, Literal, Optional
 from urllib.parse import urlsplit
 
 import pydantic
 from vectorops.runner.authentication.mcp_oauth import Settings as OAuthSettings
+from vectorops.runner.authentication import mcp_settings
 
 
 class Model(pydantic.BaseModel):
@@ -35,6 +37,22 @@ class Root(Model):
     uri: str
     name: Optional[str] = None
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def from_path(cls, value: object) -> object:
+        if isinstance(value, dict) and "path" in value:
+            copied = dict(value)
+            path = copied.pop("path")
+            if (
+                "uri" in copied
+                or not isinstance(path, str)
+                or not Path(path).is_absolute()
+            ):
+                raise ValueError("root requires exactly one absolute path or URI")
+            copied["uri"] = Path(path).as_uri()
+            return copied
+        return value
+
     @pydantic.field_validator("uri")
     @classmethod
     def file_uri(cls, value: str) -> str:
@@ -49,6 +67,9 @@ class Root(Model):
 class Server(Model):
     limits: Limits = pydantic.Field(default_factory=Limits)
     roots: list[Root] = pydantic.Field(default_factory=list)
+    roots_mode: Literal["replace", "merge"] = pydantic.Field(
+        default="replace", exclude_if=lambda value: value == "replace"
+    )
 
 
 class StdioServer(Server):
@@ -57,6 +78,24 @@ class StdioServer(Server):
     args: list[str] = pydantic.Field(default_factory=list)
     cwd: Optional[str] = None
     env_credentials: dict[str, str] = pydantic.Field(default_factory=dict)
+    env: dict[str, str] = pydantic.Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+
+    @pydantic.field_validator("env")
+    @classmethod
+    def environment_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, text in value.items():
+            if any(
+                token in name.upper()
+                for token in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")
+            ):
+                raise ValueError(
+                    "secret environment variables require credential references"
+                )
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or "\x00" in text:
+                raise ValueError("invalid environment setting")
+        return value
 
     @pydantic.field_validator("cwd")
     @classmethod
@@ -82,9 +121,76 @@ class HTTPServer(Server):
     oauth: Optional[OAuthSettings] = pydantic.Field(
         default=None, exclude_if=lambda value: value is None
     )
+    auth: Optional[mcp_settings.Authentication] = pydantic.Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    headers: dict[str, str] = pydantic.Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    header_credentials: dict[str, str] = pydantic.Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
     @pydantic.model_validator(mode="after")
     def authentication_mode(self) -> "HTTPServer":
+        if self.auth is not None and (
+            self.oauth is not None or self.credential is not None
+        ):
+            raise ValueError("auth cannot be combined with legacy credential/oauth")
+        if (
+            isinstance(
+                self.auth,
+                (mcp_settings.AuthorizationCode, mcp_settings.ClientCredentials),
+            )
+            and self.auth.resource != self.url
+        ):
+            raise ValueError("authentication resource must equal the MCP URL")
+        seen: set[str] = set()
+        for values, secret in ((self.headers, False), (self.header_credentials, True)):
+            for name, value in values.items():
+                key = name.lower()
+                if (
+                    not re.fullmatch(r"[A-Za-z0-9-]+", name)
+                    or key in seen
+                    or key
+                    in {
+                        "host",
+                        "content-length",
+                        "transfer-encoding",
+                        "connection",
+                        "content-type",
+                        "accept",
+                        "accept-encoding",
+                        "mcp-session-id",
+                        "mcp-protocol-version",
+                    }
+                ):
+                    raise ValueError("duplicate or reserved HTTP header")
+                if not secret and key in {
+                    "authorization",
+                    "proxy-authorization",
+                    "cookie",
+                    "x-api-key",
+                    "api-key",
+                }:
+                    raise ValueError("secret headers require credential references")
+                if any(ord(char) < 32 or ord(char) > 126 for char in value):
+                    raise ValueError("invalid HTTP header value")
+                if secret:
+                    validate_reference(value)
+                seen.add(key)
+        auth_header = (
+            self.auth.header.lower()
+            if isinstance(self.auth, mcp_settings.HeaderAuth)
+            else "authorization"
+        )
+        if (
+            self.credential
+            or self.oauth
+            or self.auth is not None
+            and not isinstance(self.auth, mcp_settings.NoAuth)
+        ) and auth_header in seen:
+            raise ValueError("authentication header conflicts with configured headers")
         if self.oauth is not None:
             if self.credential is not None:
                 raise ValueError(
@@ -129,6 +235,24 @@ def validate_reference(value: str) -> None:
 
 class Settings(Model):
     servers: dict[str, ServerConfig] = pydantic.Field(default_factory=dict)
+    roots: list[Root] = pydantic.Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
+
+    @pydantic.model_validator(mode="after")
+    def resolve_roots(self) -> "Settings":
+        for name in self.servers:
+            self.servers[name] = self.server(name)
+        return self
+
+    def server(self, name: str) -> ServerConfig:
+        selected = self.servers[name]
+        if not self.roots:
+            return selected.model_copy(deep=True)
+        roots = selected.roots
+        if "roots" not in selected.model_fields_set or selected.roots_mode == "merge":
+            roots = list({root.uri: root for root in [*self.roots, *roots]}.values())
+        return selected.model_copy(update={"roots": roots}, deep=True)
 
     @pydantic.field_validator("servers")
     @classmethod
@@ -158,6 +282,9 @@ class Descriptor(Model):
     description: str = ""
     input_schema: dict[str, pydantic.JsonValue]
     output_schema: Optional[dict[str, pydantic.JsonValue]] = None
+    title: Optional[str] = pydantic.Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class Catalog(Model):

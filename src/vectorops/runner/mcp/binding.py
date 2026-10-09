@@ -63,6 +63,14 @@ class MCPTool:
         self._validator = schema.validator(self._descriptor.input_schema)
 
     @property
+    def source(self) -> str:
+        return self._catalog.server_name
+
+    @property
+    def descriptor(self) -> models.Descriptor:
+        return self._descriptor.model_copy(deep=True)
+
+    @property
     def definition(self) -> connect.ToolSpec:
         return connect.ToolSpec.external(
             name=self._descriptor.name,
@@ -106,7 +114,9 @@ class MCPTool:
             ),
             None,
         )
-        if descriptor != self._descriptor:
+        if descriptor is None or descriptor.model_dump(
+            exclude={"title"}
+        ) != self._descriptor.model_dump(exclude={"title"}):
             raise MCPError(
                 "MCP tool changed since discovery; explicitly discover a new catalog"
             )

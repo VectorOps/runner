@@ -17,6 +17,7 @@ RetryPolicy = models.RetryPolicy
 
 Tool = tools.Tool
 ToolBinding = tools.ToolBinding
+ToolSet = tools.ToolSet
 WorkflowToolBinding = tools.WorkflowToolBinding
 ToolExecutionError = tools.ToolExecutionError
 ToolResponse = tools.ToolResponse

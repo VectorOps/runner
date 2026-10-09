@@ -5,7 +5,7 @@ from typing import Optional
 
 import httpx
 
-from . import mcp_oauth, models
+from . import mcp_oauth, models, mcp_settings
 from .service import AuthenticationService
 
 
@@ -13,7 +13,7 @@ class MCPHTTPAuth(httpx.Auth):
     def __init__(
         self,
         service: AuthenticationService,
-        adapter: mcp_oauth.MCPAdapter,
+        adapter: mcp_oauth.MCPAdapter | mcp_settings.ClientCredentials,
         execution_id: Optional[str],
     ) -> None:
         self.service = service
@@ -22,20 +22,37 @@ class MCPHTTPAuth(httpx.Auth):
         self.value: Optional[models.Credential] = None
         self.rejected: Optional[str] = None
 
-    async def prepare(self) -> None:
+    async def prepare(self, execution_id: Optional[str] = None) -> None:
         """Allow host interaction only before MCP startup/request deadlines begin."""
-        value = await self.service.acquire(
-            self.adapter.profile, self.execution_id, rejected=self.rejected
+        value = await self._acquire(
+            self.rejected, execution_id or self.execution_id, interactive=True
         )
         if value.kind != "oauth2":
             raise models.AuthenticationError("MCP OAuth requires an OAuth credential")
         self.value = value
         self.rejected = None
 
+    async def _acquire(
+        self, rejected: Optional[str], execution_id: Optional[str], *, interactive: bool
+    ) -> models.Credential:
+        if isinstance(self.adapter, mcp_settings.ClientCredentials):
+            return await self.service.mcp_client_token(self.adapter, rejected=rejected)
+        return await self.service.acquire(
+            self.adapter.profile,
+            execution_id,
+            rejected=rejected,
+            interactive=interactive,
+        )
+
     async def async_auth_flow(
         self, request: httpx.Request
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        if request.url != httpx.URL(self.adapter.settings.resource):
+        resource = (
+            self.adapter.resource
+            if isinstance(self.adapter, mcp_settings.ClientCredentials)
+            else self.adapter.settings.resource
+        )
+        if request.url != httpx.URL(resource):
             raise models.AuthenticationError("MCP OAuth request destination mismatch")
         if self.value is None:
             raise models.AuthenticationError("MCP OAuth credential is unavailable")
@@ -49,12 +66,7 @@ class MCPHTTPAuth(httpx.Auth):
         if not challenge.lower().startswith("bearer"):
             return
         await response.aread()
-        value = await self.service.acquire(
-            self.adapter.profile,
-            self.execution_id,
-            rejected=sent,
-            interactive=False,
-        )
+        value = await self._acquire(sent, self.execution_id, interactive=False)
         if value.kind != "oauth2":
             raise models.AuthenticationError("MCP OAuth requires an OAuth credential")
         self.value = value

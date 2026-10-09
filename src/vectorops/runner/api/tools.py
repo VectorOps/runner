@@ -19,6 +19,7 @@ list_processes_tool = _environment.list_processes_tool
 
 Tool = _tools.Tool
 ToolBinding = _tools.ToolBinding
+ToolSet = _tools.ToolSet
 WorkflowToolBinding = _tools.WorkflowToolBinding
 ToolExecutionError = _tools.ToolExecutionError
 ToolResponse = _tools.ToolResponse
@@ -29,6 +30,7 @@ invoke_tool = _tools.invoke_tool
 __all__ = [
     "Tool",
     "ToolBinding",
+    "ToolSet",
     "WorkflowToolBinding",
     "ToolExecutionError",
     "ToolResponse",

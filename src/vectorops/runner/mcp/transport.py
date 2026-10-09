@@ -110,7 +110,7 @@ async def stdio(server: StdioServer, credentials: dict[str, str]) -> AsyncIterat
             server.command,
             *server.args,
             cwd=server.cwd,
-            env={**get_default_environment(), **credentials},
+            env={**get_default_environment(), **server.env, **credentials},
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

@@ -31,6 +31,8 @@ def main() -> None:
                 ),
                 "serverInfo": {"name": "fixture", "version": "1"},
             }
+            if mode == "notify":
+                result["capabilities"] = {"tools": {"listChanged": True}}
         elif method == "tools/list":
             result = {
                 "tools": [
@@ -95,6 +97,19 @@ def main() -> None:
             }
         elif method == "tools/call":
             value = request["params"]["arguments"]["value"]
+            if mode == "notify":
+                print(
+                    json.dumps(
+                        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+                    ),
+                    flush=True,
+                )
+            if value == "environment":
+                value = (
+                    os.environ.get("MCP_TEST", "missing")
+                    + ":"
+                    + os.environ.get("MCP_SECRET", "missing")
+                )
             if value == "wait":
                 time.sleep(1)
             result = {

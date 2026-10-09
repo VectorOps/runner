@@ -13,6 +13,9 @@ from vectorops.runner import diagnostics
 from vectorops.runner import global_config
 from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.authentication import models as am
+from vectorops.runner.mcp import management as mm, models as mcp_models
+from vectorops.runner.mcp import content as mcp_content
+from vectorops.runner.mcp.pool import SessionStatus
 from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
@@ -281,6 +284,87 @@ class RunnerClient:
             raise ValueError("invalid authentication listing")
         return pydantic.TypeAdapter(list[am.Requirement]).validate_python(
             result["requests"]
+        )
+
+    async def mcp_servers(self, component: str = "mcp") -> mm.ServerPage:
+        return mm.ServerPage.model_validate(
+            await self.request("mcp.list", {"component": component})
+        )
+
+    async def mcp_status(self, server: str, *, component: str = "mcp") -> SessionStatus:
+        return SessionStatus.model_validate(
+            await self.request("mcp.status", {"server": server, "component": component})
+        )
+
+    async def mcp_connect(
+        self, server: str, *, component: str = "mcp", timeout: float = 600
+    ) -> SessionStatus:
+        return SessionStatus.model_validate(
+            await self.request(
+                "mcp.connect",
+                {"server": server, "component": component},
+                timeout=timeout,
+            )
+        )
+
+    async def mcp_login(
+        self, server: str, *, component: str = "mcp", timeout: float = 600
+    ) -> SessionStatus:
+        return SessionStatus.model_validate(
+            await self.request(
+                "mcp.login", {"server": server, "component": component}, timeout=timeout
+            )
+        )
+
+    async def mcp_refresh(
+        self, server: str, *, component: str = "mcp", timeout: float = 600
+    ) -> mcp_models.Catalog:
+        return mcp_models.Catalog.model_validate(
+            await self.request(
+                "mcp.refresh",
+                {"server": server, "component": component},
+                timeout=timeout,
+            )
+        )
+
+    async def mcp_disconnect(self, server: str, *, component: str = "mcp") -> None:
+        await self.request("mcp.disconnect", {"server": server, "component": component})
+
+    async def mcp_logout(self, server: str, *, component: str = "mcp") -> None:
+        await self.request("mcp.logout", {"server": server, "component": component})
+
+    async def mcp_discover(
+        self, server: str, *, component: str = "mcp", timeout: float = 600
+    ) -> mcp_models.Catalog:
+        return mcp_models.Catalog.model_validate(
+            await self.request(
+                "mcp.discover",
+                {"server": server, "component": component},
+                timeout=timeout,
+            )
+        )
+
+    async def mcp_content(
+        self, server: str, *, component: str = "mcp", timeout: float = 600
+    ) -> mcp_content.ContentCatalog:
+        return mcp_content.ContentCatalog.model_validate(
+            await self.request(
+                "mcp.content",
+                {"server": server, "component": component},
+                timeout=timeout,
+            )
+        )
+
+    async def mcp_roots(
+        self,
+        server: str,
+        roots: typing.Optional[list[mcp_models.Root]],
+        *,
+        component: str = "mcp",
+    ) -> SessionStatus:
+        query = mm.RootUpdate(server=server, component=component, roots=roots)
+        return SessionStatus.model_validate(
+            await self.request("mcp.roots.set", query.model_dump(mode="json"))
         )
 
     async def claim_authentication(self, identifier: str) -> am.Claim:

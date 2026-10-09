@@ -3,19 +3,26 @@
 import asyncio
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from typing import Literal, Optional
+from typing import Literal, Optional, TYPE_CHECKING
+from collections.abc import Callable
 
 import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.context import RequestContext
+from mcp.shared.session import RequestResponder
 import pydantic
 
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.authentication.mcp_http import MCPHTTPAuth
+from vectorops.runner.authentication import mcp_settings
+from vectorops.runner.authentication.mcp_oauth import MCPAdapter
 from vectorops.runner.runner.resources import finish_cleanup
 from . import models, schema, transport
 from . import content, content_runtime
+
+if TYPE_CHECKING:
+    from .pool import SharedPool
 
 
 class Connection:
@@ -24,10 +31,15 @@ class Connection:
         server: models.ServerConfig,
         authentication: Optional[AuthenticationService],
         authorization: Optional[MCPHTTPAuth] = None,
+        changed: Optional[Callable[[], None]] = None,
     ) -> None:
         self.server = server.model_copy(deep=True)
         self.authentication = authentication
         self.authorization = authorization
+        self.changed = changed
+        self.catalog_revision = 0
+        self.catalog_stale = False
+        self.tools_list_changed = False
         self.ready: asyncio.Future[ClientSession] = (
             asyncio.get_running_loop().create_future()
         )
@@ -53,6 +65,24 @@ class Connection:
             raise transport.MCPError("MCP credential service is unavailable")
         return await self.authentication.mcp_secret(profile)
 
+    async def _message(
+        self,
+        message: (
+            RequestResponder[types.ServerRequest, types.ClientResult]
+            | types.ServerNotification
+            | Exception
+        ),
+    ) -> None:
+        if (
+            isinstance(message, types.ServerNotification)
+            and isinstance(message.root, types.ToolListChangedNotification)
+            and self.tools_list_changed
+        ):
+            self.catalog_revision += 1
+            self.catalog_stale = True
+            if self.changed is not None:
+                self.changed()
+
     async def _own(self) -> None:
         """Enter and exit all SDK cancel scopes in one dedicated owner task."""
         try:
@@ -67,7 +97,14 @@ class Connection:
                         transport.stdio(server, credentials)
                     )
                 else:
-                    headers = {"Accept-Encoding": "identity"}
+                    headers = {**server.headers, "Accept-Encoding": "identity"}
+                    for header, reference in server.header_credentials.items():
+                        headers[header] = await self._secret(reference)
+                    if isinstance(server.auth, mcp_settings.HeaderAuth):
+                        headers[server.auth.header] = (
+                            server.auth.prefix
+                            + await self._secret(server.auth.credential)
+                        )
                     if server.credential is not None:
                         headers["Authorization"] = (
                             f"Bearer {await self._secret(server.credential)}"
@@ -94,12 +131,17 @@ class Connection:
                         read_timeout_seconds=timedelta(
                             seconds=server.limits.request_seconds
                         ),
-                        list_roots_callback=self._roots if server.roots else None,
+                        list_roots_callback=self._roots,
+                        message_handler=self._message,
                     )
                 )
                 initialized = await session.initialize()
                 self.protocol_version = str(initialized.protocolVersion)
                 self.supports_tools = initialized.capabilities.tools is not None
+                self.tools_list_changed = bool(
+                    initialized.capabilities.tools
+                    and initialized.capabilities.tools.listChanged
+                )
                 self.supports_prompts = initialized.capabilities.prompts is not None
                 self.supports_resources = initialized.capabilities.resources is not None
                 self.ready.set_result(session)
@@ -140,29 +182,53 @@ class MCPRuntime:
         self,
         authentication: Optional[AuthenticationService] = None,
         execution_id: Optional[str] = None,
+        pool: Optional["SharedPool"] = None,
     ) -> None:
         self.authentication = authentication
         self.execution_id = execution_id
+        self.pool = pool
+        self.lease_id = str(id(self))
         self._authorizations: dict[str, MCPHTTPAuth] = {}
         self._connections: dict[str, Connection] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
-    async def _connection(self, server: models.ServerConfig) -> Connection:
+    async def _connection(
+        self, server: models.ServerConfig, execution_id: Optional[str] = None
+    ) -> Connection:
+        if self.pool is not None:
+            if self._closed:
+                raise transport.MCPError("MCP runtime is closed")
+            return await self.pool.borrow(server, self.lease_id, self.execution_id)
         key = models.digest(server.model_dump(mode="json"))
         if self._closed:
             raise transport.MCPError("MCP runtime is closed")
         authorization = None
-        if isinstance(server, models.HTTPServer) and server.oauth is not None:
+        if isinstance(server, models.HTTPServer) and (
+            server.oauth is not None
+            or isinstance(
+                server.auth,
+                (mcp_settings.AuthorizationCode, mcp_settings.ClientCredentials),
+            )
+        ):
             if self.authentication is None:
                 raise transport.MCPError("MCP credential service is unavailable")
             authorization = self._authorizations.get(key)
             if authorization is None:
-                adapter = await self.authentication.mcp_adapter(server.oauth)
+                if isinstance(server.auth, mcp_settings.ClientCredentials):
+                    adapter: mcp_settings.ClientCredentials | MCPAdapter = server.auth
+                else:
+                    oauth_settings = (
+                        server.auth
+                        if isinstance(server.auth, mcp_settings.AuthorizationCode)
+                        else server.oauth
+                    )
+                    assert oauth_settings is not None
+                    adapter = await self.authentication.mcp_adapter(oauth_settings)
                 authorization = self._authorizations.setdefault(
-                    key, MCPHTTPAuth(self.authentication, adapter, self.execution_id)
+                    key, MCPHTTPAuth(self.authentication, adapter, None)
                 )
-            await authorization.prepare()
+            await authorization.prepare(execution_id or self.execution_id)
         async with self._lock:
             if self._closed:
                 raise transport.MCPError("MCP runtime is closed")
@@ -186,6 +252,7 @@ class MCPRuntime:
     async def discover(self, name: str, server: models.ServerConfig) -> models.Catalog:
         try:
             connection = await self._connection(server)
+            revision = connection.catalog_revision
             session = await connection.session()
             tools: list[models.Descriptor] = []
             seen: set[str] = set()
@@ -217,6 +284,7 @@ class MCPRuntime:
                                     description=item.description or "",
                                     input_schema=item.inputSchema,
                                     output_schema=item.outputSchema,
+                                    title=item.title,
                                 )
                             )
                             if len(tools) > server.limits.max_tools:
@@ -233,6 +301,7 @@ class MCPRuntime:
                         cursors.add(cursor)
                     else:
                         raise transport.MCPError("MCP catalog exceeds the page limit")
+            connection.catalog_stale = connection.catalog_revision != revision
             return models.Catalog(
                 server_name=name,
                 server=server,
@@ -326,6 +395,10 @@ class MCPRuntime:
             raise transport.MCPError("MCP content retrieval failed") from None
 
     async def close(self) -> None:
+        if self.pool is not None:
+            self._closed = True
+            await self.pool.release(self.lease_id)
+            return
         async with self._lock:
             self._closed = True
             connections = list(self._connections.values())

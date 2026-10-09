@@ -77,6 +77,20 @@ Configuration values and defaults are persisted in saga history and can appear i
 history exports and step events. Never read credentials or secrets through this
 API. A subtree read records the entire selected subtree, not just fields used later.
 
+## Validated component reads and MCP
+
+Owners that need validation before persistence can use
+`await configuration.get_validated(name, Model)`. This separate
+`configuration.validated` activity records the owner model's normalized JSON
+result, not the raw selected value. Invalid settings produce payload-free errors.
+It does not scan accepted fields for secrets; owners must design non-secret schemas.
+Ordinary `configuration.get` retains its existing schema-free behavior.
+
+MCP settings use this path under `[components.mcp.servers]`. See
+[MCP servers and workflow tools](mcp.md) for stdio/HTTP configuration, credentials,
+prompt/resource access, and `LLM.run(tool_set=...)` dynamic discovery. MCP selection
+and discovery do not replace the tool approval policy below.
+
 ## LLM options
 
 `LLM` accepts an optional `Settings` or `SettingsOverrides` positional argument,
@@ -523,6 +537,7 @@ directory, logging, and retention settings still use their existing startup rule
 
 ## Related
 
+- [MCP servers and workflow tools](mcp.md)
 - [Provider authentication and global secrets](authentication.md)
 - [Workflow authoring](../development/workflows.md)
 - [Structured logging](logging.md)

@@ -53,9 +53,9 @@ credential_profile = "work"
 
 Profile names contain 1-64 ASCII letters, digits, underscores, or hyphens. Provider names are lower-case identifiers. The provider is explicit or taken from the `provider/model` model prefix. Profile references participate in recorded settings; credentials do not.
 
-The default LLM adapter uses the runner's store instead of provider environment variables. Explicit custom `ConnectProvider(auth=...)` remains available. API-key headers support OpenAI/OpenRouter bearer tokens, Anthropic `x-api-key`, and Gemini `x-goog-api-key`; other API-key providers use bearer authentication. ChatGPT is the v1 interactive OAuth provider.
+The default LLM adapter uses the runner's store instead of provider environment variables. Explicit custom `ConnectProvider(auth=...)` remains available. API-key headers support OpenAI/OpenRouter bearer tokens, Anthropic `x-api-key`, and Gemini `x-goog-api-key`; other API-key providers use bearer authentication. ChatGPT is the interactive LLM OAuth provider. MCP public-client OAuth uses the same host coordination with resource-bound adapters; see [MCP credentials and OAuth](mcp.md#credentials-and-oauth).
 
-Missing API keys fail the affected workflow without asking the host. OAuth without usable credentials suspends the affected activity until authorization completes or is canceled. Other activities can continue. Token refresh is serialized per profile across runner processes; rotated credentials are saved before refresh succeeds. Token requests have bounded timeouts and transient retries. Invalid grants require login; storage failures and other token failures are not treated as missing credentials.
+Missing API keys fail the affected workflow without asking the host. OAuth without usable credentials suspends the affected activity until authorization completes or is canceled. Other activities can continue. Token refresh is serialized per profile across runner processes; rotated credentials are saved before refresh succeeds. ChatGPT token requests have bounded timeouts and transient retries; MCP token exchanges have bounded timeouts but are not automatically retried after unknown outcomes. Invalid grants require login; storage failures and other token failures are not treated as missing credentials.
 
 OAuth credentials can also be preconfigured with `kind: "oauth2"`, `secret` (access token), `refresh_token`, `expires_at` (Unix seconds), and optional `account_id`. A supported provider and refresh token are required. ChatGPT requests need the account ID, which can be extracted from the access token.
 
@@ -101,6 +101,7 @@ Authentication does not encrypt TCP. Use a host-key-verified SSH tunnel for remo
 
 ## Related
 
+- [MCP credentials, pinned issuers, and public-client OAuth](mcp.md#credentials-and-oauth)
 - [Daemon and SSH usage](../usage/daemon.md)
 - [Control protocol](../reference/control-protocol.md)
 - [Component configuration](components.md)

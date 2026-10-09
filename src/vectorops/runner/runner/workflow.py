@@ -22,6 +22,7 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment import factory as environments
 from vectorops.runner.environment.lifecycle import close_environment
 from vectorops.runner.mcp.runtime import MCPRuntime
+from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
@@ -51,6 +52,7 @@ class WorkflowRunner:
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
         diagnostic_log: typing.Optional[diagnostics.DiagnosticLog] = None,
         authentication: typing.Optional[AuthenticationService] = None,
+        mcp_pool: typing.Optional[SharedPool] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
@@ -58,6 +60,7 @@ class WorkflowRunner:
         self._state_store = state_store
         self._diagnostic_log = diagnostic_log
         self.authentication = authentication or AuthenticationService()
+        self.mcp_pool = mcp_pool
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
         self._suspending: set[str] = set()
@@ -436,7 +439,7 @@ class WorkflowRunner:
                 input={} if input is None else input,
             )
         async with ExecutionResources() as resources:
-            mcp = MCPRuntime(self.authentication, execution_id)
+            mcp = MCPRuntime(self.authentication, execution_id, pool=self.mcp_pool)
             resources.register("mcp", mcp.close)
             environment = None
             if project.config.environment is not None:

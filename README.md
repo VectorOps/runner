@@ -24,6 +24,8 @@ Use `vops-runner` to start, resume, inspect, and export executions. See the [CLI
 
 Daemons automatically reuse user-level control secrets. See [provider authentication](docs/config/authentication.md) for durable API keys, runner-managed OAuth refresh, and remote-host browser coordination.
 
+See [MCP servers and workflow tools](docs/config/mcp.md) for stdio/HTTP server configuration, replay-safe tool and content discovery, OAuth, and model-driven tool activation.
+
 ## Current scope
 
 The design in `docs/design.md` describes three major roles:

@@ -354,6 +354,7 @@ class LLM:
         self,
         *,
         tools: Sequence[tool_api.ToolBinding] = (),
+        tool_set: Optional[tool_api.ToolSet] = None,
         max_rounds: Optional[int] = None,
     ) -> connect.AssistantMessage:
         """Run parallel tool rounds, committing results in model-call order.
@@ -361,6 +362,8 @@ class LLM:
         Tool exceptions become model-visible responses by default. Strict mode
         and runner infrastructure failures propagate after all calls settle,
         without appending a partial round.
+        Optional immutable tool sets advance after complete rounds, including
+        replayed results, and expose new bindings only to the following round.
         """
         if max_rounds is not None and (
             isinstance(max_rounds, bool)
@@ -368,10 +371,19 @@ class LLM:
             or max_rounds < 1
         ):
             raise ValueError("max_rounds must be positive")
-        bindings = {tool.definition.name: tool for tool in tools}
-        if len(bindings) != len(tools):
-            raise ValueError("duplicate tool names")
-        definitions = [tool.definition for tool in tools]
+        static = tuple(tools)
+        selected = tool_set
+
+        def resolve(
+            current: Optional[tool_api.ToolSet],
+        ) -> tuple[dict[str, tool_api.ToolBinding], list[connect.ToolSpec]]:
+            available = [*static, *(current.bindings if current is not None else ())]
+            bindings = {tool.definition.name: tool for tool in available}
+            if len(bindings) != len(available):
+                raise ValueError("duplicate tool names")
+            return bindings, [tool.definition for tool in available]
+
+        bindings, definitions = resolve(selected)
         with self._mutation():
             resolved = await self._configure()
             limit = resolved.max_rounds if max_rounds is None else max_rounds
@@ -399,11 +411,18 @@ class LLM:
                 for result in results:
                     if isinstance(result, BaseException):
                         raise result
-                self._messages.extend(
+                completed = [
                     result
                     for result in results
                     if isinstance(result, connect.ToolResultMessage)
-                )
+                ]
+                if selected is not None:
+                    next_set = selected.advance(
+                        tuple(result.model_copy(deep=True) for result in completed)
+                    )
+                    bindings, definitions = resolve(next_set)
+                    selected = next_set
+                self._messages.extend(completed)
         raise models.RoundLimitError(f"LLM exceeded max_rounds={limit}")
 
     async def _maybe_compact(self, definitions: Sequence[connect.ToolSpec]) -> None:
