@@ -13,6 +13,12 @@ def global_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("VOPS_RUNNER_CONFIG_DIR", str(tmp_path / "runner-global"))
 
 
+@pytest.fixture(autouse=True)
+def direct_workspace_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep existing execution fixtures in the explicitly selected direct layout."""
+    monkeypatch.setenv("VOPS_RUNNER_WORKSPACE_DIRECTORY", "")
+
+
 @pytest.fixture
 def history() -> MemoryHistory:
     return MemoryHistory()

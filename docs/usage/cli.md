@@ -4,7 +4,7 @@ Use `vops-runner` to start workflows, resume interrupted executions, inspect per
 
 ## Quick start
 
-Create `workflows/example.py` in your workspace:
+Create `.voc/workflows/example.py` in your project:
 
 ```python
 async def workflow(ctx, value: int = 0) -> int:
@@ -28,7 +28,48 @@ uv run vops-runner --project /path/to/workspace start example:workflow
 uv run vops-runner --project /path/to/workspace resume example-run
 ```
 
-`--project` precedes the command and defaults to the current directory. Workspace paths follow `config.toml`, including workflow and data directory overrides. `start` accepts `builtin:name` for a registered built-in, an explicit `path:callable` reference relative to the workflow directory without `.py`, or `python:package.module:callable` for a library workflow. Local and library references require a callable; built-ins identify their entry point by name. There is no `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
+`--project` precedes the command and defaults to the current directory. Runner files live in its `.voc/` subdirectory by default. Workspace paths follow `.voc/config.toml`, including workflow and data directory overrides. `start` accepts `builtin:name` for a registered built-in, an explicit `path:callable` reference relative to the workflow directory without `.py`, or `python:package.module:callable` for a library workflow. Local and library references require a callable; built-ins identify their entry point by name. There is no `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
+
+### Workspace location
+
+The project directory must already exist. Startup creates the selected workspace
+directory and its workflow/data directories if missing; `config.toml` remains
+optional and is not generated yet. Existing project-root configuration is not
+automatically loaded or moved into `.voc`.
+
+```text
+project/
+  .voc/
+    config.toml
+    workflows/
+    data/
+      config-overrides.json
+      config-overrides.lock
+      executions/
+      logs/
+```
+
+Use `--workspace-directory` before the command to choose a different relative
+subdirectory. Pass an empty string to use the project directory directly:
+
+```bash
+uv run vops-runner --project ./project --workspace-directory .runner status
+uv run vops-runner --project ./existing-workspace --workspace-directory '' status
+```
+
+Selection order is the explicit option, `VOPS_RUNNER_WORKSPACE_DIRECTORY`, then
+`.voc`. An empty environment value also selects the direct layout. Absolute paths,
+parent traversal, and symlinks escaping the project are rejected. Workflow and
+data directory overrides remain relative to the selected workspace and cannot
+escape it. Commit non-secret configuration and workflow source; ignore `.voc/data/`
+(or the configured data location). Global credentials remain outside the project.
+
+Python entry points `RunnerProject.open`, `WorkflowRunner`, `RunnerService`,
+`embedded`, and `daemon.serve` accept the same `workspace_directory` keyword.
+`None` uses the environment/default; `""` selects the direct layout. Project identity
+remains the supplied project root; `RunnerProject.workspace_path` identifies the
+runner file directory. This setting does not change the explicitly configured
+target `environment.base_project_path`.
 
 `resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
 
@@ -40,7 +81,7 @@ This foreground CLI owns the workspace writer lock. For concurrent independent e
 the LLM, and repeats with the same conversation history until stopped. It exposes
 no tools or subagents. Text and images use the existing typed chat input contract.
 
-Configure models in `<workspace>/config.toml`, using model IDs supported by your
+Configure models in `<project>/.voc/config.toml` by default, using model IDs supported by your
 provider and [configured credentials](daemon.md):
 
 ```toml

@@ -52,8 +52,10 @@ class WorkflowRunner:
         authentication: typing.Optional[AuthenticationService] = None,
         mcp_pool: typing.Optional[SharedPool] = None,
         project: typing.Optional[RunnerProject] = None,
+        workspace_directory: typing.Optional[str] = None,
     ) -> None:
         self.path = Path(path)
+        self.workspace_directory = workspace_directory
         self.history = history
         self.event_sink = event_sink
         self._state_store = state_store
@@ -72,7 +74,9 @@ class WorkflowRunner:
     async def project(self) -> RunnerProject:
         async with self._project_lock:
             if self._project is None:
-                self._project = await RunnerProject.open(self.path)
+                self._project = await RunnerProject.open(
+                    self.path, workspace_directory=self.workspace_directory
+                )
             return self._project
 
     async def run(

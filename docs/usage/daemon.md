@@ -11,6 +11,13 @@ uv run vops-runner daemon connect --port 43821
 uv run vops-runner daemon stop --port 43821 --mode cancel
 ```
 
+`--project` selects an existing project directory. Runner configuration, workflows,
+and data live under `.voc/` inside it by default. Use `--workspace-directory NAME`
+before `daemon` to select another relative directory, or `--workspace-directory ''`
+for the direct layout. The option overrides `VOPS_RUNNER_WORKSPACE_DIRECTORY`.
+See [workspace location](cli.md#workspace-location) for paths and Python options.
+The readiness record's `workspace` field continues to identify the project root.
+
 The runner creates and reuses a persistent control token in its [global configuration](../config/authentication.md). Local clients load it automatically. `--config-dir PATH` or `VOPS_RUNNER_CONFIG_DIR` selects another configuration directory. Optional `--token-file PATH` or `--token-stdin` overrides the token for that process; the options are mutually exclusive. The runner does not change or delete an externally supplied token file.
 
 `serve` reads the token once before opening the listener, then prints one JSON readiness record containing `host`, `port`, `instance_id`, `workspace`, and `pid`, never the token. `--port` selects a fixed port; the default is OS-assigned. Only one daemon or local execution writer can own the workspace at a time. The workspace is required only by the runner, not its clients.

@@ -427,10 +427,15 @@ class RunnerClient:
 
 @asynccontextmanager
 async def embedded(
-    path: Path, *, config_dir: typing.Optional[Path] = None
+    path: Path,
+    *,
+    config_dir: typing.Optional[Path] = None,
+    workspace_directory: typing.Optional[str] = None,
 ) -> AsyncIterator[RunnerClient]:
     token = (await global_config.GlobalConfiguration(config_dir).load()).control_token
-    async with RunnerService(path, config_dir=config_dir) as service:
+    async with RunnerService(
+        path, config_dir=config_dir, workspace_directory=workspace_directory
+    ) as service:
         server = RunnerServer(service, token)
         host, worker = transport.memory_pair()
         server.attach(worker)

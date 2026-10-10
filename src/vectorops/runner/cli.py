@@ -19,6 +19,7 @@ from vectorops.runner.control import cli as client_cli
 
 class Arguments(argparse.Namespace):
     project: Path
+    workspace_directory: typing.Optional[str]
     command: str
     workflow: str
     input: dict[str, pydantic.JsonValue]
@@ -53,7 +54,11 @@ def parser() -> argparse.ArgumentParser:
         "--project",
         type=Path,
         default=Path.cwd(),
-        help="workspace directory (default: current directory)",
+        help="project directory (default: current directory)",
+    )
+    result.add_argument(
+        "--workspace-directory",
+        help="relative workspace subdirectory (default: VOPS_RUNNER_WORKSPACE_DIRECTORY or .voc); empty uses the project directly",
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser(
@@ -165,6 +170,7 @@ async def dispatch(args: Arguments) -> None:
         await daemon.dispatch(
             args.project,
             args.daemon_command,
+            workspace_directory=args.workspace_directory,
             token=token,
             config_dir=args.config_dir,
             port=args.port,
@@ -173,7 +179,9 @@ async def dispatch(args: Arguments) -> None:
         )
         return
     runner = WorkflowRunner(
-        args.project, authentication=AuthenticationService(configuration)
+        args.project,
+        authentication=AuthenticationService(configuration),
+        workspace_directory=args.workspace_directory,
     )
     if args.command == "start":
         result = await runner.run(

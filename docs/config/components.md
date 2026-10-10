@@ -1,6 +1,8 @@
 # Component configuration
 
 Set workspace defaults for LLMs and reusable workflow components in `config.toml`.
+The default location is `<project>/.voc/config.toml`; the
+[workspace directory](../usage/cli.md#workspace-location) is configurable at startup.
 Workflows read arbitrary nested values with `await get_config(ctx, name, default)`.
 Each workflow read is an activity: replay returns its recorded value, while a new
 read uses the workspace's shared in-memory configuration. The runner parses the
@@ -131,13 +133,20 @@ Setting or resetting a subtree also removes overlapping ancestor/descendant
 overrides. Setting `llm.model` after overriding `llm` removes the whole `llm`
 override; unrelated sibling keys remain unaffected.
 
-Permanent overrides are stored atomically in workspace-root `config-overrides.json`,
-with a fingerprint of the canonical TOML value for each key. At startup,
+Permanent overrides are stored atomically in `data/config-overrides.json`, with
+the coordination lock at `data/config-overrides.lock`. Both paths follow the
+configured `data_directory`. Each override includes a fingerprint of the
+canonical TOML value for its key. At startup,
 a changed value, type, presence, or selected subtree invalidates that override.
 Formatting-only edits and changes to unrelated keys do not. Invalidated overrides
 are removed from disk and do not reappear if TOML later reverts. Invalid TOML edits
 do not affect the running worker but fail the next startup. Do not store credentials in overrides or commit
 this workspace-local state file as configuration.
+
+Commit non-secret `config.toml` settings and workflow source; ignore the configured
+data directory, which contains overrides, execution history, logs, and locks.
+Workspace-root override files are no longer read or migrated. Changing
+`data_directory` selects the overrides in that directory rather than moving them.
 
 The authenticated control protocol exposes the same operations over embedded and
 TCP connections:

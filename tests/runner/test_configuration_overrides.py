@@ -13,6 +13,52 @@ from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.project import RunnerProject
 
 
+@pytest.mark.parametrize("data_directory", ["data", "custom/state"])
+async def test_override_files_follow_data_directory(
+    tmp_path: Path, data_directory: str
+) -> None:
+    path = tmp_path / "config.toml"
+    text = f'data_directory = "{data_directory}"\n[components.llm]\nmodel = "base"\n'
+    path.write_text(text)
+    project = await RunnerProject.open(tmp_path)
+    data = tmp_path / data_directory
+    assert (data / "config-overrides.lock").is_file()
+    await project.configuration.set("llm.model", "override", permanent=True)
+    assert (data / "config-overrides.json").is_file()
+    assert not (tmp_path / "config-overrides.json").exists()
+    assert not (tmp_path / "config-overrides.lock").exists()
+    assert path.read_text() == text
+    restarted = await RunnerProject.open(tmp_path)
+    assert restarted.configuration.get("llm.model") == "override"
+
+
+async def test_root_override_files_are_not_loaded_or_migrated(tmp_path: Path) -> None:
+    old = tmp_path / "config-overrides.json"
+    old.write_text("not json")
+    project = await RunnerProject.open(tmp_path)
+    assert project.configuration.get("llm.model") is None
+    assert old.read_text() == "not json"
+    assert not (project.data_path / "config-overrides.json").exists()
+
+
+async def test_changed_data_directory_uses_its_own_overrides(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[components.llm]\nmodel = "base"\n')
+    project = await RunnerProject.open(tmp_path)
+    await project.configuration.set("llm.model", "override", permanent=True)
+    path.write_text('data_directory = "state"\n[components.llm]\nmodel = "base"\n')
+    restarted = await RunnerProject.open(tmp_path)
+    assert restarted.configuration.get("llm.model") == "base"
+    await restarted.configuration.set("llm.model", "other", permanent=True)
+    assert (await RunnerProject.open(tmp_path)).configuration.get(
+        "llm.model"
+    ) == "other"
+    path.write_text('[components.llm]\nmodel = "base"\n')
+    assert (await RunnerProject.open(tmp_path)).configuration.get(
+        "llm.model"
+    ) == "override"
+
+
 async def test_last_override_replaces_previous_lifetime(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text('[components.llm]\nmodel = "base"\n')
     config = (await RunnerProject.open(tmp_path)).configuration
@@ -144,7 +190,8 @@ async def test_override_read_replay_and_fresh_workflow(
 
 
 async def test_corrupt_persistence_is_not_silently_discarded(tmp_path: Path) -> None:
-    path = tmp_path / "config-overrides.json"
+    project = await RunnerProject.open(tmp_path)
+    path = project.data_path / "config-overrides.json"
     path.write_text("not json")
     with pytest.raises(pydantic.ValidationError):
         await RunnerProject.open(tmp_path)

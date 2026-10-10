@@ -28,13 +28,16 @@ async def serve(
     port: int = 0,
     *,
     config_dir: typing.Optional[Path] = None,
+    workspace_directory: typing.Optional[str] = None,
 ) -> None:
     if token is None:
         token = (
             await global_config.GlobalConfiguration(config_dir).load()
         ).control_token
     token = auth.validate_token(token)
-    service = RunnerService(workspace, config_dir=config_dir)
+    service = RunnerService(
+        workspace, config_dir=config_dir, workspace_directory=workspace_directory
+    )
     async with service:
         server = RunnerServer(service, token)
         try:
@@ -65,9 +68,16 @@ async def dispatch(
     port: int = 0,
     host: str = "127.0.0.1",
     mode: typing.Literal["cancel", "drain"] = "cancel",
+    workspace_directory: typing.Optional[str] = None,
 ) -> None:
     if command == "serve":
-        await serve(workspace, token, port, config_dir=config_dir)
+        await serve(
+            workspace,
+            token,
+            port,
+            config_dir=config_dir,
+            workspace_directory=workspace_directory,
+        )
         return
     async with await client.RunnerClient.tcp(
         port, token, host=host, config_dir=config_dir

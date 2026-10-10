@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
 import math
+import os
 from pathlib import Path
 import tomllib
 import typing
@@ -91,12 +92,12 @@ class Configuration:
     Runner-level settings remain fixed for the lifetime of the project.
     """
 
-    def __init__(self, path: Path, config: RunnerConfig) -> None:
+    def __init__(self, path: Path, config: RunnerConfig, *, data_path: Path) -> None:
         self.path = path
         self._defaults = deepcopy(config.components)
         self._overrides: dict[str, overrides.Override] = {}
         self._values = deepcopy(self._defaults)
-        self._store = overrides.Store(path.parent / "config-overrides.json")
+        self._store = overrides.Store(data_path / "config-overrides.json")
         self._lock = asyncio.Lock()
 
     def initialize(self) -> None:
@@ -203,6 +204,7 @@ class Configuration:
 class RunnerProject:
     root: Path
     config: RunnerConfig
+    workspace_directory: str = field(default=".voc", kw_only=True)
     tool_policy: ToolPolicy = field(
         default_factory=ToolPolicy, compare=False, repr=False
     )
@@ -212,7 +214,7 @@ class RunnerProject:
 
     @cached_property
     def configuration(self) -> Configuration:
-        return Configuration(self.config_path, self.config)
+        return Configuration(self.config_path, self.config, data_path=self.data_path)
 
     @cached_property
     def resolver(self) -> WorkflowResolver:
@@ -221,32 +223,54 @@ class RunnerProject:
         return self.workflow_resolver or WorkflowResolver(self.workflows_path)
 
     @property
+    def workspace_path(self) -> Path:
+        return self.root / self.workspace_directory
+
+    @property
     def config_path(self) -> Path:
-        return self.root / "config.toml"
+        return self.workspace_path / "config.toml"
 
     @property
     def workflows_path(self) -> Path:
-        return self.root / self.config.workflows_directory
+        return self.workspace_path / self.config.workflows_directory
 
     @property
     def data_path(self) -> Path:
-        return self.root / self.config.data_directory
+        return self.workspace_path / self.config.data_directory
 
     @classmethod
-    async def open(cls, path: typing.Union[str, Path]) -> typing.Self:
+    async def open(
+        cls,
+        path: typing.Union[str, Path],
+        *,
+        workspace_directory: typing.Optional[str] = None,
+    ) -> typing.Self:
         """Read configuration and prepare workspace directories off the event loop."""
-        return await asyncio.to_thread(cls._open, Path(path))
+        return await asyncio.to_thread(cls._open, Path(path), workspace_directory)
 
     @classmethod
-    def _open(cls, path: Path) -> typing.Self:
+    def _open(
+        cls, path: Path, workspace_directory: typing.Optional[str]
+    ) -> typing.Self:
         root = path.expanduser().resolve()
         if not root.is_dir():
             raise NotADirectoryError(f"runner workspace does not exist: {root}")
-        config_path = root / "config.toml"
+        selected = (
+            os.environ.get("VOPS_RUNNER_WORKSPACE_DIRECTORY", ".voc")
+            if workspace_directory is None
+            else workspace_directory
+        )
+        if selected:
+            RunnerConfig.validate_directory(selected)
+        workspace = root / selected
+        if not workspace.resolve().is_relative_to(root):
+            raise ValueError("workspace directory must remain inside the project root")
+        workspace.mkdir(parents=True, exist_ok=True)
+        config_path = workspace / "config.toml"
         config = Configuration.read(config_path)
-        project = cls(root=root, config=config)
+        project = cls(root=root, config=config, workspace_directory=selected)
         for directory in (project.workflows_path, project.data_path):
-            if not directory.resolve().is_relative_to(root):
+            if not directory.resolve().is_relative_to(workspace.resolve()):
                 raise ValueError("workspace directories must remain inside the root")
             directory.mkdir(parents=True, exist_ok=True)
         project.configuration.initialize()
