@@ -13,7 +13,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import diagnostics
+from vectorops.runner import configuration as overrides, diagnostics
 from vectorops.runner.environment.configuration import EnvironmentConfig
 from vectorops.runner.tool_policy import ToolPolicy
 
@@ -85,7 +85,7 @@ def json_value(value: pydantic.JsonValue) -> pydantic.JsonValue:
 
 
 class Configuration:
-    """Workspace-owned component snapshot with explicit, atomic reloads.
+    """Startup TOML snapshot with workspace-owned runtime overrides.
 
     Getters only access memory and have no workflow or history dependencies.
     Runner-level settings remain fixed for the lifetime of the project.
@@ -93,8 +93,85 @@ class Configuration:
 
     def __init__(self, path: Path, config: RunnerConfig) -> None:
         self.path = path
-        self._values = deepcopy(config.components)
+        self._defaults = deepcopy(config.components)
+        self._overrides: dict[str, overrides.Override] = {}
+        self._values = deepcopy(self._defaults)
+        self._store = overrides.Store(path.parent / "config-overrides.json")
         self._lock = asyncio.Lock()
+
+    def initialize(self) -> None:
+        self._overrides = self._store.load(self._defaults)
+        self._values = overrides.effective(self._defaults, self._overrides)
+
+    def inspect(self, name: str) -> overrides.Value:
+        overrides.Query(name=name)
+        exists, value = overrides.lookup(self._values, name)
+        source: typing.Literal["toml", "temporary", "permanent", "mixed", "missing"] = (
+            "toml" if exists else "missing"
+        )
+        for key, item in self._overrides.items():
+            if key == name or name.startswith(key + "."):
+                source = "permanent" if item.permanent else "temporary"
+                break
+            if key.startswith(name + "."):
+                source = "mixed"
+        return overrides.Value(
+            name=name, exists=exists, value=json_value(value), source=source
+        )
+
+    async def set(
+        self, name: str, value: pydantic.JsonValue, *, permanent: bool = False
+    ) -> overrides.Value:
+        update = overrides.Update(
+            name=name, value=json_value(value), permanent=permanent
+        )
+        async with self._lock:
+            items = {
+                key: item
+                for key, item in self._overrides.items()
+                if not overrides.overlaps(key, name)
+            }
+            items[name] = overrides.Override(
+                value=update.value,
+                permanent=update.permanent,
+                baseline=overrides.fingerprint(self._defaults, name),
+            )
+            await self._publish(items)
+            return self.inspect(name)
+
+    async def reset(self, name: str) -> overrides.Value:
+        overrides.Query(name=name)
+        async with self._lock:
+            items = {
+                key: item
+                for key, item in self._overrides.items()
+                if not overrides.overlaps(key, name)
+            }
+            await self._publish(items)
+            return self.inspect(name)
+
+    async def _publish(
+        self,
+        items: dict[str, overrides.Override],
+    ) -> None:
+        """Finish disk publication and memory replacement together, even on cancellation."""
+
+        async def commit() -> None:
+            previous = {
+                key: item for key, item in self._overrides.items() if item.permanent
+            }
+            permanent = {key: item for key, item in items.items() if item.permanent}
+            if previous != permanent:
+                await asyncio.to_thread(self._store.save, items)
+            self._overrides = items
+            self._values = overrides.effective(self._defaults, items)
+
+        task = asyncio.create_task(commit())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def get(self, name: str, default: pydantic.JsonValue = None) -> pydantic.JsonValue:
         validate_name(name)
@@ -112,12 +189,6 @@ class Configuration:
             return model.model_validate(self.get(name, {}))
         except Exception:
             raise ValueError("component configuration is invalid") from None
-
-    async def reload(self) -> None:
-        """Publish a validated replacement; failed reloads retain the old snapshot."""
-        async with self._lock:
-            config = await asyncio.to_thread(self.read, self.path)
-            self._values = deepcopy(config.components)
 
     @staticmethod
     def read(path: Path) -> RunnerConfig:
@@ -178,4 +249,5 @@ class RunnerProject:
             if not directory.resolve().is_relative_to(root):
                 raise ValueError("workspace directories must remain inside the root")
             directory.mkdir(parents=True, exist_ok=True)
+        project.configuration.initialize()
         return project

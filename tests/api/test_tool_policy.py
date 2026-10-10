@@ -294,7 +294,7 @@ async def test_live_policy_changes_and_parallel_gate(
     await asyncio.wait_for(store.registered.wait(), 2)
     assert executed == [2]
     config.write_text("[components.tools.approval]\napprove_all = true")
-    await project.configuration.reload()
+    await project.configuration.set("tools.approval.approve_all", True)
     await approve(box, next(iter(store.requests.values())), {"approved": True})
     first = await asyncio.wait_for(task, 2)
     assert first.outcome.kind == "completed"

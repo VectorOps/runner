@@ -10,7 +10,7 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import diagnostics, input_schema
-from vectorops.runner import global_config
+from vectorops.runner import configuration as config_api, global_config
 from vectorops.runner.authentication import models as am
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.mcp import management as mcp_management
@@ -353,6 +353,33 @@ class RunnerService:
         *,
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
+        if method in ("configuration.get", "configuration.set", "configuration.reset"):
+            async with self._lock:
+                if self.shutdown_requested.is_set():
+                    raise p.RemoteError("runner_stopping", "runner is shutting down")
+                configuration = (await self.runner.project()).configuration
+                try:
+                    if method == "configuration.set":
+                        update = config_api.Update.model_validate(params)
+                        value = await configuration.set(
+                            update.name, update.value, permanent=update.permanent
+                        )
+                    else:
+                        config_query = config_api.Query.model_validate(params)
+                        value = (
+                            await configuration.reset(config_query.name)
+                            if method == "configuration.reset"
+                            else configuration.inspect(config_query.name)
+                        )
+                    return value.model_dump(mode="json")
+                except ValueError:
+                    raise p.RemoteError(
+                        "invalid_argument", "invalid configuration parameters"
+                    ) from None
+                except OSError:
+                    raise p.RemoteError(
+                        "configuration_error", "cannot persist configuration overrides"
+                    ) from None
         if method.startswith("mcp."):
             if self.shutdown_requested.is_set():
                 raise p.RemoteError("runner_stopping", "runner is shutting down")

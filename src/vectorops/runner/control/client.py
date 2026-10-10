@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pydantic
 
-from vectorops.runner import diagnostics
+from vectorops.runner import configuration as config_api, diagnostics
 from vectorops.runner import global_config
 from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.authentication import models as am
@@ -159,6 +159,29 @@ class RunnerClient:
 
     async def info(self) -> pydantic.JsonValue:
         return await self.request("runner.info")
+
+    async def get_configuration(self, name: str) -> config_api.Value:
+        return config_api.Value.model_validate(
+            await self.request(
+                "configuration.get", config_api.Query(name=name).model_dump(mode="json")
+            )
+        )
+
+    async def set_configuration(
+        self, name: str, value: pydantic.JsonValue, *, permanent: bool = False
+    ) -> config_api.Value:
+        update = config_api.Update(name=name, value=value, permanent=permanent)
+        return config_api.Value.model_validate(
+            await self.request("configuration.set", update.model_dump(mode="json"))
+        )
+
+    async def reset_configuration(self, name: str) -> config_api.Value:
+        return config_api.Value.model_validate(
+            await self.request(
+                "configuration.reset",
+                config_api.Query(name=name).model_dump(mode="json"),
+            )
+        )
 
     async def logs(self) -> diagnostics.LogListing:
         return diagnostics.LogListing.model_validate(await self.request("logs.list"))

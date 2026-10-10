@@ -60,7 +60,7 @@ async def test_omitted_options_and_explicit_overrides(
     assert request.temperature == 0.7 and request.max_output_tokens == 500
 
 
-async def test_reloaded_model_changes_and_recorded_settings_on_replay(
+async def test_overridden_model_changes_and_recorded_settings_on_replay(
     history: MemoryHistory,
     tmp_path: Path,
 ) -> None:
@@ -77,11 +77,9 @@ async def test_reloaded_model_changes_and_recorded_settings_on_replay(
         ) -> AsyncGenerator[StreamItem, None]:
             async for item in super().stream(context, settings, request):
                 yield item
-            await asyncio.to_thread(
-                path.write_text,
-                '[components.llm]\nmodel = "new"\nreasoning = {effort = "high"}\n',
+            await project.configuration.set(
+                "llm", {"model": "new", "reasoning": {"effort": "high"}}
             )
-            await project.configuration.reload()
 
     backend = ChangingProvider([answer("first"), answer("second")])
 

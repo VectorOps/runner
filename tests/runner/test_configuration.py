@@ -29,10 +29,13 @@ async def test_shared_configuration_is_parsed_once(workspace: Path) -> None:
                 result = await service.runner.run("configuration:main")
                 assert isinstance(result, dict) and result["model"] == "first"
             assert read.call_count == 1
-            await project.configuration.reload()
+            await project.configuration.set("llm.model", "override")
             result = await service.runner.run("configuration:main")
-            assert isinstance(result, dict) and result["model"] == "second"
-            assert read.call_count == 2
+            assert isinstance(result, dict) and result["model"] == "override"
+            assert read.call_count == 1
+    assert (await WorkflowRunner(workspace).project()).configuration.get(
+        "llm.model"
+    ) == "second"
 
 
 async def test_concurrent_runner_initialization(workspace: Path) -> None:
@@ -43,7 +46,7 @@ async def test_concurrent_runner_initialization(workspace: Path) -> None:
     assert read.call_count == 1
 
 
-async def test_internal_configuration_snapshots_and_reload(tmp_path: Path) -> None:
+async def test_internal_configuration_snapshots_and_restart(tmp_path: Path) -> None:
     class Settings(pydantic.BaseModel):
         count: int = 2
 
@@ -65,18 +68,19 @@ async def test_internal_configuration_snapshots_and_reload(tmp_path: Path) -> No
     assert fallback == ["fallback"]
     path.write_text("invalid TOML [")
     with pytest.raises(tomllib.TOMLDecodeError):
-        await config.reload()
+        await RunnerProject.open(tmp_path)
     assert config.get("worker.count") == 1
     path.write_text('data_directory = "other"\n[components.worker]\ncount = 3\n')
-    await config.reload()
+    assert config.get("worker.count") == 1
+    config = (await RunnerProject.open(tmp_path)).configuration
     assert config.get("worker.count") == 3
     assert project.data_path == tmp_path / "data"
     path.write_text('[components.worker]\ncount = "secret-invalid-value"\n')
-    await config.reload()
+    config = (await RunnerProject.open(tmp_path)).configuration
     with pytest.raises(ValueError, match="^component configuration is invalid$"):
         config.get_validated("worker", Settings)
     path.unlink()
-    await config.reload()
+    config = (await RunnerProject.open(tmp_path)).configuration
     assert config.get("worker") is None
     with pytest.raises(ValueError, match="nonempty"):
         config.get("worker..count")

@@ -13,7 +13,7 @@ from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.project import RunnerProject
 
 
-async def test_paths_defaults_and_explicit_reload(
+async def test_paths_defaults_and_runtime_override(
     tmp_path: Path, history: MemoryHistory
 ) -> None:
     path = tmp_path / "config.toml"
@@ -37,7 +37,7 @@ async def test_paths_defaults_and_explicit_reload(
             path.write_text, '[components.worker.nested]\nvalue = "fresh"\n'
         )
         assert project.configuration.get("worker.nested.value") == "old"
-        await project.configuration.reload()
+        await project.configuration.set("worker.nested.value", "fresh")
         return await get_config(ctx, "worker.nested.value")
 
     first = await replay.run(history, workflow, project=project)
@@ -134,7 +134,7 @@ async def test_model_validation_failure_does_not_record_payload(
         for step in history.path(first.id)
     )
     path.write_text("[components.worker]\ncount = 1\n")
-    await project.configuration.reload()
+    project = await RunnerProject.open(tmp_path)
     assert (
         await replay.run(history, workflow, first.id, project=project)
     ).outcome == first.outcome
@@ -266,7 +266,7 @@ async def test_validated_replay_uses_history_not_current_snapshot(
     first = await replay.run(history, workflow, project=project)
     assert first.outcome.kind == "completed" and first.outcome.result == {"count": 3}
     path.write_text('[components.worker]\ncount = "invalid"\n')
-    await project.configuration.reload()
+    project = await RunnerProject.open(tmp_path)
     assert (
         await replay.run(history, workflow, first.id, project=project)
     ).outcome == first.outcome

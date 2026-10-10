@@ -72,8 +72,8 @@ normalize the selected value before persistence.
 
 Getters access memory only. There is no environment interpolation or additional
 configuration search path. Selected values and defaults must be finite
-JSON-compatible values. File parsing and I/O errors fail startup or explicit
-reload; invalid selected values become recorded activity failures.
+JSON-compatible values. File parsing and I/O errors fail startup;
+invalid selected values become recorded activity failures.
 
 Without a model, the activity contract is `kind="configuration.get"`, `name="get"`, version 1,
 with `name` and `default` inputs and the selected value as its result. Returned
@@ -84,7 +84,7 @@ Configuration values and defaults are persisted in saga history and can appear i
 history exports and step events. Never read credentials or secrets through this
 API. A subtree read records the entire selected subtree, not just fields used later.
 
-## Internal access and reload
+## Internal access and startup
 
 Each running workspace owns one `RunnerProject.configuration` instance, shared
 by its workflows, MCP management, and tool approval. Internal getters are
@@ -93,7 +93,6 @@ synchronous and do not depend on workflow context or history:
 ```python
 project = await runner.project()
 language = project.configuration.get("report.language", "English")
-await project.configuration.reload()
 ```
 
 `get_validated(name, Model)` returns an instance of the supplied Pydantic model.
@@ -101,13 +100,69 @@ Missing values validate as `{}`, allowing model defaults. Returned values are
 detached from shared state. Workflow code instead uses the activity APIs above;
 the activity machinery owns persistence and replay.
 
-File edits take effect after explicit reload or runner restart; there is no
-background file watcher. Reload parses off the event loop and atomically replaces
-component settings only after successful parsing and runner-schema validation.
-Failed reloads preserve the previous snapshot. A missing file resets component
-settings to empty. Component-specific validation still happens at consumption.
-Runner-level directory, logging, retention, and environment settings require a
-restart. Replace the file atomically before requesting reload.
+TOML is parsed only at runner startup, off the event loop. There is no file watcher,
+polling, or runtime reload API. Getters never stat or read the file. TOML edits
+take effect after restart; a missing file supplies empty component settings.
+Component-specific validation still happens at consumption. Runner-level directory,
+logging, retention, and environment settings also require restart. Use runtime
+overrides below to change component settings without restarting.
+
+## Override component settings
+
+Hosts can change workflow settings without editing TOML or restarting the worker:
+
+```python
+config = (await runner.project()).configuration
+await config.set("llm.model", "gpt-4.1", permanent=True)
+await config.set("llm.model", "o3")
+current = config.inspect("llm.model")
+await config.reset("llm.model")
+```
+
+Names are relative to `[components]`. These APIs cannot reconfigure runner-level
+directories, logging, retention, or environment settings. Values must be finite
+JSON-compatible data; component owners still validate their own schemas on read.
+
+There is one override per key, not separate temporary and permanent layers.
+The latest write replaces the previous override. In the example, the temporary
+`o3` override removes the persisted `gpt-4.1` override; after restart the TOML value
+applies. Temporary overrides ignore TOML edits and disappear at worker restart.
+Setting or resetting a subtree also removes overlapping ancestor/descendant
+overrides. Setting `llm.model` after overriding `llm` removes the whole `llm`
+override; unrelated sibling keys remain unaffected.
+
+Permanent overrides are stored atomically in workspace-root `config-overrides.json`,
+with a fingerprint of the canonical TOML value for each key. At startup,
+a changed value, type, presence, or selected subtree invalidates that override.
+Formatting-only edits and changes to unrelated keys do not. Invalidated overrides
+are removed from disk and do not reappear if TOML later reverts. Invalid TOML edits
+do not affect the running worker but fail the next startup. Do not store credentials in overrides or commit
+this workspace-local state file as configuration.
+
+The authenticated control protocol exposes the same operations over embedded and
+TCP connections:
+
+```python
+await client.set_configuration("llm.model", "gpt-4.1", permanent=True)
+current = await client.get_configuration("llm.model")
+await client.reset_configuration("llm.model")
+```
+
+| RPC method | Parameters | Result |
+| --- | --- | --- |
+| `configuration.get` | `name` | Current value and source |
+| `configuration.set` | `name`, required `value`, optional `permanent` (false) | Updated value and source |
+| `configuration.reset` | `name` | Value after removing overlapping overrides |
+
+Results contain `name`, `exists`, `value`, and `source` (`toml`, `temporary`,
+`permanent`, `mixed`, or `missing`). `mixed` describes a subtree containing
+descendant overrides. `exists` distinguishes a missing key from an explicit null.
+All clients of the same worker share these overrides. Use the running worker's
+API rather than creating a second independent configuration writer.
+
+Workflow code continues to call `get_config(ctx, ...)`. New reads see the current
+effective settings; replayed reads retain their recorded values. Updating a model
+does not change an already-running generation's settings snapshot.
 
 ## Validated component reads and MCP
 
@@ -153,7 +208,7 @@ explicit fields; workspace values supply omitted fields.
 The constructor does not read configuration. Each `generate()` and each tool-loop
 round records one `get_config(ctx, "llm", {})` snapshot, then validates and
 merges it with explicit overrides. Changes to model, thinking level, or other
-defaults take effect at the next fresh round after reload, even on an existing LLM object.
+runtime overrides take effect at the next fresh round, even on an existing LLM object.
 Compaction decisions and generation within one round share that snapshot.
 The round limit is resolved once at the start of `run()` and remains fixed for
 that invocation; the next `run()` can adopt a changed limit.
@@ -339,7 +394,7 @@ max_delay = 30
 finite seconds from 0 through 300, and `max_delay` must be at least `initial_delay`.
 Explicit `LLM(..., retry=llm.RetryPolicy(max_retries=5))` overrides supplied policy
 fields. Workspace policy is read through the same recorded settings snapshot as
-generation, so reloaded edits apply to fresh rounds rather than in-flight attempts.
+generation, so runtime overrides apply to fresh rounds rather than in-flight attempts.
 
 Retryable failures include timeouts, connection resets/disconnects, truncated
 transport payloads, Connect rate limits, transient provider errors, retryable
@@ -567,7 +622,7 @@ The same recorded reads can safely drive branching, loops, and other workflow lo
 
 Completed configuration reads return their original values without reopening the
 file. New reads use current in-memory settings. For example, a workflow can read model A,
-wait for host input, then read model B after the file is edited and reloaded. On restart it
+wait for host input, then read model B after a runtime override. On restart it
 reconstructs A from history and reads B only when reaching the new read.
 
 No global configuration digest blocks edits. Completed LLM generations replay
