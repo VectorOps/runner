@@ -25,11 +25,26 @@ This repository implements a configurable, graph-driven workflow runner with LLM
   - Use type-name registration for node dispatch.
 - Commands and tools:
   - Async-first handlers; avoid blocking I/O; keep dataclass command defs minimal.
-- Design and ownership:
-  - Follow single responsibility principle. Each module or service should own one clear area of behavior.
-  - Keep ownership boundaries explicit. The type or subsystem that owns a model is responsible for interpreting it.
-  - Dependency direction must follow ownership. Higher-level orchestration may call into an owner, but it must not inspect or reconstruct the owner's private model shape.
-  - If a model changes, prefer updating its owner rather than spreading shape knowledge across unrelated modules.
+
+## Architecture and ownership
+- Each module or service owns one cohesive responsibility. Split by ownership,
+  not file size; do not scatter one behavior across helpers.
+- Each model and policy has one authoritative owner for validation,
+  interpretation, normalization, and state transitions.
+- Orchestration calls owners through explicit contracts. It must not inspect
+  private structure, reconstruct representations, or duplicate decision rules.
+- Configuration owners handle defaults, merging, and projections.
+  Representation owners handle serialization and envelope updates.
+- Dependencies point from orchestration to owners, never the reverse.
+  Pass narrow capabilities instead of entire runtime containers.
+- Adapters translate and delegate. Compatibility facades re-export;
+  neither contains a second implementation.
+- Keep registration in dedicated adapters loaded by explicit bootstrap.
+  Importing reusable APIs must not register unrelated capabilities.
+- Preserve public contracts and deterministic replay during refactoring.
+  Test owner invariants and boundary guarantees.
+- If one policy change requires edits across unrelated modules, fix ownership
+  rather than adding another coordinated patch.
 
 ## What to change vs never touch (boundaries)
 - Never commit secrets or credentials; use environment variables.
