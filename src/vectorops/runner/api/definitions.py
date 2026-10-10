@@ -18,8 +18,13 @@ class WorkflowDescriptor(pydantic.BaseModel):
     version: int = pydantic.Field(default=1, ge=1)
     input_schema: dict[str, pydantic.JsonValue]
 
-    def validate_input(self, arguments: dict[str, pydantic.JsonValue]) -> None:
+    def preflight_input(self, arguments: dict[str, pydantic.JsonValue]) -> None:
+        """Check the published schema, not Python validators or input normalization."""
         Draft202012Validator(self.input_schema).validate(arguments)
+
+    def validate_input(self, arguments: dict[str, pydantic.JsonValue]) -> None:
+        """Compatibility alias for schema-only preflight_input."""
+        self.preflight_input(arguments)
 
 
 def input_model(func: Callable[..., object]) -> type[pydantic.BaseModel]:
@@ -45,3 +50,11 @@ def input_model(func: Callable[..., object]) -> type[pydantic.BaseModel]:
         __config__=pydantic.ConfigDict(extra="forbid", allow_inf_nan=False),
         **fields,
     )
+
+
+def validated_input(
+    func: Callable[..., object], arguments: dict[str, pydantic.JsonValue]
+) -> dict[str, object]:
+    """Apply authoritative Python validation while retaining typed values for invocation."""
+    validated = input_model(func).model_validate(arguments)
+    return dict(validated)

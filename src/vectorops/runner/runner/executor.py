@@ -11,7 +11,7 @@ import pydantic
 
 from vectorops.runner import models
 from vectorops.runner import diagnostics
-from vectorops.runner.api import composition
+from vectorops.runner.api import composition, definitions
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.protocol import TargetEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
@@ -119,8 +119,9 @@ class WorkflowExecutor:
         async def invoke() -> pydantic.JsonValue:
             token = composition._CURRENT_CONTEXT.set(context)
             try:
+                arguments = definitions.validated_input(workflow, configuration.input)
                 return typing.cast(
-                    pydantic.JsonValue, await workflow(context, **configuration.input)
+                    pydantic.JsonValue, await workflow(context, **arguments)
                 )
             finally:
                 composition._CURRENT_CONTEXT.reset(token)

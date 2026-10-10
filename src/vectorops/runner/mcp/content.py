@@ -1,6 +1,7 @@
 """Role-preserving prompt and resource snapshots with explicit binary fallbacks."""
 
 import base64
+from collections.abc import Sequence
 import json
 from typing import Literal, Optional
 
@@ -37,6 +38,27 @@ class ContentCatalog(Model):
     server: ServerConfig
     prompts: list[Prompt] = pydantic.Field(default_factory=list)
     resources: list[Resource] = pydantic.Field(default_factory=list)
+
+    def select(
+        self, *, prompts: Sequence[str] = (), resources: Sequence[str] = ()
+    ) -> "ContentCatalog":
+        """Return a detached catalog limited to exact identities or explicit wildcards."""
+        prompt_names, resource_uris = set(prompts), set(resources)
+        return self.model_copy(
+            update={
+                "prompts": [
+                    item
+                    for item in self.prompts
+                    if "*" in prompt_names or item.name in prompt_names
+                ],
+                "resources": [
+                    item
+                    for item in self.resources
+                    if "*" in resource_uris or item.uri in resource_uris
+                ],
+            },
+            deep=True,
+        )
 
 
 class PromptMessage(Model):

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import typing
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 from urllib.parse import urlsplit
@@ -234,6 +235,9 @@ def validate_reference(value: str) -> None:
 
 
 class Settings(Model):
+    configuration_contract: typing.ClassVar[str] = (
+        "e27b17f60c6866b249b37b466f640e1123e34cfe37c0fc41eb7103c36cbd58e3"
+    )
     servers: dict[str, ServerConfig] = pydantic.Field(default_factory=dict)
     roots: list[Root] = pydantic.Field(
         default_factory=list, exclude_if=lambda value: not value

@@ -20,6 +20,7 @@ async def get_config(
     *,
     model: typing.Optional[type[pydantic.BaseModel]] = None,
     contract_digest: typing.Optional[str] = None,
+    normalization_version: typing.Optional[str] = None,
 ) -> pydantic.JsonValue:
     """Record a dotted-path lookup, preserving old values during activity replay.
 
@@ -27,10 +28,18 @@ async def get_config(
     value is recorded. An optional owner model validates and normalizes inside
     the activity before persistence. Missing values use the supplied default;
     pass {} to apply model defaults. Never use this API for secrets.
+
+    Schema digests do not identify Python validator behavior. Owners can supply
+    a stable contract_digest and must change normalization_version when recorded
+    normalized values become incompatible. Omitting it preserves legacy inputs.
     """
     project.validate_name(name)
-    if model is None and contract_digest is not None:
-        raise ValueError("contract_digest requires a model")
+    if model is None and (
+        contract_digest is not None or normalization_version is not None
+    ):
+        raise ValueError("configuration validation contracts require a model")
+    if normalization_version is not None and not normalization_version.strip():
+        raise ValueError("normalization_version must not be blank")
     fallback = project.json_value(default)
     configuration = ctx.project.configuration
     operation = models.StepOperation(
@@ -48,6 +57,8 @@ async def get_config(
             "schema_digest": contract_digest
             or hashlib.sha256(schema.encode()).hexdigest(),
         }
+        if normalization_version is not None:
+            inputs["normalization_version"] = normalization_version
         if fallback != {}:
             encoded = json.dumps(
                 fallback, sort_keys=True, separators=(",", ":"), allow_nan=False

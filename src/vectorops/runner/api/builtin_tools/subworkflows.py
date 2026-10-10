@@ -71,7 +71,7 @@ class SubworkflowTool(tools.WorkflowToolBinding):
                 raise tools.ToolExecutionError(
                     f"workflow is not available: {parsed.reference}"
                 )
-            descriptor.validate_input(parsed.input)
+            descriptor.preflight_input(parsed.input)
             return parsed
         except (pydantic.ValidationError, ValidationError) as exc:
             raise tools.ToolExecutionError(str(exc)) from exc

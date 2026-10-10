@@ -249,6 +249,20 @@ class MCPRuntime:
                     raise
             return connection
 
+    async def discover_current(
+        self, name: str, server: models.ServerConfig
+    ) -> models.Catalog:
+        """Snapshot current pool overrides; existing catalogs continue using pinned discovery."""
+        effective = self.pool.effective(server) if self.pool is not None else server
+        return await self.discover(name, effective)
+
+    async def discover_current_content(
+        self, name: str, server: models.ServerConfig
+    ) -> content.ContentCatalog:
+        """Snapshot content using current configuration without rebinding recorded catalogs."""
+        effective = self.pool.effective(server) if self.pool is not None else server
+        return await self.discover_content(name, effective)
+
     async def discover(self, name: str, server: models.ServerConfig) -> models.Catalog:
         try:
             connection = await self._connection(server)

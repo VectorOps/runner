@@ -1,14 +1,14 @@
 """Workflow-side MCP discovery; completed catalog reads replay without server I/O."""
 
 from collections.abc import Sequence
-from typing import Final, Literal, Optional
+from typing import Literal, Optional
 
 import pydantic
 
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.tool_registry import ToolConfig, register_tool
-from vectorops.runner.api.llm.tools import ToolBinding
+from vectorops.runner.api.tool_contracts import ToolBinding
 from vectorops.runner.mcp import models
 from vectorops.runner.mcp import content, content_binding
 from vectorops.runner.mcp.binding import MCPTool
@@ -29,11 +29,6 @@ async def configured_tools(config: ToolSelectionConfig) -> list[ToolBinding]:
     return await discover(config.selections, component=config.component)
 
 
-_SETTINGS_CONTRACT: Final = (
-    "e27b17f60c6866b249b37b466f640e1123e34cfe37c0fc41eb7103c36cbd58e3"
-)
-
-
 async def discover(
     selections: Sequence[Selection], *, component: str = "mcp"
 ) -> list[ToolBinding]:
@@ -51,7 +46,7 @@ async def discover(
             component,
             {},
             model=models.Settings,
-            contract_digest=_SETTINGS_CONTRACT,
+            contract_digest=models.Settings.configuration_contract,
         )
     )
     bindings: list[ToolBinding] = []
@@ -103,10 +98,7 @@ async def _discover(
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         if ctx.mcp is None:
             raise MCPError("MCP discovery requires an execution-owned runtime")
-        effective = (
-            ctx.mcp.pool.effective(server) if ctx.mcp.pool is not None else server
-        )
-        return (await ctx.mcp.discover(name, effective)).model_dump(mode="json")
+        return (await ctx.mcp.discover_current(name, server)).model_dump(mode="json")
 
     value = await call.run(
         input={"server_name": name, "server": server.model_dump(mode="json")},
@@ -161,38 +153,22 @@ async def discover_content(
     Empty selections grant no access. This does not change existing tool discovery
     or its recorded contracts. Catalog limits reuse max_tools as a total item cap.
     """
-    prompt_names, resource_uris = set(prompts), set(resources)
     settings = models.Settings.model_validate(
         await get_config(
             c.workflow_context(),
             component,
             {},
             model=models.Settings,
-            contract_digest=_SETTINGS_CONTRACT,
+            contract_digest=models.Settings.configuration_contract,
         )
     )
     config = settings.servers.get(server)
     if config is None:
         raise MCPError(f"MCP server is not configured: {server}")
-    if not prompt_names and not resource_uris:
+    if not prompts and not resources:
         return Content(content.ContentCatalog(server_name=server, server=config))
     catalog = await _content_catalog(server, config)
-    return Content(
-        catalog.model_copy(
-            update={
-                "prompts": [
-                    item
-                    for item in catalog.prompts
-                    if "*" in prompt_names or item.name in prompt_names
-                ],
-                "resources": [
-                    item
-                    for item in catalog.resources
-                    if "*" in resource_uris or item.uri in resource_uris
-                ],
-            }
-        )
-    )
+    return Content(catalog.select(prompts=prompts, resources=resources))
 
 
 @c.activity_wrapper(name="catalog", kind="mcp.content_catalog", version=1)
@@ -202,10 +178,9 @@ async def _content_catalog(
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
         if ctx.mcp is None:
             raise MCPError("MCP discovery requires an execution-owned runtime")
-        effective = (
-            ctx.mcp.pool.effective(server) if ctx.mcp.pool is not None else server
+        return (await ctx.mcp.discover_current_content(name, server)).model_dump(
+            mode="json"
         )
-        return (await ctx.mcp.discover_content(name, effective)).model_dump(mode="json")
 
     result = await call.run(
         input={"server_name": name, "server": server.model_dump(mode="json")},
@@ -260,7 +235,7 @@ async def servers(*, component: str = "mcp") -> list[str]:
             component,
             {},
             model=models.Settings,
-            contract_digest=_SETTINGS_CONTRACT,
+            contract_digest=models.Settings.configuration_contract,
         )
     )
     return sorted(settings.servers)

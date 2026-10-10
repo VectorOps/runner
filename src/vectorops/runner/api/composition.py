@@ -374,16 +374,9 @@ class WorkflowDefinition(typing.Generic[P, T]):
             kind=self.kind,
             version=self.version,
         )
-        source = inspect.getsourcefile(self.func)
-        root = context.project.workflows_path.resolve()
-        if source is not None and Path(source).resolve().is_relative_to(root):
-            target = Path(source).resolve().relative_to(root).with_suffix("").as_posix()
-        else:
-            if self.func.__module__.startswith("_runner_workflow_"):
-                raise ValueError("workflow source must remain inside the workspace")
-            target = f"python:{self.func.__module__}"
+        reference = context.project.resolver.reference_for(self.func)
         handle = await context.spawn_workflow(
-            f"{target}:{self.func.__qualname__}",
+            reference,
             input=configuration.input,
             kind=self.kind,
             version=self.version,

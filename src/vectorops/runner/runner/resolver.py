@@ -48,6 +48,16 @@ class WorkflowResolver:
             self._resolve, WorkflowReference.parse(reference)
         )
 
+    def reference_for(self, func: Callable[..., object]) -> str:
+        """Use loader-owned identity without I/O or a replay-visible scheduling point."""
+        if func.__module__.startswith("_runner_workflow_"):
+            target = func.__globals__.get("__runner_source_reference__")
+            if not isinstance(target, str):
+                raise ValueError("workflow source must remain inside the workspace")
+        else:
+            target = f"python:{func.__module__}"
+        return str(WorkflowReference.parse(f"{target}:{func.__qualname__}"))
+
     async def describe(self, reference: str) -> definitions.WorkflowDescriptor:
         return await asyncio.to_thread(
             self._describe, WorkflowReference.parse(reference)
@@ -154,6 +164,9 @@ class WorkflowResolver:
         if spec is None:
             raise ImportError(f"cannot load workflow file: {path}")
         module = importlib.util.module_from_spec(spec)
+        module.__dict__["__runner_source_reference__"] = (
+            path.relative_to(self.root.resolve()).with_suffix("").as_posix()
+        )
         module.__dict__["__runner_contract_module__"] = (
             path.relative_to(self.root.resolve())
             .with_suffix("")

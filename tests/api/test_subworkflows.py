@@ -107,6 +107,9 @@ async def test_rejects_unavailable_workflow_and_bad_input(
     workspace: Path, history: MemoryHistory, input: dict[str, pydantic.JsonValue]
 ) -> None:
     prepare(workspace)
+    (workspace / "workflows/parent.py").write_text(
+        PARENT.replace("value: int", "value")
+    )
     with patch.object(
         tool_policy.ToolPolicy,
         "evaluate",

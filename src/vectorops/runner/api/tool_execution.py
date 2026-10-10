@@ -7,9 +7,9 @@ import typing
 import connect
 import pydantic
 
-from vectorops.runner import diagnostics, tool_policy
+from vectorops.runner import diagnostics
 from vectorops.runner.api import composition as c
-from vectorops.runner.api import tool_contracts
+from vectorops.runner.api import tool_contracts, tool_approval
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
@@ -209,74 +209,15 @@ async def _gated_tool(
     digest = _digest(definition.model_dump(mode="json")) if definition else None
 
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-        error: typing.Optional[Exception] = None
-        decision = tool_policy.Decision(action="require_confirmation")
-        existing = (
-            await ctx.mailbox.existing(ctx.step_id) if ctx.mailbox is not None else None
+        error = await tool_approval.authorize(
+            project,
+            ctx,
+            binding,
+            request,
+            definition,
+            digest,
+            instance,
         )
-        try:
-            if binding is None:
-                raise ToolExecutionError(f"unknown tool: {request.name}")
-            if definition is None or definition.name != request.name:
-                raise ToolExecutionError(f"tool binding does not match: {request.name}")
-            binding.validate(request.arguments)
-            if existing is None:
-                decision = await project.tool_policy.evaluate(
-                    project.configuration.get_validated(
-                        "tools.approval", tool_policy.ApprovalSettings
-                    ),
-                    tool_policy.ToolCall(
-                        name=request.name,
-                        version=binding.version,
-                        arguments=request.arguments,
-                        definition_digest=digest or "",
-                        execution_id=ctx.execution_id,
-                        workflow_id=ctx.workflow_id,
-                        step_id=ctx.step_id,
-                    ),
-                )
-            if decision.action == "deny":
-                raise ToolExecutionError(
-                    decision.reason or "Tool call denied by policy"
-                )
-        except Exception as exc:
-            error = exc
-
-        if (
-            error is None
-            and existing is None
-            and decision.action == "require_confirmation"
-            and ctx.mailbox is not None
-            and await ctx.mailbox.tool_approved(ctx.workflow_id, request.name)
-        ):
-            decision = tool_policy.Decision(action="allow")
-
-        if error is None and decision.action == "require_confirmation":
-            if ctx.mailbox is None:
-                raise RuntimeError(
-                    "tool approval requires a persistent workflow runner"
-                )
-            approval = binding.approval if binding is not None else None
-            if existing is not None:
-                spec = existing.specification()
-            else:
-                assert binding is not None and definition is not None
-                spec = ToolApprovalRequest(
-                    instance=instance,
-                    call=request,
-                    tool=definition,
-                    tool_version=binding.version,
-                ).input_spec(approval.channel if approval else "tool.approval")
-            answer = await ctx.mailbox.wait(ctx.step_id, spec)
-            try:
-                response = ToolApprovalResponse.model_validate(answer)
-                if not response.approved:
-                    raise ToolExecutionError(
-                        response.reason or "Tool call rejected by host"
-                    )
-            except Exception as exc:
-                error = exc
-
         try:
             if error is not None:
                 raise error
