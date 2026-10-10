@@ -82,7 +82,12 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
         references = [
             item.descriptor.reference for item in [*page.workflows, *rest.workflows]
         ]
-        assert references == ["flow:approval", "flow:child", "flow:main"]
+        assert references == [
+            "builtin:chat",
+            "flow:approval",
+            "flow:child",
+            "flow:main",
+        ]
         assert (await connection.describe_workflow("flow:plain")).name == "plain"
         (tmp_path / "workflows/generated.py").write_text(
             'from vectorops.runner.api.composition import workflow\n@workflow(description="New")\nasync def main(ctx): return None\n'
@@ -274,7 +279,7 @@ async def test_cli_over_tcp_and_shell_exit_does_not_stop(
                 namespace=cli.Arguments(),
             )
             await cli.dispatch(args)
-            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 3
+            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 4
             async with await client.RunnerClient.tcp(port, token) as connection:
                 accepted = await connection.start(
                     p.Start(reference="flow:main", idempotency_key="start")

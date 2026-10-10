@@ -28,11 +28,68 @@ uv run vops-runner --project /path/to/workspace start example:workflow
 uv run vops-runner --project /path/to/workspace resume example-run
 ```
 
-`--project` precedes the command and defaults to the current directory. Workspace paths follow `config.toml`, including workflow and data directory overrides. `start` takes an explicit `path:callable` reference relative to the workflow directory, without `.py`, or `python:package.module:callable` for a library workflow. There is no callable default or `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
+`--project` precedes the command and defaults to the current directory. Workspace paths follow `config.toml`, including workflow and data directory overrides. `start` accepts `builtin:name` for a registered built-in, an explicit `path:callable` reference relative to the workflow directory without `.py`, or `python:package.module:callable` for a library workflow. Local and library references require a callable; built-ins identify their entry point by name. There is no `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
 
 `resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
 
 This foreground CLI owns the workspace writer lock. For concurrent independent executions in one workspace, run a [daemon](daemon.md) and use its [execution-oriented control API](../reference/control-protocol.md#concurrent-execution-lifecycle) instead of launching competing foreground writers.
+
+## Built-in chat
+
+`builtin:chat` needs no workspace Python file. It requests a user message, runs
+the LLM, and repeats with the same conversation history until stopped. It exposes
+no tools or subagents. Text and images use the existing typed chat input contract.
+
+Configure models in `<workspace>/config.toml`, using model IDs supported by your
+provider and [configured credentials](daemon.md):
+
+```toml
+[components.workflows.defaults]
+strong_model = "openai/gpt-5"
+medium_model = "openai/gpt-5-mini"
+weak_model = "openai/gpt-5-nano"
+thinking_level = "high"
+```
+
+These fields are optional. An unset tier inherits `components.llm.model`; an unset
+thinking level inherits `components.llm.reasoning`. At least the selected tier's
+model or the fallback model must be configured before generation. Thinking levels
+are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; provider/model support
+still applies. Shared workflow defaults are snapshotted at invocation and replayed
+on resume. Other LLM options retain their existing live configuration behavior.
+
+Start a daemon in one terminal:
+
+```bash
+uv run vops-runner --project /path/to/workspace daemon serve --port 8765
+```
+
+From another terminal, discover and start chat:
+
+```bash
+uv run vops-runner client --port 8765 workflow show builtin:chat
+uv run vops-runner client --port 8765 execution start builtin:chat
+```
+
+The workflow argument `model_tier` defaults to `strong`; pass
+`--input '{"model_tier":"weak"}'` to select `weak` (or `medium`). Use the returned
+execution ID to list the pending request, then answer its request ID:
+
+```bash
+uv run vops-runner client --port 8765 input list EXECUTION_ID
+uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value '{"content":[{"type":"text","text":"Hello"}]}'
+```
+
+Use `execution watch EXECUTION_ID` in a separate client before sending input to
+observe live response events. Each turn creates a new request ID. End the loop
+with `execution stop EXECUTION_ID`. The foreground command
+`uv run vops-runner --project /path/to/workspace start builtin:chat` also resolves
+the workflow, but it does not provide a stdin chat interface; use the daemon/client
+flow for interactive conversations.
+
+Built-in references remain `builtin:name` in descriptors and execution history.
+Only explicitly registered names are accepted; unknown names do not fall back to
+files or arbitrary Python imports. `builtin:chat` is the first registered workflow.
 
 ## Connect to an existing runner
 
@@ -58,7 +115,7 @@ unencrypted network access.
 | Command after `client --port PORT` | Behavior |
 | --- | --- |
 | `info` | Show runner identity and workspace |
-| `workflow list` | Discover decorated definitions with active execution, pending-input, and authentication-wait counts |
+| `workflow list` | Discover built-ins and local decorated definitions with active execution, pending-input, and authentication-wait counts |
 | `workflow show REFERENCE` | Show descriptor and input schema; explicit undecorated/library references are supported |
 | `execution start REFERENCE --input JSON` | Start a background execution; `--input-file FILE` is an alternative |
 | `execution list [--active]` | Show root reference, lifecycle status, live ownership, and pending waits |

@@ -62,7 +62,8 @@ def parser() -> argparse.ArgumentParser:
     )
     start = commands.add_parser("start", help="start a new workflow in the foreground")
     start.add_argument(
-        "workflow", help="workflow reference: path:callable or python:module:callable"
+        "workflow",
+        help="workflow reference: builtin:name, path:callable, or python:module:callable",
     )
     start.add_argument(
         "--input",

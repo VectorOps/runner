@@ -21,6 +21,7 @@ import pydantic
 from vectorops.runner.api import composition, definitions
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner import catalog
+from vectorops.runner.workflows import registry
 
 WorkflowCallable: typing.TypeAlias = Callable[..., Awaitable[pydantic.JsonValue]]
 WorkflowEntryPoint: typing.TypeAlias = typing.Union[
@@ -55,13 +56,19 @@ class WorkflowResolver:
     async def discover(
         self, *, after: typing.Optional[str] = None, limit: int = 100
     ) -> catalog.WorkflowCatalog:
-        """Enumerate local decorated definitions, isolating invalid files and callables."""
+        """Enumerate built-ins and local definitions, isolating invalid sources."""
         if not 1 <= limit <= 500:
             raise ValueError("catalog limit must be between 1 and 500")
 
         def scan() -> catalog.WorkflowCatalog:
             result = catalog.WorkflowCatalog()
             with self._lock:
+                for name in registry.WORKFLOWS:
+                    target = f"builtin:{name}"
+                    if after is None or target > after:
+                        result.workflows.append(
+                            self._describe(WorkflowReference.parse(target))
+                        )
                 for path in sorted(self.root.rglob("*.py")):
                     relative = path.relative_to(self.root)
                     if any(
@@ -110,7 +117,7 @@ class WorkflowResolver:
                     self._sources.clear()
                 else:
                     parsed = WorkflowReference.parse(reference)
-                    if not parsed.library:
+                    if not parsed.library and not parsed.builtin:
                         self._sources.pop(self._path(parsed), None)
 
         await asyncio.to_thread(clear)
@@ -164,6 +171,8 @@ class WorkflowResolver:
 
     def _resolve(self, reference: WorkflowReference) -> WorkflowEntryPoint:
         with self._lock:
+            if reference.builtin:
+                return registry.resolve(reference.source)
             module = (
                 importlib.import_module(reference.source)
                 if reference.library
@@ -173,7 +182,11 @@ class WorkflowResolver:
 
     def _describe(self, reference: WorkflowReference) -> definitions.WorkflowDescriptor:
         with self._lock:
-            source = None if reference.library else self._source(reference)
+            source = (
+                None
+                if reference.library or reference.builtin
+                else self._source(reference)
+            )
             if source is not None and str(reference) in source.descriptors:
                 return source.descriptors[str(reference)].model_copy(deep=True)
             entry = self._resolve(reference)
