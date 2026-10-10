@@ -1,7 +1,7 @@
 """Workflow-local conversations reconstructed by deterministic activity replay."""
 
-from collections.abc import AsyncGenerator, Iterator, Sequence
-from contextlib import aclosing, contextmanager
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 import asyncio
 import hashlib
 import json
@@ -13,8 +13,7 @@ import pydantic
 
 from vectorops.runner.api import composition as c
 from vectorops.runner.api.llm import models, provider, tools as tool_api
-from vectorops.runner.api.llm import retry as retry_api
-from vectorops.runner.api.llm import observability
+from vectorops.runner.api.llm import invocation
 from vectorops.runner.api.llm import compaction as compaction_api
 from vectorops.runner.api.llm.configuration import (
     explicit_options,
@@ -22,7 +21,7 @@ from vectorops.runner.api.llm.configuration import (
 )
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
-from vectorops.runner.runner.streaming import StreamItem
+from vectorops.runner.runner import streaming
 
 
 def _encoded(value: pydantic.JsonValue) -> str:
@@ -97,9 +96,7 @@ class LLM:
 
     async def _configure(self) -> models.Configuration:
         resolved = await resolve_configuration(self._overrides)
-        self._settings = models.Settings.model_validate(
-            resolved.model_dump(exclude={"compaction", "max_rounds", "retry"})
-        )
+        self._settings = resolved.generation_settings()
         self._compaction = resolved.compaction
         self._retry = resolved.retry
         return resolved
@@ -192,103 +189,19 @@ class LLM:
         call: c.ActivityCall,
         request: connect.GenerateRequest,
         *,
-        compaction_request: Optional[connect.GenerateRequest] = None,
-        cut: int = 0,
         settings: Optional[models.Settings] = None,
-        measured: bool = False,
-        summary: bool = False,
-        prefix_tokens: Optional[int] = None,
-    ) -> compaction_api.Generation:
+        finalize: Optional[invocation.Finalizer] = None,
+    ) -> pydantic.JsonValue:
         assert self._settings is not None
         selected = self._settings if settings is None else settings
-
-        async def invoke(
-            ctx: ActivityExecutionContext,
-        ) -> AsyncGenerator[StreamItem, None]:
-            observation = observability.Observation(selected, request)
-            async with aclosing(
-                retry_api.stream(
-                    self._backend,
-                    ctx,
-                    selected,
-                    request,
-                    self._retry,
-                    observation,
-                )
-            ) as stream:
-                async for item in stream:
-                    if summary and isinstance(item, c.ActivityFinal):
-                        summary_response = connect.AssistantMessage.model_validate(
-                            item.value
-                        )
-                        self._summary_text(summary_response)
-                        assert self._settings is not None
-                        size = compaction_api.summary_tokens(
-                            summary_response, selected, self._settings
-                        )
-                        if (
-                            size is not None
-                            and prefix_tokens is not None
-                            and size >= prefix_tokens
-                        ):
-                            raise models.LLMResponseError(
-                                "compaction summary did not reduce the selected prefix"
-                            )
-                    if (
-                        isinstance(item, c.ActivityFinal)
-                        and compaction_request is not None
-                    ):
-                        response = connect.AssistantMessage.model_validate(item.value)
-                        text = "".join(
-                            block.text
-                            for block in response.content
-                            if block.type == "text"
-                        )
-                        if text.strip() and not any(
-                            block.type == "tool_call" for block in response.content
-                        ):
-                            after = compaction_request.model_copy(
-                                update={
-                                    "messages": [
-                                        connect.UserMessage(
-                                            content="Summary of earlier conversation:\n"
-                                            + text
-                                        ),
-                                        *compaction_request.messages[cut:],
-                                    ]
-                                }
-                            )
-                            assert item.metrics is not None
-                            metric = observability.Metrics.model_validate(
-                                item.metrics["llm"]
-                            )
-                            metric.compaction = observability.compaction_savings(
-                                compaction_request, after
-                            )
-                            item = c.ActivityFinal(
-                                item.value, {"llm": metric.model_dump(mode="json")}
-                            )
-                    if measured and isinstance(item, c.ActivityFinal):
-                        assert self._compaction is not None
-                        generation = compaction_api.Generation(
-                            response=connect.AssistantMessage.model_validate(
-                                item.value
-                            ),
-                            message_id=ctx.step_id,
-                            context_window=compaction_api.context_window(
-                                selected, self._compaction
-                            ),
-                        )
-                        item = c.ActivityFinal(
-                            generation.model_dump(mode="json"), item.metrics
-                        )
-                    yield item
-
-        result = await call.stream(input=self._input(request, selected), invoke=invoke)
-        if measured:
-            return compaction_api.Generation.model_validate(result)
-        return compaction_api.Generation(
-            response=connect.AssistantMessage.model_validate(result), message_id=""
+        return await invocation.invoke(
+            call,
+            self._input(request, selected),
+            self._backend,
+            selected,
+            request,
+            self._retry,
+            finalize,
         )
 
     def _account(self, response: connect.AssistantMessage) -> None:
@@ -298,7 +211,9 @@ class LLM:
     async def _generate(
         self, call: c.ActivityCall, definitions: Sequence[connect.ToolSpec]
     ) -> connect.AssistantMessage:
-        response = (await self._invoke(call, self._request(definitions))).response
+        response = connect.AssistantMessage.model_validate(
+            await self._invoke(call, self._request(definitions))
+        )
         self._messages.append(response.model_copy(deep=True))
         self._account(response)
         return response
@@ -325,7 +240,23 @@ class LLM:
     async def _generate_measured(
         self, call: c.ActivityCall, definitions: Sequence[connect.ToolSpec]
     ) -> connect.AssistantMessage:
-        generation = await self._invoke(call, self._request(definitions), measured=True)
+        def measured(
+            item: streaming.ActivityFinal[pydantic.JsonValue],
+            ctx: ActivityExecutionContext,
+        ) -> streaming.ActivityFinal[pydantic.JsonValue]:
+            assert self._settings is not None and self._compaction is not None
+            result = models.Generation(
+                response=connect.AssistantMessage.model_validate(item.value),
+                message_id=ctx.step_id,
+                context_window=compaction_api.context_window(
+                    self._settings, self._compaction
+                ),
+            )
+            return streaming.ActivityFinal(result.model_dump(mode="json"), item.metrics)
+
+        generation = models.Generation.model_validate(
+            await self._invoke(call, self._request(definitions), finalize=measured)
+        )
         self._compaction_history.record(
             generation, len(self._messages), self._signature(definitions)
         )
@@ -344,19 +275,15 @@ class LLM:
         try:
             response = await self._generate_measured(definitions)
         except ActivityError as exc:
-            if (
-                exc.error.type != "ContextLengthError"
-                or not self._compaction_history.checkpoints
-            ):
+            anchor = self._compaction_history.latest_anchor()
+            if exc.error.type != "ContextLengthError" or anchor is None:
                 raise
-            anchor = self._compaction_history.checkpoints[-1]
-            if not await self._compact_at(anchor.message_id, definitions, force=True):
+            if not await self._compact_at(anchor, definitions, force=True):
                 raise
             response = await self._generate_measured(definitions)
-        if self._compaction_history.checkpoints:
-            anchor = self._compaction_history.checkpoints[-1]
-            if anchor.index == len(self._messages) - 1:
-                await self._compact_at(anchor.message_id, definitions)
+        anchor = self._compaction_history.latest_anchor(len(self._messages) - 1)
+        if anchor is not None:
+            await self._compact_at(anchor, definitions)
         return response
 
     async def generate(
@@ -446,25 +373,9 @@ class LLM:
         policy = self._compaction
         if policy is None or policy.max_context_characters is None:
             return
-        transcript: list[pydantic.JsonValue] = [
-            message.model_dump(mode="json") for message in self._messages
-        ]
-        if len(_encoded(transcript)) <= policy.max_context_characters:
-            return
-        limit = len(self._messages) - policy.keep_recent_messages
-        pending: set[str] = set()
-        boundaries: list[int] = []
-        for index, message in enumerate(self._messages, start=1):
-            if message.role == "assistant":
-                pending.update(
-                    block.id for block in message.content if block.type == "tool_call"
-                )
-            elif message.role == "tool":
-                pending.discard(message.tool_call_id)
-            if not pending and index <= limit:
-                boundaries.append(index)
-        if boundaries:
-            await self._compact(max(boundaries), policy.instruction, definitions)
+        cut = compaction_api.legacy_cut(self._messages, policy)
+        if cut is not None:
+            await self._compact(cut, policy.instruction, definitions)
 
     @c.activity_wrapper(kind="llm.compact", version=1)
     async def _compact(
@@ -475,38 +386,23 @@ class LLM:
         definitions: Sequence[connect.ToolSpec],
     ) -> None:
         assert self._settings is not None
-        prefix: list[pydantic.JsonValue] = [
-            message.model_dump(mode="json") for message in self._messages[:cut]
-        ]
-        request = connect.GenerateRequest(
-            system_prompt=instruction,
-            messages=[connect.UserMessage(content=_encoded(prefix))],
-            temperature=self._settings.temperature,
-            max_output_tokens=self._settings.max_output_tokens,
-            reasoning=self._settings.reasoning,
+        summary = compaction_api.legacy_summary(
+            self._messages,
+            cut,
+            instruction,
+            self._settings,
+            self._request(definitions),
         )
-        response = (
+        response = connect.AssistantMessage.model_validate(
             await self._invoke(
-                call, request, compaction_request=self._request(definitions), cut=cut
+                call,
+                summary.request,
+                finalize=summary.finalize,
             )
-        ).response
-        text = self._summary_text(response)
-        self._messages = [
-            connect.UserMessage(content="Summary of earlier conversation:\n" + text),
-            *self._messages[cut:],
-        ]
+        )
+        text = compaction_api.summary_text(response)
+        self._messages = compaction_api.replacement(self._messages, cut, text)
         self._account(response)
-
-    @staticmethod
-    def _summary_text(response: connect.AssistantMessage) -> str:
-        text = "".join(block.text for block in response.content if block.type == "text")
-        if not text.strip() or any(
-            block.type == "tool_call" for block in response.content
-        ):
-            raise models.LLMResponseError(
-                "compaction requires a nonempty tool-free summary"
-            )
-        return text
 
     async def _compact_at(
         self,
@@ -537,57 +433,25 @@ class LLM:
     ) -> None:
         """Record one summary update, then atomically replace only its selected prefix."""
         assert self._settings is not None and self._compaction is not None
-        policy = self._compaction
-        values = self._settings.model_dump()
-        values["max_output_tokens"] = policy.summary_max_output_tokens
-        values.update(policy.summary_settings.model_dump(exclude_unset=True))
-        if values["max_output_tokens"] is None:
-            values["max_output_tokens"] = policy.summary_max_output_tokens
-        settings = models.Settings.model_validate(values)
-        start = int(self._compaction_history.has_summary)
-        previous: pydantic.JsonValue = None
-        if start:
-            previous = self._messages[0].model_dump(mode="json")
-        transcript: list[pydantic.JsonValue] = [
-            message.model_dump(mode="json")
-            for message in self._messages[start : selection.cut]
-        ]
-        request = connect.GenerateRequest(
-            system_prompt=policy.instruction
-            + (
-                "\nUpdate the previous summary with the transcript. Preserve task intent, "
-                "constraints, decisions, and unfinished work; remove superseded details. "
-                "Use sections: Goal, Constraints, Progress, Decisions, Next steps, Critical context."
-            ),
-            messages=[
-                connect.UserMessage(
-                    content=_encoded(
-                        {"previous_summary": previous, "transcript": transcript}
-                    )
-                )
-            ],
-            temperature=settings.temperature,
-            max_output_tokens=settings.max_output_tokens,
-            reasoning=settings.reasoning,
+        summary = self._compaction_history.prepare(
+            self._messages,
+            selection,
+            self._compaction,
+            self._settings,
+            self._request(definitions, snapshot=True),
         )
-        response = (
+        response = connect.AssistantMessage.model_validate(
             await self._invoke(
                 call,
-                request,
-                settings=settings,
-                summary=True,
-                prefix_tokens=selection.prefix_tokens,
-                compaction_request=self._request(definitions, snapshot=True),
-                cut=selection.cut,
+                summary.request,
+                settings=summary.settings,
+                finalize=summary.finalize,
             )
-        ).response
-        text = self._summary_text(response)
+        )
+        text = compaction_api.summary_text(response)
         summary_tokens = compaction_api.summary_tokens(
-            response, settings, self._settings
+            response, summary.settings, self._settings
         )
         self._compaction_history.commit(selection, summary_tokens)
-        self._messages = [
-            connect.UserMessage(content="Summary of earlier conversation:\n" + text),
-            *self._messages[selection.cut :],
-        ]
+        self._messages = compaction_api.replacement(self._messages, selection.cut, text)
         self._account(response)

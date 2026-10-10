@@ -8,7 +8,7 @@ from typing import Literal, Optional
 import connect
 import pydantic
 
-from vectorops.runner.api.llm import models
+from vectorops.runner.api.llm import models, snapshots
 
 
 class CompactionSavings(pydantic.BaseModel):
@@ -47,27 +47,6 @@ def _tokens(value: pydantic.JsonValue) -> int:
     )
 
 
-def _content(value: pydantic.JsonValue) -> Optional[pydantic.JsonValue]:
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, list):
-        return []
-    blocks: list[pydantic.JsonValue] = []
-    for block in value:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "image":
-            return None
-        blocks.append(
-            {
-                key: block[key]
-                for key in ("type", "text", "name", "id", "arguments", "arguments_text")
-                if key in block
-            }
-        )
-    return blocks
-
-
 def input_tokens(request: connect.GenerateRequest) -> Optional[int]:
     """Estimate text and schema overhead without counting provider metadata as context.
 
@@ -76,7 +55,7 @@ def input_tokens(request: connect.GenerateRequest) -> Optional[int]:
     """
     messages: list[pydantic.JsonValue] = []
     for message in request.messages:
-        content = _content(message.model_dump(mode="json")["content"])
+        content = snapshots.content(message.model_dump(mode="json")["content"])
         if content is None:
             return None
         entry: dict[str, pydantic.JsonValue] = {
@@ -104,30 +83,6 @@ def compaction_savings(
         after_input_tokens_estimate=last,
         saved_tokens_estimate=None if first is None or last is None else first - last,
     )
-
-
-def _usage(value: pydantic.JsonValue) -> Optional[connect.Usage]:
-    if not isinstance(value, dict):
-        return None
-    try:
-        usage = connect.Usage.model_validate(
-            {
-                key: value[key]
-                for key in (
-                    "input_tokens",
-                    "output_tokens",
-                    "reasoning_tokens",
-                    "cache_read_tokens",
-                    "cache_write_tokens",
-                    "total_tokens",
-                    "completeness",
-                )
-                if key in value
-            }
-        )
-    except pydantic.ValidationError:
-        return None
-    return usage if usage.completeness != "none" else None
 
 
 def _cost(model: connect.ModelSpec, usage: connect.Usage) -> Optional[Decimal]:
@@ -181,11 +136,11 @@ class Observation:
         result = self.base.model_copy(deep=True)
         result.attempt, result.retries = attempt, attempt - 1
         if isinstance(value, dict):
-            content = _content(value.get("content", []))
+            content = snapshots.content(value.get("content", []))
             result.output_tokens_estimate = (
                 None if content is None else (_tokens(content) if content else 0)
             )
-            result.provider_usage = _usage(value.get("usage"))
+            result.provider_usage = snapshots.usage(value.get("usage"))
         output = result.output_tokens_estimate
         if result.provider_usage is not None:
             output = result.provider_usage.output_tokens

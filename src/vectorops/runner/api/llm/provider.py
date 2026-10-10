@@ -5,10 +5,9 @@ from contextlib import aclosing
 from typing import Optional, Protocol
 
 import connect
-import pydantic
 
 from vectorops.runner.api import composition as c
-from vectorops.runner.api.llm import deadlines
+from vectorops.runner.api.llm import deadlines, snapshots
 from vectorops.runner.api.llm.models import LLMResponseError, Settings
 from vectorops.runner.authentication import models as auth_models
 from vectorops.runner.authentication.service import AuthenticationService
@@ -98,8 +97,7 @@ class ConnectProvider:
             auth=_Authentication(auth),
             idempotency_key=context.step_id,
         )
-        blocks: dict[int, dict[str, pydantic.JsonValue]] = {}
-        snapshot: dict[str, pydantic.JsonValue] = {"content": []}
+        snapshot = snapshots.Accumulator()
         async with self._client_factory() as client:
             stream = client.stream(
                 settings.model, request, provider=settings.provider, options=options
@@ -115,63 +113,5 @@ class ConnectProvider:
                     validate_response(event.response)
                     yield c.final(event.response.model_dump(mode="json"))
                     return
-                if event.type == "response_start":
-                    snapshot.update(
-                        provider=event.provider,
-                        model=event.model,
-                        response_id=event.response_id,
-                    )
-                elif event.type in ("text_start", "reasoning_start"):
-                    blocks[event.index] = {
-                        "type": "text" if event.type == "text_start" else "reasoning",
-                        "text": "",
-                    }
-                elif event.type in ("text_delta", "reasoning_delta"):
-                    block = blocks.setdefault(
-                        event.index,
-                        {
-                            "type": (
-                                "text" if event.type == "text_delta" else "reasoning"
-                            ),
-                            "text": "",
-                        },
-                    )
-                    text = block["text"]
-                    if not isinstance(text, str):
-                        raise LLMResponseError("invalid streaming text state")
-                    block["text"] = text + event.delta
-                elif event.type == "text_end":
-                    blocks[event.index] = {"type": "text", "text": event.text}
-                elif event.type == "reasoning_end":
-                    blocks[event.index] = {
-                        "type": "reasoning",
-                        "text": event.text,
-                        "signature": event.signature,
-                        "redacted": event.redacted,
-                    }
-                elif event.type == "tool_call_start":
-                    blocks[event.index] = {
-                        "type": "tool_call",
-                        "id": event.id,
-                        "name": event.name,
-                        "arguments_text": "",
-                    }
-                elif event.type == "tool_call_delta":
-                    block = blocks.setdefault(
-                        event.index,
-                        {
-                            "type": "tool_call",
-                            "arguments_text": "",
-                        },
-                    )
-                    arguments = block["arguments_text"]
-                    if not isinstance(arguments, str):
-                        raise LLMResponseError("invalid streaming tool state")
-                    block["arguments_text"] = arguments + event.delta
-                elif event.type == "tool_call_end":
-                    blocks[event.index] = event.tool_call.model_dump(mode="json")
-                elif event.type == "usage":
-                    snapshot["usage"] = event.usage.model_dump(mode="json")
-                snapshot["content"] = [dict(blocks[index]) for index in sorted(blocks)]
-                yield c.delta(dict(snapshot))
+                yield c.delta(snapshot.update(event))
         raise LLMResponseError("LLM stream ended without a terminal response")

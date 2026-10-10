@@ -121,6 +121,17 @@ class Configuration(Settings):
     max_rounds: int = pydantic.Field(default=100, gt=0, strict=True)
     retry: RetryPolicy = pydantic.Field(default_factory=RetryPolicy)
 
+    def generation_settings(self) -> Settings:
+        return Settings.model_validate(
+            self.model_dump(include=set(Settings.model_fields))
+        )
+
+
+class Generation(pydantic.BaseModel):
+    response: connect.AssistantMessage
+    message_id: str
+    context_window: Optional[int] = None
+
 
 class Unset(Enum):
     VALUE = "unset"

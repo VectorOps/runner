@@ -1,18 +1,133 @@
 """Measured conversation checkpoints and tool-safe prefix selection."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+import json
 from typing import Optional
 
 import connect
 import pydantic
 
-from vectorops.runner.api.llm import models
+from vectorops.runner.api.llm import models, observability
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner import streaming
+
+Generation = models.Generation
 
 
-class Generation(pydantic.BaseModel):
-    response: connect.AssistantMessage
-    message_id: str
-    context_window: Optional[int] = None
+def _encoded(value: pydantic.JsonValue) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def summary_text(response: connect.AssistantMessage) -> str:
+    text = "".join(block.text for block in response.content if block.type == "text")
+    if not text.strip() or any(block.type == "tool_call" for block in response.content):
+        raise models.LLMResponseError(
+            "compaction requires a nonempty tool-free summary"
+        )
+    return text
+
+
+def replacement(
+    messages: Sequence[connect.Message], cut: int, text: str
+) -> list[connect.Message]:
+    return [
+        connect.UserMessage(content="Summary of earlier conversation:\n" + text),
+        *messages[cut:],
+    ]
+
+
+def safe_boundaries(messages: Sequence[connect.Message]) -> set[int]:
+    pending: set[str] = set()
+    safe = {0}
+    for index, message in enumerate(messages, start=1):
+        if message.role == "assistant":
+            pending.update(
+                block.id for block in message.content if block.type == "tool_call"
+            )
+        elif message.role == "tool":
+            pending.discard(message.tool_call_id)
+        if not pending:
+            safe.add(index)
+    return safe
+
+
+def legacy_cut(
+    messages: Sequence[connect.Message], policy: models.Compaction
+) -> Optional[int]:
+    transcript: list[pydantic.JsonValue] = [
+        message.model_dump(mode="json") for message in messages
+    ]
+    if (
+        policy.max_context_characters is None
+        or len(_encoded(transcript)) <= policy.max_context_characters
+    ):
+        return None
+    limit = len(messages) - policy.keep_recent_messages
+    return max(
+        (index for index in safe_boundaries(messages) if 0 < index <= limit),
+        default=None,
+    )
+
+
+@dataclass(frozen=True)
+class Summary:
+    """Own summary request policy and live validation without committing conversation state."""
+
+    request: connect.GenerateRequest
+    settings: models.Settings
+    generation_settings: models.Settings
+    before: connect.GenerateRequest
+    cut: int
+    prefix_tokens: Optional[int] = None
+
+    def finalize(
+        self,
+        item: streaming.ActivityFinal[pydantic.JsonValue],
+        context: ActivityExecutionContext,
+    ) -> streaming.ActivityFinal[pydantic.JsonValue]:
+        response = connect.AssistantMessage.model_validate(item.value)
+        if self.prefix_tokens is not None:
+            summary_text(response)
+            size = summary_tokens(response, self.settings, self.generation_settings)
+            if size is not None and size >= self.prefix_tokens:
+                raise models.LLMResponseError(
+                    "compaction summary did not reduce the selected prefix"
+                )
+        text = "".join(block.text for block in response.content if block.type == "text")
+        if text.strip() and not any(
+            block.type == "tool_call" for block in response.content
+        ):
+            after = self.before.model_copy(
+                update={"messages": replacement(self.before.messages, self.cut, text)}
+            )
+            assert item.metrics is not None
+            metric = observability.Metrics.model_validate(item.metrics["llm"])
+            metric.compaction = observability.compaction_savings(self.before, after)
+            return streaming.ActivityFinal(
+                item.value, {"llm": metric.model_dump(mode="json")}
+            )
+        return item
+
+
+def legacy_summary(
+    messages: Sequence[connect.Message],
+    cut: int,
+    instruction: str,
+    settings: models.Settings,
+    before: connect.GenerateRequest,
+) -> Summary:
+    prefix: list[pydantic.JsonValue] = [
+        message.model_dump(mode="json") for message in messages[:cut]
+    ]
+    request = connect.GenerateRequest(
+        system_prompt=instruction,
+        messages=[connect.UserMessage(content=_encoded(prefix))],
+        temperature=settings.temperature,
+        max_output_tokens=settings.max_output_tokens,
+        reasoning=settings.reasoning,
+    )
+    return Summary(request, settings, settings, before, cut)
 
 
 class Checkpoint(pydantic.BaseModel):
@@ -76,6 +191,59 @@ class History:
         self.has_summary = False
         self.compacted_anchor: Optional[str] = None
 
+    def latest_anchor(self, index: Optional[int] = None) -> Optional[str]:
+        if not self.checkpoints:
+            return None
+        latest = self.checkpoints[-1]
+        return latest.message_id if index is None or latest.index == index else None
+
+    def prepare(
+        self,
+        messages: Sequence[connect.Message],
+        selection: Selection,
+        policy: models.Compaction,
+        generation: models.Settings,
+        before: connect.GenerateRequest,
+    ) -> Summary:
+        values = generation.model_dump()
+        values["max_output_tokens"] = policy.summary_max_output_tokens
+        values.update(policy.summary_settings.model_dump(exclude_unset=True))
+        if values["max_output_tokens"] is None:
+            values["max_output_tokens"] = policy.summary_max_output_tokens
+        settings = models.Settings.model_validate(values)
+        start = int(self.has_summary)
+        previous = messages[0].model_dump(mode="json") if start else None
+        transcript: list[pydantic.JsonValue] = [
+            message.model_dump(mode="json")
+            for message in messages[start : selection.cut]
+        ]
+        request = connect.GenerateRequest(
+            system_prompt=policy.instruction
+            + (
+                "\nUpdate the previous summary with the transcript. Preserve task intent, "
+                "constraints, decisions, and unfinished work; remove superseded details. "
+                "Use sections: Goal, Constraints, Progress, Decisions, Next steps, Critical context."
+            ),
+            messages=[
+                connect.UserMessage(
+                    content=_encoded(
+                        {"previous_summary": previous, "transcript": transcript}
+                    )
+                )
+            ],
+            temperature=settings.temperature,
+            max_output_tokens=settings.max_output_tokens,
+            reasoning=settings.reasoning,
+        )
+        return Summary(
+            request,
+            settings,
+            generation,
+            before,
+            selection.cut,
+            selection.prefix_tokens,
+        )
+
     def record(self, generation: Generation, index: int, signature: str) -> None:
         usage = generation.response.usage
         tokens = input_tokens(usage)
@@ -128,17 +296,7 @@ class History:
             if window is None:
                 return None
             budget = max(1, int(window * policy.keep_recent_ratio))
-        pending: set[str] = set()
-        safe: set[int] = set()
-        for index, message in enumerate(messages[: anchor.index + 1]):
-            if not pending:
-                safe.add(index)
-            if message.role == "assistant":
-                pending.update(
-                    block.id for block in message.content if block.type == "tool_call"
-                )
-            elif message.role == "tool":
-                pending.discard(message.tool_call_id)
+        safe = safe_boundaries(messages[: anchor.index + 1])
         for point in reversed(self.checkpoints):
             if point.index > anchor.index:
                 continue

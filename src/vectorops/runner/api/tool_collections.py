@@ -8,9 +8,9 @@ from typing import Annotated, Optional
 
 import pydantic
 
-from . import composition, tool_registry
+from . import composition, tool_registry, builtin_tools
 from .configuration import get_config
-from .llm.tools import ToolBinding
+from .tool_contracts import ToolBinding
 
 CollectionKey = Annotated[str, pydantic.Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]*$")]
 
@@ -95,7 +95,7 @@ async def load_collection(
         supplied = ToolCollection.model_validate(raw)
     selected = _resolve(supplied, fallback)
     modules = Modules.model_validate(await get_config(ctx, "tools.modules", []))
-    await asyncio.to_thread(importlib.import_module, "vectorops.runner.api.tools")
+    await asyncio.to_thread(builtin_tools.register_builtins)
     for module in modules.root:
         await asyncio.to_thread(importlib.import_module, module)
     registry = tool_registry.registrations()

@@ -11,7 +11,7 @@ import typing
 import pydantic
 
 if typing.TYPE_CHECKING:
-    from .llm.tools import ToolBinding
+    from .tool_contracts import ToolBinding
 
 
 class ToolConfig(pydantic.BaseModel):

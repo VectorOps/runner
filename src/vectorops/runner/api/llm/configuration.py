@@ -69,6 +69,4 @@ async def resolve_settings(
 ) -> models.Settings:
     """Resolve generation settings for workflow-side LLM helpers."""
     resolved = await resolve_configuration(explicit_options(settings, **overrides))
-    return models.Settings.model_validate(
-        resolved.model_dump(exclude={"compaction", "max_rounds", "retry"})
-    )
+    return resolved.generation_settings()

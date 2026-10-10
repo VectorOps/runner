@@ -4,13 +4,10 @@ import asyncio
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
 from typing import Final, Optional
 
-import pydantic
-
 from vectorops.runner import diagnostics
-from vectorops.runner.api.llm import models
+from vectorops.runner.api.llm import models, snapshots
 from vectorops.runner.runner import streaming
 
 
@@ -69,43 +66,11 @@ def suspend() -> Iterator[None]:
             yield
 
 
-class _Progress:
-    def __init__(self) -> None:
-        self.values: dict[tuple[int, str], pydantic.JsonValue] = {}
-
-    def update(self, value: pydantic.JsonValue) -> bool:
-        """Inspect output fields only; metadata and unchanged snapshots are not progress."""
-        if not isinstance(value, dict):
-            return False
-        content = value.get("content")
-        if not isinstance(content, list):
-            return False
-        changed = False
-        for index, block in enumerate(content):
-            if not isinstance(block, dict):
-                continue
-            kind = block.get("type")
-            fields = (
-                ("text",)
-                if kind in ("text", "reasoning")
-                else ("arguments_text", "arguments") if kind == "tool_call" else ()
-            )
-            for field in fields:
-                output = block.get(field)
-                if output is None or output == "":
-                    continue
-                key = (index, field)
-                if key not in self.values or self.values[key] != output:
-                    self.values[key] = deepcopy(output)
-                    changed = True
-        return changed
-
-
 async def stream(
     items: AsyncGenerator[streaming.StreamItem, None], settings: models.Settings
 ) -> AsyncGenerator[streaming.StreamItem, None]:
     """Reset an idle budget on output, pausing it while downstream consumes snapshots."""
-    progress = _Progress()
+    progress = snapshots.Progress()
     started = False
     remaining = settings.first_token_timeout
     async with aclosing(items):
