@@ -5,7 +5,8 @@ from typing import Final, Literal, Optional
 
 import pydantic
 
-from vectorops.runner.api import composition as c, configuration
+from vectorops.runner.api import composition as c
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.tool_registry import ToolConfig, register_tool
 from vectorops.runner.api.llm.tools import ToolBinding
 from vectorops.runner.mcp import models
@@ -45,8 +46,12 @@ async def discover(
     if not selected:
         return []
     settings = models.Settings.model_validate(
-        await configuration.get_validated(
-            component, models.Settings, contract_digest=_SETTINGS_CONTRACT
+        await get_config(
+            c.workflow_context(),
+            component,
+            {},
+            model=models.Settings,
+            contract_digest=_SETTINGS_CONTRACT,
         )
     )
     bindings: list[ToolBinding] = []
@@ -158,8 +163,12 @@ async def discover_content(
     """
     prompt_names, resource_uris = set(prompts), set(resources)
     settings = models.Settings.model_validate(
-        await configuration.get_validated(
-            component, models.Settings, contract_digest=_SETTINGS_CONTRACT
+        await get_config(
+            c.workflow_context(),
+            component,
+            {},
+            model=models.Settings,
+            contract_digest=_SETTINGS_CONTRACT,
         )
     )
     config = settings.servers.get(server)
@@ -246,8 +255,12 @@ async def list_resources(
 
 async def servers(*, component: str = "mcp") -> list[str]:
     settings = models.Settings.model_validate(
-        await configuration.get_validated(
-            component, models.Settings, contract_digest=_SETTINGS_CONTRACT
+        await get_config(
+            c.workflow_context(),
+            component,
+            {},
+            model=models.Settings,
+            contract_digest=_SETTINGS_CONTRACT,
         )
     )
     return sorted(settings.servers)

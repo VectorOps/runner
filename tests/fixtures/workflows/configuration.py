@@ -2,7 +2,8 @@ import asyncio
 
 import pydantic
 
-from vectorops.runner.api import configuration, llm, mailbox
+from vectorops.runner.api import llm, mailbox
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.context import WorkflowExecutionContext
 
 
@@ -11,9 +12,9 @@ async def main(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
 
 
 async def changing(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
-    old = await configuration.get("llm.model", "default")
+    old = await get_config(ctx, "llm.model", "default")
     await mailbox.request_input("continue")
-    new = await configuration.get("llm.model", "default")
+    new = await get_config(ctx, "llm.model", "default")
     return [old, new]
 
 

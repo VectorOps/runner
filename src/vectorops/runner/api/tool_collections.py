@@ -8,7 +8,8 @@ from typing import Annotated, Optional
 
 import pydantic
 
-from . import configuration, tool_registry
+from . import composition, tool_registry
+from .configuration import get_config
 from .llm.tools import ToolBinding
 
 CollectionKey = Annotated[str, pydantic.Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]*$")]
@@ -79,8 +80,10 @@ async def load_collection(
     policy. Factories are rebuilt on replay and own any recorded discovery I/O.
     """
     key = pydantic.TypeAdapter(CollectionKey).validate_python(name)
+    ctx = composition.workflow_context()
     fallback = defaults.get(key) if defaults is not None else None
-    raw = await configuration.get(
+    raw = await get_config(
+        ctx,
         f"tools.collections.{key}",
         fallback.model_dump(mode="json") if fallback is not None else None,
     )
@@ -91,7 +94,7 @@ async def load_collection(
     else:
         supplied = ToolCollection.model_validate(raw)
     selected = _resolve(supplied, fallback)
-    modules = Modules.model_validate(await configuration.get("tools.modules", []))
+    modules = Modules.model_validate(await get_config(ctx, "tools.modules", []))
     await asyncio.to_thread(importlib.import_module, "vectorops.runner.api.tools")
     for module in modules.root:
         await asyncio.to_thread(importlib.import_module, module)

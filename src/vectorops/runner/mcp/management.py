@@ -1,11 +1,11 @@
 """Typed MCP administration shared by Python hosts and control RPC dispatch."""
 
 import asyncio
-from pathlib import Path
 from typing import Literal, Optional
-import tomllib
 
 import pydantic
+
+from vectorops.runner.runner.project import Configuration
 
 from . import models
 from .content import ContentCatalog
@@ -38,29 +38,16 @@ class ServerPage(models.Model):
 
 
 class Management:
-    def __init__(self, path: Path, pool: SharedPool) -> None:
-        self.path, self.pool = path, pool
+    def __init__(self, configuration: Configuration, pool: SharedPool) -> None:
+        self.configuration, self.pool = configuration, pool
         self._tasks: set[asyncio.Task[object]] = set()
         self._closed = False
 
     async def settings(self, component: str) -> models.Settings:
-        def read() -> models.Settings:
-            try:
-                if not component or any(
-                    not part.strip() for part in component.split(".")
-                ):
-                    raise ValueError()
-                with self.path.open("rb") as stream:
-                    value = tomllib.load(stream).get("components", {})
-                for part in component.split("."):
-                    value = value.get(part, {})
-                return models.Settings.model_validate(value)
-            except FileNotFoundError:
-                return models.Settings()
-            except Exception:
-                raise MCPError("invalid MCP component configuration") from None
-
-        return await asyncio.to_thread(read)
+        try:
+            return self.configuration.get_validated(component, models.Settings)
+        except Exception:
+            raise MCPError("invalid MCP component configuration") from None
 
     async def server(self, query: Query) -> models.ServerConfig:
         settings = await self.settings(query.component)

@@ -12,6 +12,7 @@ from vectorops.runner import input_schema, tool_policy
 from vectorops.runner.api import llm
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.project import RunnerProject
 
 
 class Arguments(pydantic.BaseModel):
@@ -24,6 +25,7 @@ async def test_grants_and_replay_without_policy_reads(
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text("[components.tools.approval]\n" + settings)
+    project = await RunnerProject.open(tmp_path)
     calls: list[int] = []
 
     async def execute(
@@ -42,9 +44,7 @@ async def test_grants_and_replay_without_policy_reads(
             )
         ).model_dump(mode="json")
 
-    first = await replay.run(
-        history, workflow, workspace=tmp_path, tool_policy_version=1
-    )
+    first = await replay.run(history, workflow, project=project, tool_policy_version=1)
     assert first.outcome.kind == "completed"
     assert calls == [1]
     assert {step.operation.kind for step in history.path(first.id)} == {
@@ -54,7 +54,7 @@ async def test_grants_and_replay_without_policy_reads(
     }
     config.write_text("invalid TOML")
     second = await replay.run(
-        history, workflow, first.id, workspace=tmp_path, tool_policy_version=1
+        history, workflow, first.id, project=project, tool_policy_version=1
     )
     assert second.outcome == first.outcome
     assert calls == [1]
@@ -210,12 +210,12 @@ async def test_registry_extensions_and_isolation(tmp_path: Path) -> None:
         workflow_id="workflow",
         step_id="step",
     )
-    path = tmp_path / "config.toml"
-    assert (await policy.evaluate(path, call)).action == "require_confirmation"
+    settings = tool_policy.ApprovalSettings()
+    assert (await policy.evaluate(settings, call)).action == "require_confirmation"
     policy.allow("test")
-    assert (await policy.evaluate(path, call)).action == "allow"
+    assert (await policy.evaluate(settings, call)).action == "allow"
     assert (
-        await tool_policy.ToolPolicy().evaluate(path, call)
+        await tool_policy.ToolPolicy().evaluate(settings, call)
     ).action == "require_confirmation"
     policy.remove("test")
 
@@ -223,7 +223,7 @@ async def test_registry_extensions_and_isolation(tmp_path: Path) -> None:
         return call.arguments["value"] == 1
 
     policy.register_matcher("value", match)
-    assert (await policy.evaluate(path, call)).action == "allow"
+    assert (await policy.evaluate(settings, call)).action == "allow"
     with pytest.raises(ValueError, match="unique"):
         policy.register_matcher("value", match)
 
@@ -259,6 +259,7 @@ async def test_live_policy_changes_and_parallel_gate(
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text('[components.tools.approval]\nwhitelist = ["automatic"]')
+    project = await RunnerProject.open(tmp_path)
     store = ApprovalStore()
     box = mailbox.Mailbox(store)
     automatic = asyncio.Event()
@@ -286,13 +287,14 @@ async def test_live_policy_changes_and_parallel_gate(
 
     task = asyncio.create_task(
         replay.run(
-            history, workflow, workspace=tmp_path, mailbox=box, tool_policy_version=1
+            history, workflow, project=project, mailbox=box, tool_policy_version=1
         )
     )
     await asyncio.wait_for(automatic.wait(), 2)
     await asyncio.wait_for(store.registered.wait(), 2)
     assert executed == [2]
     config.write_text("[components.tools.approval]\napprove_all = true")
+    await project.configuration.reload()
     await approve(box, next(iter(store.requests.values())), {"approved": True})
     first = await asyncio.wait_for(task, 2)
     assert first.outcome.kind == "completed"

@@ -50,13 +50,13 @@ class RunnerService:
         self._close_task: typing.Optional[asyncio.Task[None]] = None
         self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
         self.mcp_pool = SharedPool(self.authentication, self._emit)
-        self.mcp = mcp_management.Management(path / "config.toml", self.mcp_pool)
+        self._mcp: typing.Optional[mcp_management.Management] = None
 
     async def __aenter__(self) -> typing.Self:
         await self.configuration.load()
         project = await RunnerProject.open(self.path)
         self.path = project.root
-        self.mcp.path = project.config_path
+        self._mcp = mcp_management.Management(project.configuration, self.mcp_pool)
         self._store = RunnerStateStore(project.data_path)
         await self._store.__aenter__()
         self._logs = diagnostics.DiagnosticLog(
@@ -77,6 +77,7 @@ class RunnerService:
             diagnostic_log=self._logs,
             authentication=self.authentication,
             mcp_pool=self.mcp_pool,
+            project=project,
         )
         try:
             candidates = await self.runner.recovery_candidates()
@@ -124,6 +125,12 @@ class RunnerService:
                 self._runner = None
                 self._tasks.clear()
                 self._active.clear()
+
+    @property
+    def mcp(self) -> mcp_management.Management:
+        if self._mcp is None:
+            raise RuntimeError("service is not open")
+        return self._mcp
 
     @property
     def logs(self) -> diagnostics.DiagnosticLog:

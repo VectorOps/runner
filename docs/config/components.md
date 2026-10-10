@@ -1,9 +1,10 @@
 # Component configuration
 
 Set workspace defaults for LLMs and reusable workflow components in `config.toml`.
-Workflows read arbitrary nested values with `await configuration.get(name, default)`.
-Each read is an activity: replay returns its recorded value, while a new read loads
-the current workspace file. There is no central component schema or global digest.
+Workflows read arbitrary nested values with `await get_config(ctx, name, default)`.
+Each workflow read is an activity: replay returns its recorded value, while a new
+read uses the workspace's shared in-memory configuration. The runner parses the
+file once at startup. There is no central component schema or global digest.
 
 ## Quick start
 
@@ -46,29 +47,35 @@ the configuration manager.
 ## Read a configuration value
 
 ```python
-from vectorops.runner.api import configuration
+from vectorops.runner.api.configuration import get_config
 
 async def main(ctx):
-    language = await configuration.get("report.language", "English")
-    options = await configuration.get("report", {})
-    return {"language": language, "options": options}
+    model = await get_config(ctx, "llm.model", "fallback")
+    language = await get_config(ctx, "report.language", "English")
+    options = await get_config(ctx, "report", {})
+    return {"model": model, "language": language, "options": options}
 ```
+
+`ctx` is the `WorkflowExecutionContext` supplied to the workflow entry point.
+The function submits one recorded activity through that context; it does not
+look up ambient workflow context. `get_config` is the canonical workflow getter;
+there is no ambient-context `configuration.get` adapter.
 
 Paths are relative to `[components]`: `llm.reasoning.effort` selects
 `[components.llm.reasoning]`'s `effort` value. Paths must have nonempty segments;
 literal dots in keys and list indexing are not supported. A missing file, missing
 key, or non-mapping intermediate value returns the supplied default (None when
 omitted). False, zero, empty lists, and empty mappings remain actual values.
-The getter returns the selected value as-is; it does not merge mappings or infer
-types from the default. Consumers own type and value validation.
+Without `model=`, the getter returns the selected value as-is; it does not merge
+mappings or infer types from the default. Pass a Pydantic model to validate and
+normalize the selected value before persistence.
 
-Each fresh read opens `config.toml` off the event loop. There is no process cache,
-environment interpolation, or additional configuration search path. Selected
-values and defaults must be finite JSON-compatible values. Parsing or I/O errors
-other than a missing file become recorded activity failures, not silent defaults.
-Replace the file atomically when editing to avoid reading a partially written file.
+Getters access memory only. There is no environment interpolation or additional
+configuration search path. Selected values and defaults must be finite
+JSON-compatible values. File parsing and I/O errors fail startup or explicit
+reload; invalid selected values become recorded activity failures.
 
-The activity contract is `kind="configuration.get"`, `name="get"`, version 1,
+Without a model, the activity contract is `kind="configuration.get"`, `name="get"`, version 1,
 with `name` and `default` inputs and the selected value as its result. Returned
 containers are detached so caller mutation cannot alter recorded history.
 Reads require workflow context and cannot be nested inside an activity.
@@ -77,14 +84,60 @@ Configuration values and defaults are persisted in saga history and can appear i
 history exports and step events. Never read credentials or secrets through this
 API. A subtree read records the entire selected subtree, not just fields used later.
 
+## Internal access and reload
+
+Each running workspace owns one `RunnerProject.configuration` instance, shared
+by its workflows, MCP management, and tool approval. Internal getters are
+synchronous and do not depend on workflow context or history:
+
+```python
+project = await runner.project()
+language = project.configuration.get("report.language", "English")
+await project.configuration.reload()
+```
+
+`get_validated(name, Model)` returns an instance of the supplied Pydantic model.
+Missing values validate as `{}`, allowing model defaults. Returned values are
+detached from shared state. Workflow code instead uses the activity APIs above;
+the activity machinery owns persistence and replay.
+
+File edits take effect after explicit reload or runner restart; there is no
+background file watcher. Reload parses off the event loop and atomically replaces
+component settings only after successful parsing and runner-schema validation.
+Failed reloads preserve the previous snapshot. A missing file resets component
+settings to empty. Component-specific validation still happens at consumption.
+Runner-level directory, logging, retention, and environment settings require a
+restart. Replace the file atomically before requesting reload.
+
 ## Validated component reads and MCP
 
 Owners that need validation before persistence can use
-`await configuration.get_validated(name, Model)`. This separate
-`configuration.validated` activity records the owner model's normalized JSON
-result, not the raw selected value. Invalid settings produce payload-free errors.
+`await get_config(ctx, name, {}, model=Model)`. Validation happens inside the
+activity, which records the model's normalized JSON result, not the raw selected
+value. The return value is JSON-compatible data, not a model instance. Invalid
+settings produce payload-free errors.
+
+```python
+from pydantic import BaseModel, Field
+from vectorops.runner.api.configuration import get_config
+
+class ReportSettings(BaseModel):
+    max_sections: int = Field(default=5, ge=1)
+
+async def main(ctx):
+    return await get_config(ctx, "report", {}, model=ReportSettings)
+```
+
+Missing settings use the supplied default, which is then validated. Pass `{}` to
+apply model field defaults; an omitted default remains `None` and must be accepted
+by the model. An existing value is never merged with the fallback.
+
+Model-backed reads retain the `configuration.validated` activity contract and
+record a schema digest. `contract_digest=` can provide an owner-managed contract
+identifier and requires `model=`. Nonempty or non-mapping fallbacks are fingerprinted
+so changing them is detected during replay without persisting their raw payload.
 It does not scan accepted fields for secrets; owners must design non-secret schemas.
-Ordinary `configuration.get` retains its existing schema-free behavior.
+Ordinary `get_config(ctx, name, default)` retains its schema-free behavior.
 
 MCP settings use this path under `[components.mcp.servers]`. See
 [MCP servers and workflow tools](mcp.md) for stdio/HTTP configuration, credentials,
@@ -98,9 +151,9 @@ plus generation-option keywords. Keywords override the positional model's
 explicit fields; workspace values supply omitted fields.
 
 The constructor does not read configuration. Each `generate()` and each tool-loop
-round records one `configuration.get("llm", {})` snapshot, then validates and
+round records one `get_config(ctx, "llm", {})` snapshot, then validates and
 merges it with explicit overrides. Changes to model, thinking level, or other
-defaults take effect at the next fresh round, even on an existing LLM object.
+defaults take effect at the next fresh round after reload, even on an existing LLM object.
 Compaction decisions and generation within one round share that snapshot.
 The round limit is resolved once at the start of `run()` and remains fixed for
 that invocation; the next `run()` can adopt a changed limit.
@@ -286,7 +339,7 @@ max_delay = 30
 finite seconds from 0 through 300, and `max_delay` must be at least `initial_delay`.
 Explicit `LLM(..., retry=llm.RetryPolicy(max_retries=5))` overrides supplied policy
 fields. Workspace policy is read through the same recorded settings snapshot as
-generation, so edits apply to fresh rounds rather than in-flight attempts.
+generation, so reloaded edits apply to fresh rounds rather than in-flight attempts.
 
 Retryable failures include timeouts, connection resets/disconnects, truncated
 transport payloads, Connect rate limits, transient provider errors, retryable
@@ -428,8 +481,8 @@ Legacy binding-local workflows retain single-call behavior and do not create gra
 The gate executes inside `llm.tool` version 3. There is no policy activity,
 configuration-read activity, or recorded policy decision. Completed tool outcomes,
 including rejections, replay without validation, policy evaluation, or invocation.
-Fresh or interrupted calls without an existing confirmation request read current
-settings off the event loop. Existing requests and accepted host answers remain
+Fresh or interrupted calls without an existing confirmation request read the shared
+in-memory settings. Existing requests and accepted host answers remain
 durable mailbox records attached to the tool step and are reused on recovery;
 enabling approve-all does not bypass an outstanding confirmation or rejection.
 An interrupted tool can execute again after approval: this is not an exactly-once
@@ -492,10 +545,10 @@ metadata without raw exception messages, request contents, or credentials.
 ## Reusable workflow components
 
 ```python
-from vectorops.runner.api import configuration
+from vectorops.runner.api.configuration import get_config
 
 async def main(ctx):
-    count = await configuration.get("report.max_sections", 5)
+    count = await get_config(ctx, "report.max_sections", 5)
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ValueError("report.max_sections must be a positive integer")
     return {"max_sections": count}
@@ -513,8 +566,8 @@ The same recorded reads can safely drive branching, loops, and other workflow lo
 ## Replay and restart
 
 Completed configuration reads return their original values without reopening the
-file. New reads use current settings. For example, a workflow can read model A,
-wait for host input, then read model B after the file is edited. On restart it
+file. New reads use current in-memory settings. For example, a workflow can read model A,
+wait for host input, then read model B after the file is edited and reloaded. On restart it
 reconstructs A from history and reads B only when reaching the new read.
 
 No global configuration digest blocks edits. Completed LLM generations replay

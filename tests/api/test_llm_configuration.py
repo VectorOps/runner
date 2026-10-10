@@ -14,6 +14,7 @@ from vectorops.runner.api.llm.models import RoundLimitError
 from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
+from vectorops.runner.runner.project import RunnerProject
 
 
 async def test_omitted_options_and_explicit_overrides(
@@ -59,12 +60,13 @@ async def test_omitted_options_and_explicit_overrides(
     assert request.temperature == 0.7 and request.max_output_tokens == 500
 
 
-async def test_live_model_changes_and_recorded_settings_on_replay(
+async def test_reloaded_model_changes_and_recorded_settings_on_replay(
     history: MemoryHistory,
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.toml"
     path.write_text('[components.llm]\nmodel = "old"\nreasoning = {effort = "low"}\n')
+    project = await RunnerProject.open(tmp_path)
 
     class ChangingProvider(FakeProvider):
         async def stream(
@@ -79,6 +81,7 @@ async def test_live_model_changes_and_recorded_settings_on_replay(
                 path.write_text,
                 '[components.llm]\nmodel = "new"\nreasoning = {effort = "high"}\n',
             )
+            await project.configuration.reload()
 
     backend = ChangingProvider([answer("first"), answer("second")])
 
@@ -89,7 +92,7 @@ async def test_live_model_changes_and_recorded_settings_on_replay(
         await agent.generate()
         return agent.settings.model
 
-    first = await replay.run(history, workflow, workspace=tmp_path)
+    first = await replay.run(history, workflow, project=project)
     assert first.outcome.kind == "completed" and first.outcome.result == "new"
     assert [settings.model for settings in backend.settings] == ["old", "new"]
     assert [

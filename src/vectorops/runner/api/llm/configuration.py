@@ -5,7 +5,8 @@ import typing
 
 import pydantic
 
-from vectorops.runner.api import configuration
+from vectorops.runner.api import composition
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import models
 
 
@@ -54,7 +55,7 @@ async def resolve_configuration(
     supplied: dict[str, pydantic.JsonValue],
 ) -> models.Configuration:
     """Read one recorded snapshot before interpreting LLM-specific policy."""
-    values = await configuration.get("llm", {})
+    values = await get_config(composition.workflow_context(), "llm", {})
     if not isinstance(values, dict):
         raise ValueError("configuration llm must be a mapping")
     return models.Configuration.model_validate(_merge(values, supplied))

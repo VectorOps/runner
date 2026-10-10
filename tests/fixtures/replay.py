@@ -24,6 +24,7 @@ async def run(
     tool_policy_version: Optional[Literal[1]] = None,
     policy: Optional[tool_policy.ToolPolicy] = None,
     event_sink: Optional[StepEventSink] = None,
+    project: Optional[RunnerProject] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -48,12 +49,18 @@ async def run(
         mailbox=mailbox,
         event_sink=event_sink,
     )
-    context = WorkflowExecutionContext(
-        RunnerProject(
+    if project is None:
+        project = RunnerProject(
             Path.cwd() if workspace is None else workspace,
-            RunnerConfig(),
+            (
+                RunnerConfig()
+                if workspace is None
+                else (await RunnerProject.open(workspace)).config
+            ),
             tool_policy.ToolPolicy() if policy is None else policy,
-        ),
+        )
+    context = WorkflowExecutionContext(
+        project,
         workflow,
         session,
     )

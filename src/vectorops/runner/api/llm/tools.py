@@ -339,7 +339,9 @@ async def _gated_tool(
             binding.validate(request.arguments)
             if existing is None:
                 decision = await project.tool_policy.evaluate(
-                    project.config_path,
+                    project.configuration.get_validated(
+                        "tools.approval", tool_policy.ApprovalSettings
+                    ),
                     tool_policy.ToolCall(
                         name=request.name,
                         version=binding.version,

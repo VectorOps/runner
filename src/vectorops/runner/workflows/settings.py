@@ -6,7 +6,8 @@ from typing import Final, Literal, Optional
 import connect
 import pydantic
 
-from vectorops.runner.api import configuration, llm
+from vectorops.runner.api import composition, llm
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.references import WorkflowReference
 
 
@@ -64,7 +65,9 @@ class Settings(pydantic.BaseModel):
 
 async def load_settings() -> Settings:
     """Read a validated snapshot that remains stable when the workflow replays."""
-    values = await configuration.get_validated("workflows.defaults", Settings)
+    values = await get_config(
+        composition.workflow_context(), "workflows.defaults", {}, model=Settings
+    )
     return Settings.model_validate(values)
 
 
@@ -120,15 +123,23 @@ class HelperSettings(PromptSettings):
 
 async def load_agent_settings() -> AgentSettings:
     """Keep the pre-prompt-settings contract for backward-compatible replay."""
-    values = await configuration.get_validated(
-        "workflows.agent", AgentSettings, contract_digest=_AGENT_CONTRACT
+    values = await get_config(
+        composition.workflow_context(),
+        "workflows.agent",
+        {},
+        model=AgentSettings,
+        contract_digest=_AGENT_CONTRACT,
     )
     return AgentSettings.model_validate(values)
 
 
 async def load_helper_settings() -> HelperSettings:
     """Old recorded settings omit optional prompts and retain packaged defaults."""
-    values = await configuration.get_validated(
-        "workflows.helper", HelperSettings, contract_digest=_HELPER_CONTRACT
+    values = await get_config(
+        composition.workflow_context(),
+        "workflows.helper",
+        {},
+        model=HelperSettings,
+        contract_digest=_HELPER_CONTRACT,
     )
     return HelperSettings.model_validate(values)

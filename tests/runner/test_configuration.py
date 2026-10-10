@@ -1,9 +1,98 @@
 import asyncio
 from pathlib import Path
+import tomllib
+from unittest.mock import patch
+
+import pydantic
+import pytest
 
 from vectorops.runner.control import client, protocol as p
+from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner.project import Configuration, RunnerProject
 from vectorops.runner.runner.workflow import WorkflowRunner
+
+
+async def test_shared_configuration_is_parsed_once(workspace: Path) -> None:
+    path = workspace / "config.toml"
+    path.write_text('[components.llm]\nmodel = "first"\n')
+    with patch.object(Configuration, "read", wraps=Configuration.read) as read:
+        async with RunnerService(workspace) as service:
+            projects = await asyncio.gather(
+                *(service.runner.project() for _ in range(10))
+            )
+            project = projects[0]
+            assert all(item is project for item in projects)
+            assert service.mcp.configuration is project.configuration
+            path.write_text('[components.llm]\nmodel = "second"\n')
+            for _ in range(2):
+                result = await service.runner.run("configuration:main")
+                assert isinstance(result, dict) and result["model"] == "first"
+            assert read.call_count == 1
+            await project.configuration.reload()
+            result = await service.runner.run("configuration:main")
+            assert isinstance(result, dict) and result["model"] == "second"
+            assert read.call_count == 2
+
+
+async def test_concurrent_runner_initialization(workspace: Path) -> None:
+    runner = WorkflowRunner(workspace)
+    with patch.object(Configuration, "read", wraps=Configuration.read) as read:
+        projects = await asyncio.gather(*(runner.project() for _ in range(10)))
+    assert all(project is projects[0] for project in projects)
+    assert read.call_count == 1
+
+
+async def test_internal_configuration_snapshots_and_reload(tmp_path: Path) -> None:
+    class Settings(pydantic.BaseModel):
+        count: int = 2
+
+    path = tmp_path / "config.toml"
+    path.write_text('[components.worker]\ncount = 1\nnames = ["first"]\n')
+    project = await RunnerProject.open(tmp_path)
+    config = project.configuration
+    assert config is project.configuration
+    assert config.get_validated("worker", Settings).count == 1
+    assert config.get_validated("missing", Settings).count == 2
+    value = config.get("worker")
+    assert isinstance(value, dict)
+    value["count"] = 9
+    assert config.get("worker.count") == 1
+    fallback: list[pydantic.JsonValue] = ["fallback"]
+    result = config.get("missing", fallback)
+    assert isinstance(result, list)
+    result.append("changed")
+    assert fallback == ["fallback"]
+    path.write_text("invalid TOML [")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        await config.reload()
+    assert config.get("worker.count") == 1
+    path.write_text('data_directory = "other"\n[components.worker]\ncount = 3\n')
+    await config.reload()
+    assert config.get("worker.count") == 3
+    assert project.data_path == tmp_path / "data"
+    path.write_text('[components.worker]\ncount = "secret-invalid-value"\n')
+    await config.reload()
+    with pytest.raises(ValueError, match="^component configuration is invalid$"):
+        config.get_validated("worker", Settings)
+    path.unlink()
+    await config.reload()
+    assert config.get("worker") is None
+    with pytest.raises(ValueError, match="nonempty"):
+        config.get("worker..count")
+
+
+async def test_workspace_configuration_isolation(tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "config.toml").write_text('[components]\nname = "first"\n')
+    (other / "config.toml").write_text('[components]\nname = "second"\n')
+    first, second = await asyncio.gather(
+        WorkflowRunner(tmp_path).project(), WorkflowRunner(other).project()
+    )
+    assert first.configuration is not second.configuration
+    assert first.configuration.get("name") == "first"
+    assert second.configuration.get("name") == "second"
 
 
 async def test_completed_children_replay_old_settings(workspace: Path) -> None:

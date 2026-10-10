@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from functools import partial
@@ -17,7 +16,6 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.references import WorkflowReference
-from vectorops.runner.runner.resolver import WorkflowResolver
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment import factory as environments
 from vectorops.runner.environment.lifecycle import close_environment
@@ -53,6 +51,7 @@ class WorkflowRunner:
         diagnostic_log: typing.Optional[diagnostics.DiagnosticLog] = None,
         authentication: typing.Optional[AuthenticationService] = None,
         mcp_pool: typing.Optional[SharedPool] = None,
+        project: typing.Optional[RunnerProject] = None,
     ) -> None:
         self.path = Path(path)
         self.history = history
@@ -67,14 +66,14 @@ class WorkflowRunner:
         self._stop_requests: set[str] = set()
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
-        self._resolvers: dict[Path, WorkflowResolver] = {}
+        self._project = project
+        self._project_lock = asyncio.Lock()
 
     async def project(self) -> RunnerProject:
-        project = await RunnerProject.open(self.path)
-        resolver = self._resolvers.setdefault(
-            project.workflows_path, WorkflowResolver(project.workflows_path)
-        )
-        return replace(project, workflow_resolver=resolver)
+        async with self._project_lock:
+            if self._project is None:
+                self._project = await RunnerProject.open(self.path)
+            return self._project
 
     async def run(
         self,
@@ -216,7 +215,7 @@ class WorkflowRunner:
         owner = self._mailboxes.get(answer.execution_id)
         if owner is not None:
             return await owner.answer(answer)
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         async with self._writer(project):
             database = await self._database(project, answer.execution_id)
             return await mailbox.Mailbox(database, self.mailbox_sink).answer(answer)
@@ -475,7 +474,7 @@ class WorkflowRunner:
             return completion.outcome.result
 
     async def project_state(self) -> state.RunnerState:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         return await RunnerStateStore(project.data_path).load()
 
     async def _database(
@@ -493,13 +492,13 @@ class WorkflowRunner:
     async def execution_state(
         self, execution_id: str
     ) -> execution_models.ExecutionRecord:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         return await (await self._database(project, execution_id)).get_execution()
 
     async def _selected_database(
         self, execution_id: typing.Optional[str]
     ) -> SQLiteHistory:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         if execution_id is None:
             execution_id = (
                 await RunnerStateStore(project.data_path).load()
@@ -524,7 +523,7 @@ class WorkflowRunner:
     async def execution_ids(
         self, *, after: typing.Optional[str] = None, limit: int = 100
     ) -> list[str]:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
 
         def listing() -> list[str]:
             directory = project.data_path / "executions"
@@ -571,7 +570,7 @@ class WorkflowRunner:
         *,
         on_started: typing.Optional[Callable[[], None]] = None,
     ) -> pydantic.JsonValue:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         if execution_id is None:
             execution_id = (await self.project_state()).last_execution_id
         if execution_id is None:
@@ -586,7 +585,7 @@ class WorkflowRunner:
         )
 
     async def remove_execution(self, execution_id: str) -> None:
-        project = await RunnerProject.open(self.path)
+        project = await self.project()
         async with RunnerStateStore(project.data_path) as store:
             database = await self._database(project, execution_id)
             record = await database.get_execution()

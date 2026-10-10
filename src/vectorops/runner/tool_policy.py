@@ -1,9 +1,6 @@
 """Runtime-only tool authorization, independent of bindings and saga history."""
 
-import asyncio
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-import tomllib
 import typing
 
 import connect
@@ -131,19 +128,6 @@ Check: typing.TypeAlias = Callable[[ToolCall], Awaitable[typing.Optional[str]]]
 Matcher: typing.TypeAlias = Callable[[ToolCall], Awaitable[bool]]
 
 
-def _load(path: Path) -> ApprovalSettings:
-    try:
-        with path.open("rb") as stream:
-            value: object = tomllib.load(stream)
-    except FileNotFoundError:
-        return ApprovalSettings()
-    for key in ("components", "tools", "approval"):
-        if not isinstance(value, dict):
-            raise ValueError("tool approval configuration must contain tables")
-        value = value.get(key, {})
-    return ApprovalSettings.model_validate(value)
-
-
 class ToolPolicy:
     """Own exact-name grants and extensible checks; denials precede all grants."""
 
@@ -169,9 +153,8 @@ class ToolPolicy:
             raise ValueError("matcher name must be nonempty and unique")
         self._matchers[name] = matcher
 
-    async def evaluate(self, path: Path, call: ToolCall) -> Decision:
-        """Read live settings off-loop; never record a policy activity or decision."""
-        settings = await asyncio.to_thread(_load, path)
+    async def evaluate(self, settings: ApprovalSettings, call: ToolCall) -> Decision:
+        """Apply current settings without recording a policy activity or decision."""
         for check in self._checks.values():
             reason = await check(call.model_copy(deep=True))
             if reason is not None:
