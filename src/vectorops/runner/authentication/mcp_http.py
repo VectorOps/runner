@@ -5,19 +5,18 @@ from typing import Optional
 
 import httpx
 
-from . import mcp_oauth, models, mcp_settings
-from .service import AuthenticationService
+from . import contracts, models
 
 
 class MCPHTTPAuth(httpx.Auth):
     def __init__(
         self,
-        service: AuthenticationService,
-        adapter: mcp_oauth.MCPAdapter | mcp_settings.ClientCredentials,
+        source: contracts.TokenSource,
+        resource: str,
         execution_id: Optional[str],
     ) -> None:
-        self.service = service
-        self.adapter = adapter
+        self.source = source
+        self.resource = httpx.URL(resource)
         self.execution_id = execution_id
         self.value: Optional[models.Credential] = None
         self.rejected: Optional[str] = None
@@ -35,10 +34,7 @@ class MCPHTTPAuth(httpx.Auth):
     async def _acquire(
         self, rejected: Optional[str], execution_id: Optional[str], *, interactive: bool
     ) -> models.Credential:
-        if isinstance(self.adapter, mcp_settings.ClientCredentials):
-            return await self.service.mcp_client_token(self.adapter, rejected=rejected)
-        return await self.service.acquire(
-            self.adapter.profile,
+        return await self.source.acquire(
             execution_id,
             rejected=rejected,
             interactive=interactive,
@@ -47,12 +43,7 @@ class MCPHTTPAuth(httpx.Auth):
     async def async_auth_flow(
         self, request: httpx.Request
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        resource = (
-            self.adapter.resource
-            if isinstance(self.adapter, mcp_settings.ClientCredentials)
-            else self.adapter.settings.resource
-        )
-        if request.url != httpx.URL(resource):
+        if request.url != self.resource:
             raise models.AuthenticationError("MCP OAuth request destination mismatch")
         if self.value is None:
             raise models.AuthenticationError("MCP OAuth credential is unavailable")

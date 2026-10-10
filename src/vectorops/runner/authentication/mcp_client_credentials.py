@@ -3,13 +3,11 @@
 import hashlib
 import base64
 import json
-import math
-import time
 from urllib.parse import quote_plus
 
 import aiohttp
 
-from . import mcp_oauth, mcp_settings, models
+from . import mcp_tokens, mcp_settings, models
 
 
 def profile(settings: mcp_settings.ClientCredentials) -> models.Profile:
@@ -52,38 +50,12 @@ async def request(
                     raise models.AuthenticationError(
                         "MCP client credentials were rejected"
                     )
-                value = await mcp_oauth.payload(response)
-        token, lifetime = value.get("access_token"), value.get("expires_in")
-        if (
-            not isinstance(token, str)
-            or not token
-            or any(ord(char) < 33 or ord(char) > 126 for char in token)
-        ):
-            raise ValueError()
-        if (
-            not isinstance(lifetime, (int, float))
-            or isinstance(lifetime, bool)
-            or not math.isfinite(lifetime)
-            or lifetime <= 60
-        ):
-            raise ValueError()
-        if str(value.get("token_type", "")).lower() != "bearer":
-            raise ValueError()
-        scope = value.get("scope")
-        if scope is not None and (
-            not isinstance(scope, str)
-            or not set(settings.scopes).issubset(scope.split())
-        ):
-            raise models.AuthenticationError(
-                "MCP client credentials granted insufficient scopes"
-            )
-        ref = profile(settings)
-        return models.Credential(
-            provider=ref.provider,
-            profile=ref.profile,
-            kind="oauth2",
-            secret=token,
-            expires_at=time.time() + lifetime,
+                value = await mcp_tokens.payload(response)
+        return mcp_tokens.credential(
+            value,
+            profile(settings),
+            settings.scopes,
+            scope_error="MCP client credentials granted insufficient scopes",
         )
     except models.AuthenticationError:
         raise

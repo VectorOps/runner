@@ -27,6 +27,14 @@ class Credential(Profile):
     expires_at: Optional[float] = pydantic.Field(default=None, allow_inf_nan=False)
     account_id: Optional[str] = None
 
+    def reusable(self, now: float, rejected: Optional[str] = None) -> bool:
+        return (
+            self.kind == "oauth2"
+            and self.secret != rejected
+            and self.expires_at is not None
+            and self.expires_at > now + 60
+        )
+
 
 class Requirement(Profile):
     id: str

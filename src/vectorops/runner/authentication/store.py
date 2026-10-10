@@ -1,11 +1,12 @@
 """Encrypted credential files with per-profile interprocess serialization."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 import secrets
 from typing import AsyncIterator, Optional
 
+import pydantic
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from vectorops.runner import global_config as g
@@ -67,6 +68,59 @@ class CredentialStore:
     async def provision(self, value: m.Credential) -> None:
         async with self.locked(value):
             await self.save(value)
+
+    async def publish(
+        self, profile: m.Profile, issue: Callable[[], Awaitable[m.Credential]]
+    ) -> m.Credential:
+        """Finish issuance and publication before cancellation releases the caller's lock."""
+
+        async def update() -> m.Credential:
+            value = await issue()
+            if value.key != profile.key:
+                raise m.AuthenticationError("credential identity mismatch")
+            await self.save(value)
+            return value
+
+        task = asyncio.create_task(update())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def bindings(self, binding: m.Profile) -> list[m.Profile]:
+        """Read non-secret profile bindings while holding the binding lock."""
+        try:
+            data = await asyncio.to_thread(
+                (self.path / (binding.key + ".bindings")).read_bytes
+            )
+            return pydantic.TypeAdapter(list[m.Profile]).validate_json(data)
+        except FileNotFoundError:
+            return []
+        except Exception:
+            raise m.CredentialStorageError("cannot read credential bindings") from None
+
+    async def remember(self, binding: m.Profile, profile: m.Profile) -> None:
+        async with self.locked(binding):
+            profiles = await self.bindings(binding)
+            if any(value.key == profile.key for value in profiles):
+                return
+            profiles.append(profile)
+            data = pydantic.TypeAdapter(list[m.Profile]).dump_json(profiles)
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    g.atomic_write, self.path / (binding.key + ".bindings"), data
+                )
+            )
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            except Exception:
+                raise m.CredentialStorageError(
+                    "cannot persist credential bindings"
+                ) from None
 
     async def delete(self, profile: m.Profile) -> None:
         """Remove a local credential under its profile lock, without remote revocation."""

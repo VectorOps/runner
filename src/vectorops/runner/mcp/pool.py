@@ -8,11 +8,6 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner.authentication.service import AuthenticationService
-from vectorops.runner.authentication import (
-    mcp_client_credentials,
-    mcp_settings,
-    models as auth_models,
-)
 from vectorops.runner.runner.resources import finish_cleanup
 from . import models
 from .runtime import Connection, MCPRuntime
@@ -154,35 +149,11 @@ class SharedPool:
                 raise MCPError(
                     "logout requires all MCP workflow/operation leases to be released"
                 )
-            references: list[auth_models.Profile] = []
-            if isinstance(server, models.HTTPServer):
-                if isinstance(server.auth, mcp_settings.ClientCredentials):
-                    references.append(mcp_client_credentials.profile(server.auth))
-                elif server.oauth is not None or isinstance(
-                    server.auth, mcp_settings.AuthorizationCode
-                ):
-                    settings = (
-                        server.auth
-                        if isinstance(server.auth, mcp_settings.AuthorizationCode)
-                        else server.oauth
-                    )
-                    assert settings is not None
-                    adapter = await self.authentication.mcp_adapter(settings)
-                    references.append(adapter.profile)
-                else:
-                    ref = (
-                        server.auth.credential
-                        if isinstance(server.auth, mcp_settings.HeaderAuth)
-                        else server.credential
-                    )
-                    if ref:
-                        references.append(
-                            auth_models.Profile(provider="mcp", profile=ref)
-                        )
             for connection in list(self.runtime._connections.values()):
                 await self._disconnect(connection.server)
-            for reference in references:
-                await self.authentication.store.delete(reference)
+            self.runtime._authorizations.clear()
+            if isinstance(server, models.HTTPServer):
+                await self.authentication.mcp.forget(server.authentication_settings())
 
     async def close(self) -> None:
         async with self._lock:

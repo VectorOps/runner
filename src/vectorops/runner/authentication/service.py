@@ -8,14 +8,15 @@ import time
 from typing import Optional
 from uuid import uuid4
 
-import connect
 from connect.credentials import helpers
 import pydantic
 
 from vectorops.runner import global_config
 from vectorops.runner.authentication import models as m, oauth
 from vectorops.runner.authentication import mcp_oauth
-from vectorops.runner.authentication import mcp_client_credentials, mcp_settings
+from vectorops.runner.authentication import mcp, mcp_settings
+from vectorops.runner.authentication import provider as provider_auth
+from vectorops.runner.authentication.provider import ProviderAuth as ProviderAuth
 from vectorops.runner.authentication.store import CredentialStore
 
 EventSink = Callable[[dict[str, pydantic.JsonValue]], None]
@@ -46,11 +47,15 @@ class AuthenticationService:
         self.configuration = configuration or global_config.GlobalConfiguration()
         self.store = CredentialStore(self.configuration)
         self.adapters: dict[str, oauth.OAuthAdapter] = (
-            {"chatgpt": oauth.ChatGPT()} if adapters is None else adapters
+            provider_auth.adapters() if adapters is None else dict(adapters)
         )
+        self.mcp = mcp.MCPCredentials(self.store, self, self.register)
         self.event_sink = event_sink
         self._pending: dict[str, Pending] = {}
         self._users: dict[str, int] = {}
+
+    def register(self, provider: str, adapter: oauth.OAuthAdapter) -> None:
+        self.adapters[provider] = adapter
 
     @property
     def waiting(self) -> bool:
@@ -181,10 +186,12 @@ class AuthenticationService:
 
         async def exchange() -> None:
             async with self.store.locked(item.requirement):
-                value = await self.adapters[item.requirement.provider].exchange(
-                    item.requirement, callback.code or "", item.verifier
+                await self.store.publish(
+                    item.requirement,
+                    lambda: self.adapters[item.requirement.provider].exchange(
+                        item.requirement, callback.code or "", item.verifier
+                    ),
                 )
-                await self.store.save(value)
 
         task = asyncio.create_task(exchange())
         try:
@@ -265,25 +272,11 @@ class AuthenticationService:
                         adapter = self.adapters.get(profile.provider)
                         if adapter is None:
                             raise m.AuthenticationError("unsupported OAuth provider")
-                        if (
-                            value.expires_at is None
-                            or value.expires_at <= time.time() + 60
-                            or value.secret == rejected
-                        ):
-
-                            async def refresh() -> m.Credential:
-                                assert value is not None
-                                updated = await adapter.refresh(value)
-                                await self.store.save(updated)
-                                return updated
-
-                            task = asyncio.create_task(refresh())
+                        if not value.reusable(time.time(), rejected):
                             try:
-                                try:
-                                    return await asyncio.shield(task)
-                                except asyncio.CancelledError:
-                                    await task
-                                    raise
+                                return await self.store.publish(
+                                    profile, lambda: adapter.refresh(value)
+                                )
                             except m.LoginRequired:
                                 invalid = value.secret
                         else:
@@ -305,19 +298,10 @@ class AuthenticationService:
 
     async def mcp_secret(self, profile: str) -> str:
         """Resolve a provisioned MCP API key without interactive provider login."""
-        reference = m.Profile(provider="mcp", profile=profile)
-        async with self.store.locked(reference):
-            value = await self.store.load(reference)
-        if value is None or value.kind != "api_key":
-            raise m.AuthenticationError("MCP API key is not configured")
-        if value.expires_at is not None and value.expires_at <= time.time():
-            raise m.AuthenticationError("MCP API key has expired")
-        return value.secret
+        return await self.mcp.secret(profile)
 
     async def mcp_adapter(self, settings: mcp_oauth.Settings) -> mcp_oauth.MCPAdapter:
-        adapter = await mcp_oauth.MCPAdapter.discover(settings)
-        self.adapters[adapter.profile.provider] = adapter
-        return adapter
+        return await self.mcp.adapter(settings)
 
     async def mcp_client_token(
         self,
@@ -325,30 +309,7 @@ class AuthenticationService:
         *,
         rejected: Optional[str] = None,
     ) -> m.Credential:
-        reference = mcp_client_credentials.profile(settings)
-        async with self.store.locked(reference):
-            value = await self.store.load(reference)
-            if (
-                value is not None
-                and value.kind == "oauth2"
-                and value.secret != rejected
-                and value.expires_at is not None
-                and value.expires_at > time.time() + 60
-            ):
-                return value
-            secret = await self.mcp_secret(settings.client_secret)
-
-            async def acquire() -> m.Credential:
-                token = await mcp_client_credentials.request(settings, secret)
-                await self.store.save(token)
-                return token
-
-            task = asyncio.create_task(acquire())
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+        return await self.mcp.client_token(settings, rejected=rejected)
 
     async def transport(
         self,
@@ -357,55 +318,6 @@ class AuthenticationService:
         profile: str = "default",
         execution_id: Optional[str] = None,
     ) -> "ProviderAuth":
-        name = provider or model.partition("/")[0]
-        if not provider and "/" not in model:
-            raise m.AuthenticationError(
-                "provider must be explicit or included in the model name"
-            )
-        selected = m.Profile(provider=name, profile=profile)
-        value = await self.acquire(selected, execution_id)
-        return ProviderAuth(self, selected, execution_id, value)
-
-
-class ProviderAuth:
-    def __init__(
-        self,
-        service: AuthenticationService,
-        profile: m.Profile,
-        execution_id: Optional[str],
-        value: m.Credential,
-    ) -> None:
-        self.service, self.profile, self.execution_id, self.value = (
-            service,
-            profile,
-            execution_id,
-            value,
+        return await provider_auth.transport(
+            self, provider, model, profile, execution_id
         )
-
-    async def resolve(
-        self, context: Optional[connect.AuthContext] = None
-    ) -> connect.ResolvedAuth:
-        value = self.value
-        if value.kind == "oauth2":
-            strategy: connect.TransportAuth = connect.ChatGPTAccessTokenAuth(
-                value.secret, account_id=value.account_id
-            )
-        elif value.provider == "anthropic":
-            strategy = connect.HeaderAPIKeyAuth(
-                value.secret, header_name="x-api-key", prefix=""
-            )
-        elif value.provider == "gemini":
-            strategy = connect.HeaderAPIKeyAuth(
-                value.secret, header_name="x-goog-api-key", prefix=""
-            )
-        else:
-            strategy = connect.BearerTokenAuth(value.secret)
-        return await strategy.resolve(context)
-
-    async def refresh(self, context: Optional[connect.AuthContext] = None) -> bool:
-        if self.value.kind == "api_key":
-            return False
-        self.value = await self.service.acquire(
-            self.profile, self.execution_id, rejected=self.value.secret
-        )
-        return True

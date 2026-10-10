@@ -16,7 +16,6 @@ import pydantic
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.authentication.mcp_http import MCPHTTPAuth
 from vectorops.runner.authentication import mcp_settings
-from vectorops.runner.authentication.mcp_oauth import MCPAdapter
 from vectorops.runner.runner.resources import finish_cleanup
 from . import models, schema, transport
 from . import content, content_runtime
@@ -204,29 +203,21 @@ class MCPRuntime:
         if self._closed:
             raise transport.MCPError("MCP runtime is closed")
         authorization = None
-        if isinstance(server, models.HTTPServer) and (
-            server.oauth is not None
-            or isinstance(
-                server.auth,
-                (mcp_settings.AuthorizationCode, mcp_settings.ClientCredentials),
-            )
+        settings = (
+            server.authentication_settings()
+            if isinstance(server, models.HTTPServer)
+            else mcp_settings.NoAuth()
+        )
+        if isinstance(
+            settings, (mcp_settings.Settings, mcp_settings.ClientCredentials)
         ):
             if self.authentication is None:
                 raise transport.MCPError("MCP credential service is unavailable")
             authorization = self._authorizations.get(key)
             if authorization is None:
-                if isinstance(server.auth, mcp_settings.ClientCredentials):
-                    adapter: mcp_settings.ClientCredentials | MCPAdapter = server.auth
-                else:
-                    oauth_settings = (
-                        server.auth
-                        if isinstance(server.auth, mcp_settings.AuthorizationCode)
-                        else server.oauth
-                    )
-                    assert oauth_settings is not None
-                    adapter = await self.authentication.mcp_adapter(oauth_settings)
+                source = await self.authentication.mcp.token_source(settings)
                 authorization = self._authorizations.setdefault(
-                    key, MCPHTTPAuth(self.authentication, adapter, None)
+                    key, MCPHTTPAuth(source, settings.resource, None)
                 )
             await authorization.prepare(execution_id or self.execution_id)
         async with self._lock:

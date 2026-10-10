@@ -9,7 +9,7 @@ from typing import Annotated, Literal, Optional
 from urllib.parse import urlsplit
 
 import pydantic
-from vectorops.runner.authentication.mcp_oauth import Settings as OAuthSettings
+from vectorops.runner.authentication.mcp_settings import Settings as OAuthSettings
 from vectorops.runner.authentication import mcp_settings
 
 
@@ -217,6 +217,16 @@ class HTTPServer(Server):
         ):
             raise ValueError("MCP HTTP requires HTTPS except on loopback")
         return value
+
+    def authentication_settings(
+        self,
+    ) -> (
+        mcp_settings.NoAuth
+        | mcp_settings.HeaderAuth
+        | mcp_settings.Settings
+        | mcp_settings.ClientCredentials
+    ):
+        return mcp_settings.selected(self.auth, self.oauth, self.credential)
 
     @pydantic.field_validator("credential")
     @classmethod

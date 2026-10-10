@@ -373,7 +373,11 @@ async def test_401_refresh_is_bounded_and_does_not_follow_challenge_urls() -> No
         task = asyncio.create_task(auth.acquire(adapter.profile))
         await authorize(auth)
         await task
-        transport = MCPHTTPAuth(auth, adapter, "run")
+        transport = MCPHTTPAuth(
+            await auth.mcp.token_source(remote.settings()),
+            remote.settings().resource,
+            "run",
+        )
         await transport.prepare()
         async with httpx.AsyncClient(auth=transport) as client:
             remote.rejections = 1

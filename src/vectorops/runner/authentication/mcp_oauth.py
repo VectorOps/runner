@@ -2,79 +2,15 @@
 
 import hashlib
 import json
-import math
-import time
 from typing import Optional
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import pydantic
 
-from . import models as m
-
-
-def endpoint(value: str) -> str:
-    parsed = urlsplit(value)
-    if (
-        not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError(
-            "OAuth endpoints must be absolute URLs without credentials, query, or fragment"
-        )
-    if parsed.scheme != "https" and not (
-        parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
-    ):
-        raise ValueError("OAuth endpoints require HTTPS except on loopback")
-    if parsed.port == 0:
-        raise ValueError("OAuth endpoint port must be nonzero")
-    return value
-
-
-class Settings(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(
-        extra="forbid", frozen=True, hide_input_in_errors=True
-    )
-    issuer: str
-    resource: str
-    client_id: str = pydantic.Field(min_length=1, max_length=1024)
-    redirect_uri: str
-    scopes: list[str] = pydantic.Field(default_factory=list, max_length=64)
-    profile: str = pydantic.Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
-
-    @pydantic.field_validator("issuer", "resource", "redirect_uri")
-    @classmethod
-    def valid_url(cls, value: str) -> str:
-        return endpoint(value)
-
-    @pydantic.field_validator("redirect_uri")
-    @classmethod
-    def loopback(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme != "http"
-            or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
-            or not parsed.port
-            or not parsed.path
-        ):
-            raise ValueError(
-                "OAuth callback requires a loopback HTTP URL with explicit port and path"
-            )
-        return value
-
-    @pydantic.field_validator("scopes")
-    @classmethod
-    def scope_tokens(cls, values: list[str]) -> list[str]:
-        for value in values:
-            if not value or any(
-                ord(char) < 33 or ord(char) > 126 or char in ('"', "\\")
-                for char in value
-            ):
-                raise ValueError("OAuth scopes must be valid scope tokens")
-        return sorted(set(values))
+from . import models as m, mcp_tokens
+from .mcp_settings import Settings as Settings, endpoint as endpoint
+from .mcp_tokens import payload as payload
 
 
 async def document(
@@ -84,21 +20,6 @@ async def document(
         if response.status != 200:
             raise m.AuthenticationError("MCP OAuth metadata request was rejected")
         return await payload(response)
-
-
-async def payload(response: aiohttp.ClientResponse) -> dict[str, pydantic.JsonValue]:
-    data = bytearray()
-    async for chunk in response.content.iter_chunked(16384):
-        data.extend(chunk)
-        if len(data) > 65536:
-            raise m.AuthenticationError("MCP OAuth response exceeds the byte limit")
-    try:
-        result = pydantic.TypeAdapter(dict[str, pydantic.JsonValue]).validate_json(
-            bytes(data)
-        )
-    except Exception:
-        raise m.AuthenticationError("Invalid MCP OAuth response") from None
-    return result
 
 
 class MCPAdapter:
@@ -252,40 +173,16 @@ class MCPAdapter:
                             "MCP OAuth token request was rejected"
                         )
                     value = await payload(response)
-            token, lifetime = value.get("access_token"), value.get("expires_in")
             refresh = value.get(
                 "refresh_token", previous.refresh_token if previous else None
             )
-            if (
-                not isinstance(token, str)
-                or not token
-                or any(char.isspace() for char in token)
-            ):
-                raise ValueError()
-            if (
-                not isinstance(lifetime, (int, float))
-                or isinstance(lifetime, bool)
-                or not math.isfinite(lifetime)
-                or lifetime <= 60
-            ):
-                raise ValueError()
-            if str(value.get("token_type", "")).lower() != "bearer":
-                raise ValueError()
             if refresh is not None and (not isinstance(refresh, str) or not refresh):
                 raise ValueError()
-            scope = value.get("scope")
-            if scope is not None and (
-                not isinstance(scope, str)
-                or not set(self.settings.scopes).issubset(scope.split())
-            ):
-                raise m.AuthenticationError("MCP OAuth granted insufficient scopes")
-            return m.Credential(
-                provider=self.profile.provider,
-                profile=self.profile.profile,
-                kind="oauth2",
-                secret=token,
+            return mcp_tokens.credential(
+                value,
+                self.profile,
+                self.settings.scopes,
                 refresh_token=refresh,
-                expires_at=time.time() + lifetime,
             )
         except m.AuthenticationError:
             raise
