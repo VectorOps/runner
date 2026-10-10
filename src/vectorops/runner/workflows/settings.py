@@ -1,7 +1,7 @@
 """Standard workflow defaults from components.workflows.defaults."""
 
 from enum import Enum
-from typing import Literal, Optional
+from typing import Final, Literal, Optional
 
 import connect
 import pydantic
@@ -17,6 +17,13 @@ class ModelTier(str, Enum):
 
 
 ThinkingLevel = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+_AGENT_CONTRACT: Final = (
+    "ee800158fb65d6bc2a744ec88dfa1c7d648ba678df16b5ab5bcb06477ea131de"
+)
+_HELPER_CONTRACT: Final = (
+    "c5f39d86e985ede587f2401e8807f2ea74d2284c8bae061f91717af483e0ad00"
+)
 
 
 class Settings(pydantic.BaseModel):
@@ -61,7 +68,21 @@ async def load_settings() -> Settings:
     return Settings.model_validate(values)
 
 
-class AgentSettings(pydantic.BaseModel):
+class PromptSettings(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+
+    system_prompt: Optional[str] = None
+    system_append: Optional[str] = None
+
+    def compose_prompt(self, default: str, context: str) -> str:
+        """Replace only the base prompt; append instructions before target context."""
+        base = default if self.system_prompt is None else self.system_prompt
+        if self.system_append:
+            base += "\n\n" + self.system_append
+        return base + "\n\n" + context
+
+
+class AgentSettings(PromptSettings):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
     agents: list[str] = pydantic.Field(default_factory=lambda: ["builtin:helper"])
@@ -78,7 +99,7 @@ class AgentSettings(pydantic.BaseModel):
         return references
 
 
-class HelperSettings(pydantic.BaseModel):
+class HelperSettings(PromptSettings):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     thinking_level: Optional[ThinkingLevel] = None
@@ -98,10 +119,16 @@ class HelperSettings(pydantic.BaseModel):
 
 
 async def load_agent_settings() -> AgentSettings:
-    values = await configuration.get_validated("workflows.agent", AgentSettings)
+    """Keep the pre-prompt-settings contract for backward-compatible replay."""
+    values = await configuration.get_validated(
+        "workflows.agent", AgentSettings, contract_digest=_AGENT_CONTRACT
+    )
     return AgentSettings.model_validate(values)
 
 
 async def load_helper_settings() -> HelperSettings:
-    values = await configuration.get_validated("workflows.helper", HelperSettings)
+    """Old recorded settings omit optional prompts and retain packaged defaults."""
+    values = await configuration.get_validated(
+        "workflows.helper", HelperSettings, contract_digest=_HELPER_CONTRACT
+    )
     return HelperSettings.model_validate(values)

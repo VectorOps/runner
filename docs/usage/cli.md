@@ -157,6 +157,28 @@ concise reporting, and precise delegation. The helper contract prohibits file
 changes, mutating commands, recursive delegation, and unsolicited scope expansion;
 it asks for evidence, uncertainties, and at most 300 words unless requested otherwise.
 
+Both workflows accept optional `system_prompt` and `system_append` strings in their
+configuration sections:
+
+```toml
+[components.workflows.agent]
+system_append = "Keep changes small and always report which tests were run."
+
+[components.workflows.helper]
+system_prompt = "You are a read-only research assistant. Report evidence, not guesses."
+system_append = "Include relevant file paths and keep the report under 200 words."
+```
+
+The final prompt is the configured `system_prompt` (or packaged default when omitted),
+followed by `system_append`, followed by automatic target context. An empty
+`system_prompt` deliberately removes the packaged base; an empty `system_append`
+adds nothing. Text is preserved without interpolation. Replacing the base also
+replaces its role instructions, so include any restrictions you want to retain.
+Neither setting changes tools or approval policy. Prompt settings are recorded at
+invocation and reused on resume; editing config does not rewrite an active
+conversation. Previously recorded settings without these fields retain the defaults.
+These settings do not affect `builtin:chat`.
+
 Each workflow records target identity/platform, up to 64 KiB of root `AGENTS.md`,
 and up to 32 entries under `.vocode/skills` from the target environment. Missing
 instructions/skills are optional; other read errors fail rather than silently

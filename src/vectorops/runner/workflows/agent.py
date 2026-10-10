@@ -27,7 +27,7 @@ async def agent(
     conversation = llm.LLM(
         "agent",
         defaults.llm_overrides(model_tier),
-        system_prompt=prompts.AGENT + "\n\n" + prompt_context,
+        system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
     )
     while True:
         conversation.add_message(await llm.request_user_message())

@@ -32,7 +32,7 @@ async def helper(ctx: WorkflowExecutionContext, task: Task) -> pydantic.JsonValu
     conversation = llm.LLM(
         "helper",
         options.llm_overrides(defaults),
-        system_prompt=prompts.HELPER + "\n\n" + prompt_context,
+        system_prompt=options.compose_prompt(prompts.HELPER, prompt_context),
     )
     conversation.add_user_message(task)
     response = await conversation.run(tools=bindings, max_rounds=options.max_rounds)
