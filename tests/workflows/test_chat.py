@@ -67,7 +67,7 @@ async def test_chat_start_turns_and_restart(
             assert backend.settings[0].reasoning.effort == "high"
             assert not backend.requests[0].tools
 
-        path.write_text('[components.workflows.defaults]\nstrong_model = "changed"\n')
+        path.write_text(f'[components.workflows.defaults]\n{tier}_model = "changed"\n')
         async with client.embedded(tmp_path) as connection:
             restored = await pending(connection, identifier)
             assert restored.request_id == next_request.request_id
@@ -76,7 +76,7 @@ async def test_chat_start_turns_and_restart(
             third = await pending(connection, identifier)
             assert third.request_id != restored.request_id
             assert len(backend.requests) == 2
-            assert backend.settings[1].model == f"{tier}-model"
+            assert backend.settings[1].model == "changed"
             assert [message.role for message in backend.requests[1].messages] == [
                 "user",
                 "assistant",

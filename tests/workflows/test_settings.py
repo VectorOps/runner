@@ -5,7 +5,8 @@ import pytest
 
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner.api import llm
+from vectorops.runner.api import composition, llm
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.workflows import settings
 
@@ -66,7 +67,14 @@ async def test_load_and_resolve_with_replay(
     )
 
     async def workflow() -> pydantic.JsonValue:
-        defaults = await settings.load_settings()
+        defaults = settings.Settings.model_validate(
+            await get_config(
+                composition.workflow_context(),
+                "workflows.defaults",
+                {},
+                model=settings.Settings,
+            )
+        )
         strong = await llm.resolve_settings(
             defaults.llm_overrides(settings.ModelTier.STRONG)
         )
@@ -102,7 +110,14 @@ async def test_missing_defaults_inherit_llm(
     )
 
     async def workflow() -> pydantic.JsonValue:
-        defaults = await settings.load_settings()
+        defaults = settings.Settings.model_validate(
+            await get_config(
+                composition.workflow_context(),
+                "workflows.defaults",
+                {},
+                model=settings.Settings,
+            )
+        )
         assert defaults == settings.Settings()
         resolved = await llm.resolve_settings(
             defaults.llm_overrides(settings.ModelTier.WEAK)
@@ -125,7 +140,12 @@ async def test_invalid_configuration_is_a_recorded_failure(
 
     async def workflow() -> pydantic.JsonValue:
         with pytest.raises(ActivityError, match="component configuration is invalid"):
-            await settings.load_settings()
+            await get_config(
+                composition.workflow_context(),
+                "workflows.defaults",
+                {},
+                model=settings.Settings,
+            )
         return None
 
     first = await replay.run(history, workflow, workspace=tmp_path)

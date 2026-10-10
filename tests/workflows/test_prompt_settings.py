@@ -1,5 +1,3 @@
-import hashlib
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,9 +11,9 @@ from tests.fixtures.history import MemoryHistory
 from tests.workflows.test_agent import configure
 from tests.workflows.test_chat import reply
 from vectorops.runner.api import composition
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
-from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.workflow import WorkflowRunner
 from vectorops.runner.workflows import prompts, settings
 
@@ -58,49 +56,26 @@ def test_invalid_prompt_types(
 
 
 @pytest.mark.parametrize("role", ["agent", "helper"])
-async def test_old_settings_replay(
+async def test_recorded_settings_replay(
     role: str, tmp_path: Path, history: MemoryHistory
 ) -> None:
     model = settings.AgentSettings if role == "agent" else settings.HelperSettings
-    schema = model.model_json_schema()
-    for field in ("system_prompt", "system_append"):
-        schema["properties"].pop(field)
-    digest = hashlib.sha256(
-        json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    old_values = model().model_dump(
-        mode="json", exclude={"system_prompt", "system_append"}
-    )
 
-    @composition.activity(
-        name="get_validated", kind="configuration.validated", version=1
-    )
-    async def old_read(
-        ctx: ActivityExecutionContext, name: str, schema_digest: str
-    ) -> pydantic.JsonValue:
-        return old_values
+    async def workflow() -> pydantic.JsonValue:
+        options = model.model_validate(
+            await get_config(
+                composition.workflow_context(), f"workflows.{role}", {}, model=model
+            )
+        )
+        assert options.system_prompt is None
+        assert options.compose_prompt("default", "context") == "default\n\ncontext"
+        return options.model_dump(mode="json")
 
-    async def old_workflow() -> pydantic.JsonValue:
-        return await old_read(f"workflows.{role}", digest)
-
-    first = await replay.run(history, old_workflow, workspace=tmp_path)
+    first = await replay.run(history, workflow, workspace=tmp_path)
     assert first.outcome.kind == "completed"
     (tmp_path / "config.toml").write_text(
         f'[components.workflows.{role}]\nsystem_prompt = "new"\n'
     )
-
-    async def workflow() -> pydantic.JsonValue:
-        options = await (
-            settings.load_agent_settings()
-            if role == "agent"
-            else settings.load_helper_settings()
-        )
-        assert options.system_prompt is None
-        assert options.compose_prompt("default", "context") == "default\n\ncontext"
-        return options.model_dump(
-            mode="json", exclude={"system_prompt", "system_append"}
-        )
-
     assert (
         await replay.run(history, workflow, first.id, workspace=tmp_path)
     ).outcome == first.outcome

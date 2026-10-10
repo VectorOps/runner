@@ -242,6 +242,21 @@ that inherits the workspace model. `reasoning=None` disables workspace reasoning
 Before the first generation it raises `RuntimeError`; construction is synchronous
 and cannot perform a recorded read.
 
+`LLM.set_settings(SettingsOverrides(...))` replaces explicit generation options
+without clearing messages, usage, or compaction history. Omitted fields revert to
+workspace inheritance rather than retaining old overrides. Explicit compaction
+and retry policies are preserved. Call it between generations; overlapping
+mutations are rejected. `LLM.settings` still reports the last resolved generation
+until the next call.
+
+Built-in chat and coding-agent workflows read `workflows.defaults` directly with
+`get_config(ctx, ..., model=Settings)` after each user message and apply the selected
+tier with `set_settings`. Overrides to a tier model or shared thinking level take
+effect on the next turn. Clearing those fields restores `components.llm` inheritance.
+The helper reads shared defaults and `workflows.helper` directly for each task.
+Prompt and tool selection remain invocation-scoped; no settings-loader wrappers
+or legacy workflow-settings schema digests are used.
+
 Workflow-side helpers can call `await llm.resolve_settings(...)` with the same optional
 settings and generation keywords. This requires active workflow context and does
 not work inside an activity; resolve before entering its recorded callback.

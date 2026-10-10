@@ -3,6 +3,7 @@
 import pydantic
 
 from vectorops.runner.api import composition, llm
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.workflows import settings
 
@@ -16,13 +17,15 @@ async def chat(
     ctx: WorkflowExecutionContext,
     model_tier: settings.ModelTier = settings.ModelTier.STRONG,
 ) -> pydantic.JsonValue:
-    """Snapshot shared defaults, then alternate durable input and LLM turns."""
-    defaults = await settings.load_settings()
+    """Retain conversation history while selecting current settings for each turn."""
     conversation = llm.LLM(
         "chat",
-        defaults.llm_overrides(model_tier),
         system_prompt="You are a helpful assistant. Be clear, accurate, and concise.",
     )
     while True:
         conversation.add_message(await llm.request_user_message())
+        defaults = settings.Settings.model_validate(
+            await get_config(ctx, "workflows.defaults", {}, model=settings.Settings)
+        )
+        conversation.set_settings(defaults.llm_overrides(model_tier))
         await conversation.run()

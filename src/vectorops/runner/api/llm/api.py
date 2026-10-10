@@ -118,6 +118,22 @@ class LLM:
         with self._mutation():
             self._system_prompt = prompt
 
+    def set_settings(self, settings: models.SettingsOverrides) -> None:
+        """Replace generation overrides without resetting history or runtime policies.
+
+        Omitted fields inherit workspace LLM settings on the next round instead
+        of retaining a previous explicit value. Compaction and retry are unchanged.
+        """
+        with self._mutation():
+            self._overrides = {
+                **{
+                    key: value
+                    for key, value in self._overrides.items()
+                    if key in ("compaction", "retry")
+                },
+                **explicit_options(settings),
+            }
+
     def set_raise_tool_errors(self, enabled: bool) -> None:
         with self._mutation():
             self._raise_tool_errors = enabled

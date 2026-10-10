@@ -1,13 +1,12 @@
 """Standard workflow defaults from components.workflows.defaults."""
 
 from enum import Enum
-from typing import Final, Literal, Optional
+from typing import Literal, Optional
 
 import connect
 import pydantic
 
-from vectorops.runner.api import composition, llm
-from vectorops.runner.api.configuration import get_config
+from vectorops.runner.api import llm
 from vectorops.runner.references import WorkflowReference
 
 
@@ -18,13 +17,6 @@ class ModelTier(str, Enum):
 
 
 ThinkingLevel = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
-
-_AGENT_CONTRACT: Final = (
-    "ee800158fb65d6bc2a744ec88dfa1c7d648ba678df16b5ab5bcb06477ea131de"
-)
-_HELPER_CONTRACT: Final = (
-    "c5f39d86e985ede587f2401e8807f2ea74d2284c8bae061f91717af483e0ad00"
-)
 
 
 class Settings(pydantic.BaseModel):
@@ -61,14 +53,6 @@ class Settings(pydantic.BaseModel):
                 effort=self.thinking_level
             ).model_dump(mode="json", exclude_unset=True)
         return llm.SettingsOverrides.model_validate(values)
-
-
-async def load_settings() -> Settings:
-    """Read a validated snapshot that remains stable when the workflow replays."""
-    values = await get_config(
-        composition.workflow_context(), "workflows.defaults", {}, model=Settings
-    )
-    return Settings.model_validate(values)
 
 
 class PromptSettings(pydantic.BaseModel):
@@ -119,27 +103,3 @@ class HelperSettings(PromptSettings):
         if self.temperature is not None:
             values["temperature"] = self.temperature
         return llm.SettingsOverrides.model_validate(values)
-
-
-async def load_agent_settings() -> AgentSettings:
-    """Keep the pre-prompt-settings contract for backward-compatible replay."""
-    values = await get_config(
-        composition.workflow_context(),
-        "workflows.agent",
-        {},
-        model=AgentSettings,
-        contract_digest=_AGENT_CONTRACT,
-    )
-    return AgentSettings.model_validate(values)
-
-
-async def load_helper_settings() -> HelperSettings:
-    """Old recorded settings omit optional prompts and retain packaged defaults."""
-    values = await get_config(
-        composition.workflow_context(),
-        "workflows.helper",
-        {},
-        model=HelperSettings,
-        contract_digest=_HELPER_CONTRACT,
-    )
-    return HelperSettings.model_validate(values)

@@ -5,6 +5,7 @@ from typing import Annotated
 import pydantic
 
 from vectorops.runner.api import composition, llm, tools
+from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.workflows import context, prompts, settings
 from vectorops.runner.workflows.tools import default_collections
@@ -23,8 +24,12 @@ Task = Annotated[str, pydantic.Field(min_length=1, max_length=65536, pattern=r"\
 )
 async def helper(ctx: WorkflowExecutionContext, task: Task) -> pydantic.JsonValue:
     """Run one delegated task without interactive input or recursive delegation."""
-    defaults = await settings.load_settings()
-    options = await settings.load_helper_settings()
+    defaults = settings.Settings.model_validate(
+        await get_config(ctx, "workflows.defaults", {}, model=settings.Settings)
+    )
+    options = settings.HelperSettings.model_validate(
+        await get_config(ctx, "workflows.helper", {}, model=settings.HelperSettings)
+    )
     prompt_context = await context.load_context()
     bindings = await tools.load_collection(
         options.tool_collection, defaults=default_collections([])

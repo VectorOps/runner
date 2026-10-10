@@ -55,8 +55,11 @@ These fields are optional. An unset tier inherits `components.llm.model`; an uns
 thinking level inherits `components.llm.reasoning`. At least the selected tier's
 model or the fallback model must be configured before generation. Thinking levels
 are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; provider/model support
-still applies. Shared workflow defaults are snapshotted at invocation and replayed
-on resume. Other LLM options retain their existing live configuration behavior.
+still applies. Chat and the coding agent read shared defaults through
+`get_config(ctx, ...)` after each user message, before generating that turn.
+Runtime model and thinking-level overrides therefore apply to the next turn,
+without clearing conversation history. Completed reads replay their recorded
+values; new turns read current effective settings. TOML edits require runner restart.
 
 Start a daemon in one terminal:
 
@@ -132,7 +135,9 @@ model does not support these options. Defaults and precedence are:
 | `workflows.helper.temperature` | Unset | Inherits `components.llm.temperature` |
 | `workflows.helper.max_rounds` | `30` | Positive generation-round limit per delegated task; exhaustion fails the task |
 
-Workflow settings are recorded at invocation. Available child descriptors are
+Agent prompt and tool settings are recorded at invocation; shared model defaults
+are refreshed each turn. The helper reads shared and helper-specific settings
+directly through `get_config(ctx, ...)` for each delegated task. Available child descriptors are
 recorded before the parent's first input. Discovery does not grant delegation
 access. Each child has its own conversation; the parent must supply task context.
 
@@ -176,8 +181,12 @@ adds nothing. Text is preserved without interpolation. Replacing the base also
 replaces its role instructions, so include any restrictions you want to retain.
 Neither setting changes tools or approval policy. Prompt settings are recorded at
 invocation and reused on resume; editing config does not rewrite an active
-conversation. Previously recorded settings without these fields retain the defaults.
+conversation.
 These settings do not affect `builtin:chat`.
+
+The direct configuration-read sequence replaces the old settings-loader sequence.
+Start new built-in executions when upgrading from that implementation; old activity
+ordering and legacy settings-schema digests are not migrated.
 
 Each workflow records target identity/platform, up to 64 KiB of root `AGENTS.md`,
 and up to 32 entries under `.vocode/skills` from the target environment. Missing
