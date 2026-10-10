@@ -83,7 +83,9 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
             item.descriptor.reference for item in [*page.workflows, *rest.workflows]
         ]
         assert references == [
+            "builtin:agent",
             "builtin:chat",
+            "builtin:helper",
             "flow:approval",
             "flow:child",
             "flow:main",
@@ -279,7 +281,7 @@ async def test_cli_over_tcp_and_shell_exit_does_not_stop(
                 namespace=cli.Arguments(),
             )
             await cli.dispatch(args)
-            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 4
+            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 6
             async with await client.RunnerClient.tcp(port, token) as connection:
                 accepted = await connection.start(
                     p.Start(reference="flow:main", idempotency_key="start")

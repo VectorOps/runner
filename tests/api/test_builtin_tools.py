@@ -417,7 +417,7 @@ async def test_environment_tools_replay_without_io(
         f"[environment]\nkind = 'local'\nbase_project_path = {json.dumps(str(workspace))}\n"
         "[components.tools.approval]\napprove_all = true\n"
     )
-    (workspace / "workflows/builtin.py").write_text("""
+    (workspace / "workflows/tool_replay.py").write_text("""
 import connect
 import sys
 from vectorops.runner.api import tools
@@ -431,7 +431,7 @@ async def main(ctx):
     return [read.model_dump(mode="json"), process.model_dump(mode="json")]
 """)
     runner = WorkflowRunner(workspace, history)
-    first = await runner.run("builtin:main", workflow_id="root")
+    first = await runner.run("tool_replay:main", workflow_id="root")
     assert isinstance(first, list)
     assert all(
         not connect.ToolResultMessage.model_validate(result).is_error
@@ -449,6 +449,6 @@ async def main(ctx):
         ),
     ):
         second = await runner.run(
-            "builtin:main", continue_from_step_id=history.heads["root"]
+            "tool_replay:main", continue_from_step_id=history.heads["root"]
         )
     assert second == first

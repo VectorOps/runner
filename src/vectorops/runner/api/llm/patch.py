@@ -1,14 +1,16 @@
 """Apply-patch tool binding using the standard approval and replay machinery."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 import connect
 import pydantic
 
+from vectorops.runner.api.tool_registry import ToolConfig, register_tool
 from vectorops.runner.patch import PatchService, get_system_instruction
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 from . import tools
+from .environment_tools import environment
 
 
 class PatchArguments(pydantic.BaseModel):
@@ -26,7 +28,7 @@ class PatchArguments(pydantic.BaseModel):
 
 
 def apply_patch_tool(
-    service: PatchService,
+    service: Optional[PatchService] = None,
     *,
     format: str = "v4a",
     approval: Optional[tools.ToolApproval] = None,
@@ -36,6 +38,9 @@ def apply_patch_tool(
     async def invoke(
         context: ActivityExecutionContext, arguments: PatchArguments
     ) -> tools.ToolResponse:
+        nonlocal service
+        if service is None:
+            service = PatchService(environment(context))
         result = await service.apply(
             arguments.text, format=format, reverse=arguments.reverse
         )
@@ -59,3 +64,12 @@ def apply_patch_tool(
         invoke=invoke,
         approval=approval,
     )
+
+
+class PatchConfig(ToolConfig):
+    format: Literal["v4a", "patch"] = "v4a"
+
+
+@register_tool("apply_patch", config=PatchConfig)
+def configured_patch(config: PatchConfig) -> tools.Tool[PatchArguments]:
+    return apply_patch_tool(format=config.format)

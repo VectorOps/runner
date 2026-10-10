@@ -187,9 +187,13 @@ async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
     resolver = WorkflowResolver(tmp_path)
     first = await resolver.discover(limit=1)
     assert [item.reference for item in first.workflows] == ["aaa:double"]
-    second = await resolver.discover(after=first.next_after, limit=1)
-    assert [item.reference for item in second.workflows] == ["builtin:chat"]
-    assert second.next_after == "builtin:chat"
+    second = await resolver.discover(after=first.next_after, limit=3)
+    assert [item.reference for item in second.workflows] == [
+        "builtin:agent",
+        "builtin:chat",
+        "builtin:helper",
+    ]
+    assert second.next_after == "builtin:helper"
     last = await resolver.discover(after=second.next_after, limit=1)
     assert [item.reference for item in last.workflows] == ["zzz:double"]
     assert last.next_after is None
@@ -197,5 +201,9 @@ async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
 
 async def test_builtin_catalog_without_local_directory(tmp_path: Path) -> None:
     catalog = await WorkflowResolver(tmp_path / "absent").discover()
-    assert [item.reference for item in catalog.workflows] == ["builtin:chat"]
+    assert [item.reference for item in catalog.workflows] == [
+        "builtin:agent",
+        "builtin:chat",
+        "builtin:helper",
+    ]
     assert catalog.errors == []

@@ -8,6 +8,7 @@ import connect
 import pydantic
 
 from vectorops.runner.api import composition as c
+from vectorops.runner.api.tool_registry import register_tool
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from . import tools
@@ -125,6 +126,7 @@ class UpdatePlanTool(tools.WorkflowToolBinding):
         return pydantic.TypeAdapter(list[Todo]).validate_python(snapshot)
 
 
+@register_tool("update_plan")
 def update_plan_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> UpdatePlanTool:

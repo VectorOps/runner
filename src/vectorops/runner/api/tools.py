@@ -10,6 +10,13 @@ from .llm.subworkflows import (
 from .llm.read_file import read_file_tool as read_file_tool
 from .llm.plan import update_plan_tool as update_plan_tool
 from .llm.web_fetch import web_fetch_tool as web_fetch_tool
+from .llm.list_files import list_files_tool as list_files_tool
+from .mcp import configured_tools as _configured_mcp_tools
+from .tool_registry import ToolConfig as ToolConfig, register_tool as register_tool
+from .tool_collections import (
+    ToolCollection as ToolCollection,
+    load_collection as load_collection,
+)
 
 exec_tool = _environment.exec_tool
 poll_process_tool = _environment.poll_process_tool
@@ -28,6 +35,11 @@ ToolApprovalResponse = _tools.ToolApprovalResponse
 invoke_tool = _tools.invoke_tool
 
 __all__ = [
+    "ToolConfig",
+    "register_tool",
+    "ToolCollection",
+    "load_collection",
+    "list_files_tool",
     "Tool",
     "ToolBinding",
     "ToolSet",

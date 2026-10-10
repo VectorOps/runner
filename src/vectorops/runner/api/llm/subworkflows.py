@@ -9,6 +9,7 @@ import pydantic
 from jsonschema.exceptions import ValidationError
 
 from vectorops.runner.api import composition as c, definitions
+from vectorops.runner.api.tool_registry import ToolConfig, register_tool
 from vectorops.runner.api.llm import tools
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -139,3 +140,25 @@ async def subagent_tool(
 ) -> SubworkflowTool:
     """Create a tool for permitted agents without starting a child workflow."""
     return await subworkflow_tool(references, name=name, approval=approval)
+
+
+class SubworkflowConfig(ToolConfig):
+    references: list[str] = pydantic.Field(min_length=1)
+
+    @pydantic.field_validator("references", mode="after")
+    @classmethod
+    def validate_references(cls, values: list[str]) -> list[str]:
+        normalized = [str(WorkflowReference.parse(value)) for value in values]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("workflow references must be unique")
+        return normalized
+
+
+@register_tool("run_agent", config=SubworkflowConfig)
+async def configured_subagent(config: SubworkflowConfig) -> SubworkflowTool:
+    return await subagent_tool(config.references)
+
+
+@register_tool("subworkflow", config=SubworkflowConfig)
+async def configured_subworkflow(config: SubworkflowConfig) -> SubworkflowTool:
+    return await subworkflow_tool(config.references)

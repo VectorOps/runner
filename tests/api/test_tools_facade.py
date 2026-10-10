@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from vectorops.runner.api import llm, tools
+from vectorops.runner.api import tool_collections, tool_registry
+import vectorops.runner.api.llm.list_files as list_files
 import vectorops.runner.api.llm.environment_tools as environment_tools
 import vectorops.runner.api.llm.patch as patch
 import vectorops.runner.api.llm.plan as plan
@@ -16,6 +18,11 @@ from vectorops.runner.patch import PatchService
 
 def test_exports_preserve_implementation_identity() -> None:
     expected = {
+        "ToolConfig": tool_registry.ToolConfig,
+        "register_tool": tool_registry.register_tool,
+        "ToolCollection": tool_collections.ToolCollection,
+        "load_collection": tool_collections.load_collection,
+        "list_files_tool": list_files.list_files_tool,
         "Tool": llm.Tool,
         "ToolBinding": llm.ToolBinding,
         "ToolSet": llm.ToolSet,

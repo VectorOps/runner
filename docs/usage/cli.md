@@ -89,7 +89,100 @@ flow for interactive conversations.
 
 Built-in references remain `builtin:name` in descriptors and execution history.
 Only explicitly registered names are accepted; unknown names do not fall back to
-files or arbitrary Python imports. `builtin:chat` is the first registered workflow.
+files or arbitrary Python imports. Registered workflows are `builtin:chat`,
+`builtin:agent`, and `builtin:helper`.
+
+## Coding agent and helper
+
+`builtin:agent` is the interactive coding workflow. It uses a detailed coding
+prompt, retains its conversation and plan between messages, and delegates bounded
+research to `builtin:helper` through `run_agent`. The helper accepts a required `task`
+string, returns a text report, and never requests a conversational user message.
+Tool approvals and authentication can still require client input.
+
+Both workflows require an attached target environment. Add these sections to the
+workspace's `config.toml` alongside the model defaults above:
+
+```toml
+[environment]
+kind = "local"
+base_project_path = "/absolute/path/to/repository"
+
+[components.workflows.agent]
+agents = ["builtin:helper"]
+
+[components.workflows.helper]
+thinking_level = "xhigh"
+temperature = 0.4
+max_rounds = 30
+```
+
+The helper-specific thinking level and temperature shown here match the Orion-style
+example; they are optional, not hard-coded provider assumptions. Omit them when a
+model does not support these options. Defaults and precedence are:
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| Agent input `model_tier` | `strong` | Selects a shared model tier, as in chat |
+| `workflows.agent.agents` | `["builtin:helper"]` | Default child references; `[]` removes default `run_agent`; explicit collection configuration takes precedence |
+| `workflows.agent.tool_collection` | `agent` | Named tool collection for the parent |
+| `workflows.helper.tool_collection` | `helper` | Named tool collection for the helper |
+| Helper model | Shared `weak_model` | Falls back to `components.llm.model` when unset |
+| `workflows.helper.thinking_level` | Unset | Overrides shared thinking level, which otherwise inherits `components.llm.reasoning` |
+| `workflows.helper.temperature` | Unset | Inherits `components.llm.temperature` |
+| `workflows.helper.max_rounds` | `30` | Positive generation-round limit per delegated task; exhaustion fails the task |
+
+Workflow settings are recorded at invocation. Available child descriptors are
+recorded before the parent's first input. Discovery does not grant delegation
+access. Each child has its own conversation; the parent must supply task context.
+
+Start the parent against a running daemon:
+
+```bash
+uv run vops-runner client --port 8765 execution start builtin:agent
+```
+
+Use the same `input list` and typed `input send --value` flow as chat. To start the
+helper directly:
+
+```bash
+uv run vops-runner client --port 8765 execution start builtin:helper --input '{"task":"Locate the parser tests. Report relevant paths and evidence only; do not change files."}'
+```
+
+### Prompts and capabilities
+
+Packaged prompts live in `src/vectorops/runner/workflows/prompts.py`. The parent
+contract covers planning, scoped investigation, minimal patches, validation,
+concise reporting, and precise delegation. The helper contract prohibits file
+changes, mutating commands, recursive delegation, and unsolicited scope expansion;
+it asks for evidence, uncertainties, and at most 300 words unless requested otherwise.
+
+Each workflow records target identity/platform, up to 64 KiB of root `AGENTS.md`,
+and up to 32 entries under `.vocode/skills` from the target environment. Missing
+instructions/skills are optional; other read errors fail rather than silently
+discard instructions. Truncation is reported in the prompt. Skill directory paths
+are supplied for on-demand `SKILL.md` reads; skill bodies are not all injected.
+Nested `AGENTS.md` discovery is guided by the prompt, not automatically traversed.
+Recorded context is reused on resume, even if target files have changed.
+
+By default the helper has `read_file`, bounded non-recursive `list_files`, `exec`, and
+`poll_process`. The parent additionally has `apply_patch`, `update_plan`, process
+stdin/termination/listing tools, and the configured `run_agent` binding. Focused
+search uses `rg` through `exec`; no unavailable semantic search or summary tool is
+advertised. Patches default to the existing `v4a` format.
+
+Use [named tool collections](../config/tool-collections.md) to replace these sets,
+configure tools by name, or add selected MCP tools and registered custom factories.
+Changing a collection changes available capabilities, not the workflow's role prompt;
+keep helper collections consistent with its read-only, non-delegating contract.
+
+All tool calls use the existing approval policy; these workflows do not install
+auto-approval rules. The helper's read-only restriction is a **prompt contract, not
+a sandbox**: approved `exec` commands can mutate files or access resources beyond
+the filesystem tool root. Review commands before approving them and do not grant
+broad execution approval when read-only enforcement is required. Shell execution
+remains disabled unless explicitly enabled by the environment policy. Project-
+specific Ghidra instructions are not included in the generic prompts.
 
 ## Connect to an existing runner
 

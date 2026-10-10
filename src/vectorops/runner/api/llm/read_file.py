@@ -8,6 +8,7 @@ from typing import Literal, Optional
 import connect
 import pydantic
 
+from vectorops.runner.api.tool_registry import register_tool
 from vectorops.runner.environment import models
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from . import tools
@@ -33,6 +34,7 @@ class ReadFileArguments(pydantic.BaseModel):
         return self
 
 
+@register_tool("read_file")
 def read_file_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[ReadFileArguments]:

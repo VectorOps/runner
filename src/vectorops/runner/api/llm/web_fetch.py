@@ -12,6 +12,7 @@ import aiohttp
 import connect
 import pydantic
 
+from vectorops.runner.api.tool_registry import register_tool
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from . import tools
 
@@ -102,6 +103,7 @@ class _HTMLText(HTMLParser):
         )
 
 
+@register_tool("web_fetch")
 def web_fetch_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[WebFetchArguments]:

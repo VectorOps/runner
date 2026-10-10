@@ -7,6 +7,7 @@ from typing import Optional
 import connect
 import pydantic
 
+from vectorops.runner.api.tool_registry import register_tool
 from vectorops.runner.environment.protocol import TargetEnvironment
 from vectorops.runner.environment.processes import models as processes
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -42,6 +43,7 @@ def process_response(result: processes.ProcessResult) -> tools.ToolResponse:
     )
 
 
+@register_tool("exec")
 def exec_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[processes.ExecRequest]:
@@ -62,6 +64,7 @@ def exec_tool(
     )
 
 
+@register_tool("poll_process")
 def poll_process_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[processes.PollRequest]:
@@ -87,6 +90,7 @@ class StdinArguments(pydantic.BaseModel):
     eof: bool = False
 
 
+@register_tool("write_stdin")
 def write_stdin_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[StdinArguments]:
@@ -111,6 +115,7 @@ def write_stdin_tool(
     )
 
 
+@register_tool("kill_process")
 def kill_process_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[processes.SessionRequest]:
@@ -135,6 +140,7 @@ class EmptyArguments(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
 
+@register_tool("list_processes")
 def list_processes_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[EmptyArguments]:

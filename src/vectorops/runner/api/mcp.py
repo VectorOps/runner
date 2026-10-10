@@ -6,6 +6,7 @@ from typing import Final, Literal, Optional
 import pydantic
 
 from vectorops.runner.api import composition as c, configuration
+from vectorops.runner.api.tool_registry import ToolConfig, register_tool
 from vectorops.runner.api.llm.tools import ToolBinding
 from vectorops.runner.mcp import models
 from vectorops.runner.mcp import content, content_binding
@@ -15,6 +16,18 @@ from vectorops.runner.mcp.transport import MCPError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 Selection = models.Selection
+
+
+class ToolSelectionConfig(ToolConfig):
+    selections: list[Selection]
+    component: str = "mcp"
+
+
+@register_tool("mcp", config=ToolSelectionConfig)
+async def configured_tools(config: ToolSelectionConfig) -> list[ToolBinding]:
+    return await discover(config.selections, component=config.component)
+
+
 _SETTINGS_CONTRACT: Final = (
     "e27b17f60c6866b249b37b466f640e1123e34cfe37c0fc41eb7103c36cbd58e3"
 )
