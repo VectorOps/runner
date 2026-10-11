@@ -167,7 +167,7 @@ async def test_persistent_execution_closes_environment(
         os.kill(pid, 0)
 
 
-async def test_root_registry_without_environment_and_repeated_cancellation(
+async def test_root_registry_with_default_environment_and_repeated_cancellation(
     workspace: Path,
 ) -> None:
     from vectorops.runner import models
@@ -181,7 +181,7 @@ async def test_root_registry_without_environment_and_repeated_cancellation(
     finished = asyncio.Event()
 
     async def activity(ctx: ActivityExecutionContext) -> None:
-        assert ctx.environment is None and ctx.resources is not None
+        assert ctx.environment is not None and ctx.resources is not None
 
         async def cleanup() -> None:
             cleaning.set()

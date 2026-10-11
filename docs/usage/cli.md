@@ -68,8 +68,11 @@ Python entry points `RunnerProject.open`, `WorkflowRunner`, `RunnerService`,
 `embedded`, and `daemon.serve` accept the same `workspace_directory` keyword.
 `None` uses the environment/default; `""` selects the direct layout. Project identity
 remains the supplied project root; `RunnerProject.workspace_path` identifies the
-runner file directory. This setting does not change the explicitly configured
-target `environment.base_project_path`.
+runner file directory. Without an `[environment]` section, tools use a local target
+rooted at the supplied project directory, not `.voc`. An explicit
+`environment.base_project_path` overrides that default. Changing the runner file
+directory does not change the target. Default attachment does not bypass tool
+approval or enable shell execution.
 
 `resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
 
@@ -144,8 +147,9 @@ research to `builtin:helper` through `run_agent`. The helper accepts a required 
 string, returns a text report, and never requests a conversational user message.
 Tool approvals and authentication can still require client input.
 
-Both workflows require an attached target environment. Add these sections to the
-workspace's `config.toml` alongside the model defaults above:
+Both workflows use the project directory as their local target by default.
+To target a different directory, add an explicit environment section to the
+workspace's `config.toml`. The component settings below are optional overrides:
 
 ```toml
 [environment]

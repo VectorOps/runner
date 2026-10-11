@@ -13,8 +13,42 @@ async def test_workspace_defaults(tmp_path: Path) -> None:
     assert project.config_path == project.root / "config.toml"
     assert project.workflows_path.is_dir()
     assert project.data_path.is_dir()
-    assert project.config == RunnerConfig()
-    assert project.config.environment is None
+    assert project.config == RunnerConfig().for_project(project.root)
+    assert project.config.environment is not None
+    assert project.config.environment.base_project_path == str(project.root)
+
+
+@pytest.mark.parametrize("directory", [".voc", "custom/runner", ""])
+@pytest.mark.parametrize("existing_config", [False, True])
+async def test_default_target_is_project_not_runner_directory(
+    tmp_path: Path, directory: str, existing_config: bool
+) -> None:
+    workspace = tmp_path / directory
+    workspace.mkdir(parents=True, exist_ok=True)
+    config = workspace / "config.toml"
+    if existing_config:
+        config.write_text('[components.llm]\nmodel = "test"\n')
+    project = await RunnerProject.open(tmp_path, workspace_directory=directory)
+    assert project.config.environment is not None
+    assert project.config.environment.kind == "local"
+    assert project.config.environment.base_project_path == str(tmp_path.resolve())
+    assert not project.config.environment.processes.allow_shell
+    assert project.data_path == workspace / "data"
+    if existing_config:
+        assert config.read_text() == '[components.llm]\nmodel = "test"\n'
+    else:
+        assert not config.exists()
+
+
+def test_direct_projects_resolve_independent_defaults(tmp_path: Path) -> None:
+    config = RunnerConfig()
+    first = RunnerProject(tmp_path / "first", config)
+    second = RunnerProject(tmp_path / "second", config)
+    assert config.environment is None
+    assert first.config.environment is not None
+    assert second.config.environment is not None
+    assert first.config.environment.base_project_path == str(tmp_path / "first")
+    assert second.config.environment.base_project_path == str(tmp_path / "second")
 
 
 async def test_configuration_overrides(tmp_path: Path) -> None:

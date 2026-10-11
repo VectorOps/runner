@@ -21,7 +21,15 @@ max_write_bytes = 16777216
 max_list_entries = 1000
 ```
 
-`kind` and `base_project_path` are required in runner configuration. Only `local` is supported. The base path must be absolute and identify an existing directory at attachment time; attachment never creates the project. It is independent of the runner workspace. The three limits are positive integers with the defaults shown above. Unknown settings and backends are rejected. Omitting `environment` leaves the runner without a target configuration.
+When an `[environment]` section is supplied, `kind` and `base_project_path` are required. Only `local` is supported. The base path must be absolute and identify an existing directory at attachment time; attachment never creates the project. The three limits are positive integers with the defaults shown above. Unknown settings and backends are rejected.
+
+Without an `[environment]` section, the runner uses a local environment rooted at
+the project directory passed to it. For `--project /home/user/projects/example`,
+tools target that directory, while runner files live under its `.voc/` subdirectory
+by default. Changing `workspace_directory` does not change this target. Explicit
+environment configuration takes precedence. Defaults are resolved in memory;
+no machine-specific absolute path is written into workspace configuration.
+Tool approvals still apply, and shell execution remains disabled by default.
 
 Explicit attachment is available independently of runner sessions:
 
@@ -284,7 +292,7 @@ Enforce policy at the environment boundary as well as tool approval. Bind approv
 
 ### Implemented runtime ownership
 
-`WorkflowRunner` creates an `ExecutionResources` scope for each root run, attaches the optional configured environment, and passes both through `WorkflowExecutor` and `ExecutionSession`. Activities receive `ctx.environment` and `ctx.resources`; neither is serialized into history or compared as part of activity identity. Without environment configuration, `ctx.environment` is `None`, but the cleanup registry is still available. Direct executor/session construction accepts optional externally owned dependencies and does not close them.
+`WorkflowRunner` creates an `ExecutionResources` scope for each root run, attaches the explicit environment or default local project environment, and passes both through `WorkflowExecutor` and `ExecutionSession`. Activities receive `ctx.environment` and `ctx.resources`; neither is serialized into history or compared as part of activity identity. Direct executor/session construction still accepts optional externally owned dependencies, including no environment, and does not close them.
 
 Child workflows borrow the root's attachment and registry. Finishing a child or a tool call does not close the environment. Concurrent root executions have independent attachments and process managers, even when their target path is the same.
 

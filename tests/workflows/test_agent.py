@@ -228,13 +228,39 @@ async def test_helper_round_limit(tmp_path: Path) -> None:
     assert len(backend.requests) == 1
 
 
-async def test_missing_environment_fails_before_generation(tmp_path: Path) -> None:
-    with patch.object(provider, "ConnectProvider") as factory:
-        with pytest.raises(ActivityError, match="environment"):
-            await WorkflowRunner(tmp_path).run(
-                "builtin:helper", input={"task": "Inspect."}
+async def test_agent_without_config_reaches_user_input(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Default project instructions.")
+    backend = FakeProvider([])
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        async with client.embedded(tmp_path, workspace_directory=".voc") as connection:
+            accepted = await connection.start(
+                protocol.Start(reference="builtin:agent", idempotency_key="start")
             )
-        factory.assert_not_called()
+            request = await pending(connection, accepted.execution_id)
+            assert request.channel == "user.message"
+            assert not backend.requests
+            await connection.stop(accepted.execution_id)
+            await settled(connection, accepted.execution_id)
+    assert (tmp_path / ".voc/data").is_dir()
+    assert not (tmp_path / ".voc/config.toml").exists()
+
+
+async def test_helper_uses_default_project_context(tmp_path: Path) -> None:
+    workspace = tmp_path / ".voc"
+    workspace.mkdir()
+    (workspace / "config.toml").write_text('[components.llm]\nmodel = "test"\n')
+    (tmp_path / "AGENTS.md").write_text("Default project instructions.")
+    (workspace / "AGENTS.md").write_text("Wrong runner directory instructions.")
+    backend = FakeProvider([answer("Inspected.")])
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        runner = WorkflowRunner(tmp_path, workspace_directory=".voc")
+        assert (
+            await runner.run("builtin:helper", input={"task": "Inspect."})
+            == "Inspected."
+        )
+    prompt = str(backend.requests[0].system_prompt)
+    assert "Default project instructions." in prompt
+    assert "Wrong runner directory instructions." not in prompt
 
 
 @pytest.mark.parametrize("task", ["", " ", "\n", "x" * 65537])

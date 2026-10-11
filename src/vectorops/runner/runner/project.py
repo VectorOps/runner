@@ -15,7 +15,10 @@ import typing
 import pydantic
 
 from vectorops.runner import configuration as overrides, diagnostics
-from vectorops.runner.environment.configuration import EnvironmentConfig
+from vectorops.runner.environment.configuration import (
+    EnvironmentConfig,
+    LocalEnvironmentConfig,
+)
 from vectorops.runner.tool_policy import ToolPolicy
 
 if typing.TYPE_CHECKING:
@@ -45,6 +48,18 @@ class RunnerConfig(pydantic.BaseModel):
     )
     components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     environment: typing.Optional[EnvironmentConfig] = None
+
+    def for_project(self, root: Path) -> typing.Self:
+        """Resolve the implicit local target without changing explicit configuration."""
+        if self.environment is not None:
+            return self
+        return self.model_copy(
+            update={
+                "environment": LocalEnvironmentConfig(
+                    base_project_path=str(root.expanduser().absolute())
+                )
+            }
+        )
 
     @pydantic.field_validator("workflows_directory", "data_directory", mode="after")
     @classmethod
@@ -211,6 +226,9 @@ class RunnerProject:
     workflow_resolver: typing.Optional[WorkflowResolver] = field(
         default=None, compare=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "config", self.config.for_project(self.root))
 
     @cached_property
     def configuration(self) -> Configuration:
