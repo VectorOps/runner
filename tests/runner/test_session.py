@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
+from datetime import datetime, timezone
 import typing
 
 import pydantic
@@ -10,6 +11,111 @@ from vectorops.runner import models
 from vectorops.runner.runner import context
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.session import ExecutionSession
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_activity_and_workflow_timestamps(
+    history: MemoryHistory, failed: bool
+) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    workflow = models.Workflow(
+        id="w", definition_ref="file:workflow", created_at=created_at
+    )
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id=None, child_heads={}
+    )
+    reserved: list[models.WorkflowStep] = []
+
+    async def activity(ctx: ActivityExecutionContext) -> int:
+        pending = next(iter(history.steps.values()))
+        reserved.append(pending)
+        assert pending.created_at is not None
+        assert pending.completed_at is None
+        if failed:
+            raise ValueError("failure")
+        return 1
+
+    async def invoke() -> int:
+        response = await session.submit(
+            context.ActivityRequest(
+                models.StepOperation(kind="activity", name="work"), activity
+            )
+        )
+        assert response.kind == "activity"
+        if response.outcome.kind == "failed":
+            raise ValueError("failure")
+        return 1
+
+    completion = await session.run(invoke)
+    activity_step = await history.get_step(reserved[0].id)
+    assert activity_step.created_at == reserved[0].created_at
+    assert activity_step.created_at is not None
+    assert activity_step.completed_at is not None
+    assert completion.created_at == created_at
+    assert completion.completed_at is not None
+    assert (
+        created_at
+        <= activity_step.created_at
+        <= activity_step.completed_at
+        <= completion.completed_at
+    )
+    assert datetime.fromisoformat(
+        completion.completed_at
+    ).utcoffset() == timezone.utc.utcoffset(None)
+    assert completion.outcome.kind == ("failed" if failed else "completed")
+    before = dict(history.steps)
+    session = ExecutionSession(
+        history,
+        workflow,
+        unused_child,
+        continue_from_step_id=completion.id,
+        child_heads={},
+    )
+    assert await session.run(invoke) == completion
+    assert history.steps == before
+    assert len(reserved) == 1
+
+
+async def test_streaming_timestamps_only_finalize_on_terminal_snapshot(
+    history: MemoryHistory,
+) -> None:
+    workflow = models.Workflow(id="w", definition_ref="file:workflow")
+    await history.save_workflow(workflow)
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id=None, child_heads={}
+    )
+    step = await session.append(
+        models.StepOperation(kind="activity", name="stream"), models.StepStreaming()
+    )
+    assert step.created_at is not None
+    assert step.completed_at is None
+    for index in range(3):
+        await session.update(
+            step.model_copy(update={"outcome": models.StepStreaming(state=index)})
+        )
+        snapshot = await history.get_step(step.id)
+        assert snapshot.created_at == step.created_at
+        assert snapshot.completed_at is None
+    await session.update(
+        step.model_copy(update={"outcome": models.StepCompleted(result=2)})
+    )
+    completed = await history.get_step(step.id)
+    assert completed.created_at == step.created_at
+    assert completed.completed_at is not None
+    assert step.created_at <= completed.completed_at
+
+
+def test_legacy_history_has_no_invented_timestamps() -> None:
+    workflow = models.Workflow.model_validate_json(
+        '{"id":"w","definition_ref":"file:workflow"}'
+    )
+    step = models.WorkflowStep.model_validate_json(
+        '{"id":"s","workflow_id":"w","operation":{"kind":"workflow.complete"},'
+        '"outcome":{"kind":"completed"}}'
+    )
+    assert workflow.created_at is None
+    assert step.created_at is None
+    assert step.completed_at is None
 
 
 async def unused_child(

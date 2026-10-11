@@ -26,6 +26,7 @@ from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
+from vectorops.runner.runner.execution_state import timestamp
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEvent, StepEventSink
 from vectorops.runner.runner.resources import CleanupRegistry, finish_cleanup
@@ -442,12 +443,21 @@ class ExecutionSession:
     async def append(
         self, operation: models.WorkflowOperation, outcome: models.StepOutcome
     ) -> models.WorkflowStep:
+        now = timestamp()
         step = models.WorkflowStep(
             id=uuid4().hex,
             workflow_id=self.workflow.id,
             previous_step_id=self.head,
             operation=operation,
             outcome=outcome,
+            created_at=(
+                self.workflow.created_at
+                if isinstance(operation, models.WorkflowCompleteOperation)
+                else now
+            ),
+            completed_at=(
+                now if outcome.kind in ("completed", "failed", "joined") else None
+            ),
             deferred_delivery=isinstance(
                 operation, (models.StepOperation, models.WorkflowJoinOperation)
             ),
@@ -492,6 +502,12 @@ class ExecutionSession:
                 update={
                     "revision": previous.revision + 1,
                     "deliveries": previous.deliveries,
+                    "created_at": previous.created_at,
+                    "completed_at": (
+                        previous.completed_at or timestamp()
+                        if step.outcome.kind in ("completed", "failed", "joined")
+                        else None
+                    ),
                 }
             )
             await self.history.update_step(step)

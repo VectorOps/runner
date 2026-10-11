@@ -20,6 +20,7 @@ from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEventSink
 from vectorops.runner.runner.errors import ReplayMismatchError
+from vectorops.runner.runner.execution_state import timestamp
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 from vectorops.runner.runner.mailbox import Mailbox
@@ -55,7 +56,12 @@ class WorkflowExecutor:
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
         """Resolve decorator metadata before the immutable configuration is saved."""
-        configuration = configuration.model_copy(update={"tool_policy_version": 1})
+        configuration = configuration.model_copy(
+            update={
+                "tool_policy_version": 1,
+                "created_at": configuration.created_at or timestamp(),
+            }
+        )
         entry = await self._definition(configuration.definition_ref)
         self._configured[configuration.id] = entry
         if not isinstance(entry, composition.WorkflowDefinition):

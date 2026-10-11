@@ -370,6 +370,14 @@ async def test_default_runner_persists_and_replays_after_restart(
             )
 
     completion_id = await asyncio.to_thread(head)
+    workflow = await database.get_workflow("root")
+    before = [record async for record in database.replay_path("root", completion_id)]
+    assert workflow.created_at is not None
+    assert before[-1].created_at == workflow.created_at
+    for step_record in before:
+        assert step_record.created_at is not None
+        assert step_record.completed_at is not None
+        assert step_record.created_at <= step_record.completed_at
     assert (
         await WorkflowRunner(workspace).run(
             "activities:workflow",
@@ -379,6 +387,10 @@ async def test_default_runner_persists_and_replays_after_restart(
         == 2
     )
     assert execution_probe.calls == [0, 1]
+    assert [
+        record async for record in database.replay_path("root", completion_id)
+    ] == before
+    assert await database.get_workflow("root") == workflow
 
 
 async def test_stream_cancellation_and_restart_persist_latest_snapshot(
@@ -407,6 +419,11 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
             )
 
     stream_id = await asyncio.to_thread(head)
+    pending = await database.get_step(stream_id)
+    workflow = await database.get_workflow("root")
+    assert workflow.created_at is not None
+    assert pending.created_at is not None
+    assert pending.completed_at is None
     assert (await database.get_step(stream_id)).outcome == m.StepStreaming(
         state={"index": 0}
     )
@@ -417,6 +434,11 @@ async def test_stream_cancellation_and_restart_persist_latest_snapshot(
     assert (await database.get_step(stream_id)).outcome == m.StepCompleted(
         result={"count": 2}
     )
+    completed = await database.get_step(stream_id)
+    assert completed.created_at == pending.created_at
+    assert completed.completed_at is not None
+    assert completed.created_at <= completed.completed_at
+    assert await database.get_workflow("root") == workflow
 
 
 async def test_nested_children_persist_and_replay(
@@ -439,10 +461,27 @@ async def test_nested_children_persist_and_replay(
                 ).fetchone()[0],
             )
 
+    completion_id = await asyncio.to_thread(completion)
+
+    async def check_timing(workflow_id: str, head_id: str) -> None:
+        workflow = await database.get_workflow(workflow_id)
+        assert workflow.created_at is not None
+        async for record in database.replay_path(workflow_id, head_id):
+            assert record.created_at is not None
+            assert record.completed_at is not None
+            assert workflow.created_at <= record.created_at <= record.completed_at
+            if isinstance(record.operation, m.WorkflowCompleteOperation):
+                assert record.created_at == workflow.created_at
+            if isinstance(record.outcome, m.StepJoined):
+                for child in record.outcome.child_completions:
+                    terminal = await database.get_step(child.completion_step_id)
+                    await check_timing(terminal.workflow_id, terminal.id)
+
+    await check_timing("root", completion_id)
     assert (
         await WorkflowRunner(workspace).run(
             "children:deep_parent",
-            continue_from_step_id=await asyncio.to_thread(completion),
+            continue_from_step_id=completion_id,
             execution_id=record.id,
         )
         == 4

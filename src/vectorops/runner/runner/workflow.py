@@ -476,6 +476,9 @@ class WorkflowRunner:
                 raise ValueError("workflow ID differs from recorded configuration")
             if input is not None and input != configuration.input:
                 raise ValueError("workflow input differs from recorded configuration")
+        elif execution_id is not None:
+            assert workflow_id is not None
+            configuration = await history.get_workflow(workflow_id)
         else:
             configuration = models.Workflow(
                 id=workflow_id if workflow_id is not None else uuid4().hex,
@@ -505,7 +508,7 @@ class WorkflowRunner:
                 resources=resources,
                 mcp=mcp,
             )
-            if continue_from_step_id is None:
+            if continue_from_step_id is None and execution_id is None:
                 configuration = await executor.configure(configuration)
             completion = await executor.execute(
                 configuration,
