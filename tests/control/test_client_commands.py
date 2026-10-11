@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import secrets
 from unittest.mock import patch
@@ -53,6 +54,7 @@ async def command(connection: client.RunnerClient, *words: str) -> None:
 
 async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
     prepare(tmp_path)
+    os.utime(tmp_path / "workflows/flow.py", ns=(1_000_000_000, 1_000_000_000))
     (tmp_path / "workflows/broken.py").write_text("this is invalid python")
     (tmp_path / "outside.py").write_text(sources.read("forbidden_import.py"))
     (tmp_path / "workflows/link.py").symlink_to(tmp_path / "outside.py")
@@ -65,21 +67,26 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
             item.descriptor.reference for item in [*page.workflows, *rest.workflows]
         ]
         assert references == [
-            "builtin:agent",
-            "builtin:chat",
-            "builtin:helper",
             "flow:approval",
             "flow:child",
             "flow:main",
+            "builtin:agent",
+            "builtin:chat",
+            "builtin:helper",
         ]
+        assert rest.next_after is None
         assert (await connection.describe_workflow("flow:plain")).name == "plain"
         (tmp_path / "workflows/generated.py").write_text(
             sources.read("catalog_generated.py")
         )
-        assert "generated:main" in [
-            item.descriptor.reference
-            for item in (await connection.workflows()).workflows
+        os.utime(tmp_path / "workflows/generated.py", ns=(2_000_000_000, 2_000_000_000))
+        newest = await connection.workflows(p.ExecutionList(limit=1))
+        assert [item.descriptor.reference for item in newest.workflows] == [
+            "generated:main"
         ]
+        remaining = await connection.workflows(p.ExecutionList(after=newest.next_after))
+        assert [item.descriptor.reference for item in remaining.workflows] == references
+        assert remaining.next_after is None
         (tmp_path / "workflows/generated.py").unlink()
         assert "generated:main" not in [
             item.descriptor.reference

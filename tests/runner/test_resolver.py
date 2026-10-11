@@ -177,19 +177,50 @@ async def test_unknown_builtin_never_falls_back(tmp_path: Path) -> None:
 async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
     (tmp_path / "aaa.py").write_text(SOURCE)
     (tmp_path / "zzz.py").write_text(SOURCE)
+    os.utime(tmp_path / "aaa.py", ns=(1_000_000_000, 1_000_000_000))
+    os.utime(tmp_path / "zzz.py", ns=(2_000_000_000, 2_000_000_000))
+    resolver = WorkflowResolver(tmp_path)
+    first = await resolver.discover(limit=1)
+    assert [item.reference for item in first.workflows] == ["zzz:double"]
+    assert first.next_after == "zzz:double"
+    second = await resolver.discover(after=first.next_after, limit=3)
+    assert [item.reference for item in second.workflows] == [
+        "aaa:double",
+        "builtin:agent",
+        "builtin:chat",
+    ]
+    assert second.next_after == "builtin:chat"
+    last = await resolver.discover(after=second.next_after, limit=1)
+    assert [item.reference for item in last.workflows] == ["builtin:helper"]
+    assert last.next_after is None
+    assert not (await resolver.discover(after="builtin:helper")).workflows
+
+
+async def test_catalog_modified_time_ties_and_refresh(tmp_path: Path) -> None:
+    for name in ("zzz", "aaa"):
+        path = tmp_path / f"{name}.py"
+        path.write_text(SOURCE)
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
     resolver = WorkflowResolver(tmp_path)
     first = await resolver.discover(limit=1)
     assert [item.reference for item in first.workflows] == ["aaa:double"]
-    second = await resolver.discover(after=first.next_after, limit=3)
-    assert [item.reference for item in second.workflows] == [
-        "builtin:agent",
-        "builtin:chat",
-        "builtin:helper",
-    ]
-    assert second.next_after == "builtin:helper"
-    last = await resolver.discover(after=second.next_after, limit=1)
-    assert [item.reference for item in last.workflows] == ["zzz:double"]
-    assert last.next_after is None
+    second = await resolver.discover(after=first.next_after, limit=1)
+    assert [item.reference for item in second.workflows] == ["zzz:double"]
+    entry = await resolver.resolve("zzz:double")
+    os.utime(tmp_path / "zzz.py", ns=(2_000_000_000, 2_000_000_000))
+    updated = await resolver.discover(limit=1)
+    assert [item.reference for item in updated.workflows] == ["zzz:double"]
+    assert await resolver.resolve("zzz:double") is entry
+
+
+async def test_catalog_unavailable_cursor(tmp_path: Path) -> None:
+    path = tmp_path / "math.py"
+    path.write_text(SOURCE)
+    resolver = WorkflowResolver(tmp_path)
+    first = await resolver.discover(limit=1)
+    path.unlink()
+    with pytest.raises(ValueError, match="restart pagination"):
+        await resolver.discover(after=first.next_after)
 
 
 async def test_builtin_catalog_without_local_directory(tmp_path: Path) -> None:

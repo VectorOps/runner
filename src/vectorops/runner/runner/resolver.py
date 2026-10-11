@@ -66,19 +66,24 @@ class WorkflowResolver:
     async def discover(
         self, *, after: typing.Optional[str] = None, limit: int = 100
     ) -> catalog.WorkflowCatalog:
-        """Enumerate built-ins and local definitions, isolating invalid sources."""
+        """Page newest-modified local definitions, then built-ins, with reference ties.
+
+        Reference cursors resume in the current catalog, not a frozen snapshot.
+        A cursor whose workflow is no longer available must be restarted.
+        """
         if not 1 <= limit <= 500:
             raise ValueError("catalog limit must be between 1 and 500")
 
         def scan() -> catalog.WorkflowCatalog:
             result = catalog.WorkflowCatalog()
+            order: dict[str, tuple[bool, int, str]] = {}
             with self._lock:
                 for name in registry.WORKFLOWS:
                     target = f"builtin:{name}"
-                    if after is None or target > after:
-                        result.workflows.append(
-                            self._describe(WorkflowReference.parse(target))
-                        )
+                    result.workflows.append(
+                        self._describe(WorkflowReference.parse(target))
+                    )
+                    order[target] = (True, 0, target)
                 for path in sorted(self.root.rglob("*.py")):
                     relative = path.relative_to(self.root)
                     if any(
@@ -89,7 +94,9 @@ class WorkflowResolver:
                     source = relative.with_suffix("").as_posix()
                     try:
                         reference = WorkflowReference.parse(f"{source}:workflow")
-                        module = self._source(reference).module
+                        loaded = self._source(reference)
+                        module = loaded.module
+                        modified = loaded.fingerprint[0]
                     except Exception as exc:
                         result.errors.append(
                             catalog.DiscoveryError(source=source, error=str(exc))
@@ -102,17 +109,28 @@ class WorkflowResolver:
                         ):
                             continue
                         target = f"{source}:{name}"
-                        if after is not None and target <= after:
-                            continue
                         try:
                             result.workflows.append(
                                 self._describe(WorkflowReference.parse(target))
                             )
+                            order[target] = (False, -modified, target)
                         except Exception as exc:
                             result.errors.append(
                                 catalog.DiscoveryError(source=target, error=str(exc))
                             )
-                result.workflows.sort(key=lambda descriptor: descriptor.reference)
+                result.workflows.sort(
+                    key=lambda descriptor: order[descriptor.reference]
+                )
+                if after is not None:
+                    if after not in order:
+                        raise ValueError(
+                            "catalog cursor is unavailable; restart pagination"
+                        )
+                    result.workflows = [
+                        descriptor
+                        for descriptor in result.workflows
+                        if order[descriptor.reference] > order[after]
+                    ]
                 if len(result.workflows) > limit:
                     result.next_after = result.workflows[limit - 1].reference
                     result.workflows = result.workflows[:limit]
