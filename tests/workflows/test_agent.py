@@ -49,7 +49,11 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
     target.mkdir()
     (target / "AGENTS.md").write_text("Use focused tests and preserve user edits.")
     (target / ".vocode/skills/review").mkdir(parents=True)
-    (target / ".vocode/skills/review/SKILL.md").write_text("Review carefully.")
+    skill_path = target / ".vocode/skills/review/SKILL.md"
+    skill_path.write_text(
+        "---\nname: review\ndescription: Review code for correctness.\n---\n"
+        "Review carefully."
+    )
     (target / "evidence.txt").write_text("verified evidence")
     configure(
         tmp_path,
@@ -75,12 +79,19 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
         assert backend.settings[0].reasoning.effort == "xhigh"
         prompt = str(backend.requests[0].system_prompt)
         assert "Use focused tests" in prompt
-        assert ".vocode/skills/review" in prompt
+        assert (
+            "- review: Review code for correctness. "
+            "(file: .vocode/skills/review/SKILL.md)" in prompt
+        )
+        assert "read its SKILL.md" in prompt
+        assert "Review carefully." not in prompt
+        assert prompt.count("## Available project skills") == 1
         assert "300 words" in prompt
         names = {tool.name for tool in backend.requests[0].tools}
         assert names == {"read_file", "list_files", "exec", "poll_process"}
         assert "verified evidence" in str(backend.requests[-1].messages)
         (target / "AGENTS.md").write_text("changed instructions")
+        skill_path.unlink()
         (target / "evidence.txt").unlink()
         with (
             patch.object(
