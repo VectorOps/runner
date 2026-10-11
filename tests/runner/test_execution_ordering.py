@@ -1,9 +1,11 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from vectorops.runner import models
 from vectorops.runner.runner import execution_state
+from vectorops.runner.runner.execution_index import IndexState
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -40,7 +42,14 @@ async def test_execution_order_uses_updated_time_and_id_cursors(tmp_path: Path) 
         record.model_copy(update={"updated_at": "2025-01-04T00:00:00+00:00"})
     )
     restarted = WorkflowRunner(tmp_path)
-    assert await restarted.execution_ids() == ["a", "b", "z", "c"]
+    assert await restarted.execution_ids() == ["b", "z", "c", "a"]
+    index = await restarted.execution_index()
+    snapshot = IndexState.model_validate_json(index.path.read_bytes())
+    with patch(
+        "vectorops.runner.runner.execution_index.time",
+        return_value=snapshot.refreshed_at + 30,
+    ):
+        assert await restarted.execution_ids() == ["a", "b", "z", "c"]
 
 
 async def test_empty_execution_list(tmp_path: Path) -> None:

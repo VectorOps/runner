@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+from time import time
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +14,7 @@ from vectorops.runner.control import client, commands, protocol as p
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner.execution_index import REFRESH_INTERVAL
 
 SOURCE = sources.read("control_catalog.py")
 
@@ -378,7 +380,13 @@ async def test_summary_pagination_and_starting_state(tmp_path: Path) -> None:
             )
         )
         await settled(connection, ids[0])
-        refreshed = await connection.execution_summaries()
+        cached = await connection.execution_summaries()
+        assert [item.execution_id for item in cached.executions] == ids[::-1]
+        with patch(
+            "vectorops.runner.runner.execution_index.time",
+            return_value=time() + REFRESH_INTERVAL,
+        ):
+            refreshed = await connection.execution_summaries()
         assert [item.execution_id for item in refreshed.executions] == [
             ids[0],
             ids[2],

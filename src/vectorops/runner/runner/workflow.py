@@ -24,6 +24,7 @@ from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.checkpoint import ExecutionCheckpointer
 from vectorops.runner.runner.errors import ActivityError
+from vectorops.runner.runner.execution_index import ExecutionIndex
 from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEventSink
@@ -70,6 +71,7 @@ class WorkflowRunner:
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
         self._project = project
         self._project_lock = asyncio.Lock()
+        self._execution_index: typing.Optional[ExecutionIndex] = None
 
     async def project(self) -> RunnerProject:
         async with self._project_lock:
@@ -78,6 +80,14 @@ class WorkflowRunner:
                     self.path, workspace_directory=self.workspace_directory
                 )
             return self._project
+
+    async def execution_index(self) -> ExecutionIndex:
+        project = await self.project()
+        if self._execution_index is None:
+            self._execution_index = ExecutionIndex(
+                project.data_path, self.execution_state
+            )
+        return self._execution_index
 
     async def run(
         self,
@@ -242,6 +252,7 @@ class WorkflowRunner:
         ):
             raise ValueError("new execution ID requires a new persistent execution")
         if self.history is None:
+            is_new = execution_id is None
             identifier = execution_id or new_execution_id or uuid4().hex
             async with self._execution_writer(project, identifier) as store:
                 if execution_id is None:
@@ -352,6 +363,8 @@ class WorkflowRunner:
                     checkpointer = ExecutionCheckpointer(database, history, record)
                     await database.save_execution(record, replace_heads=True)
                     await checkpointer.persist()
+                    if is_new:
+                        await (await self.execution_index()).invalidate()
                     await store.activate(execution_id)
                     owner = mailbox.Mailbox(database, self.mailbox_sink)
                     self._mailboxes[execution_id] = owner
@@ -391,7 +404,7 @@ class WorkflowRunner:
                     await history.flush()
                     async with store.coordination:
                         pointer = await store.load()
-                        await ExecutionRetention(
+                        removed = await ExecutionRetention(
                             project.data_path, project.config.retention
                         ).apply(
                             pointer.last_execution_id,
@@ -399,6 +412,8 @@ class WorkflowRunner:
                             | store.scheduled
                             | set(pointer.active_execution_ids),
                         )
+                        if removed:
+                            await (await self.execution_index()).invalidate()
                     return result
         return await self._run(
             project,
@@ -531,30 +546,9 @@ class WorkflowRunner:
 
         ID cursors resume in the current ordering rather than a frozen snapshot.
         """
-        project = await self.project()
-
-        def listing() -> list[str]:
-            directory = project.data_path / "executions"
-            if not directory.exists():
-                return []
-            return sorted(
-                path.name
-                for path in directory.iterdir()
-                if (path / "history.sqlite3").is_file()
-            )
-
-        records = []
-        for identifier in await asyncio.to_thread(listing):
-            try:
-                record = await self.execution_state(identifier)
-                updated_at = record.updated_at
-            except KeyError:
-                updated_at = ""
-            records.append((identifier, updated_at))
-        records.sort(key=lambda item: item[1], reverse=True)
-        identifiers = [identifier for identifier, _ in records]
-        start = identifiers.index(after) + 1 if after is not None else 0
-        return identifiers[start : None if limit is None else start + limit]
+        return await (await self.execution_index()).identifiers(
+            after=after, limit=limit
+        )
 
     async def export_execution(
         self, output: Path, execution_id: typing.Optional[str] = None
@@ -566,10 +560,7 @@ class WorkflowRunner:
         identifiers = set(pointer.active_execution_ids)
         if pointer.last_execution_id is not None:
             identifiers.add(pointer.last_execution_id)
-        after = None
-        while page := await self.execution_ids(after=after):
-            identifiers.update(page)
-            after = page[-1]
+        identifiers.update(await (await self.execution_index()).discover())
         records = []
         for identifier in sorted(identifiers):
             try:
@@ -614,3 +605,4 @@ class WorkflowRunner:
                 await store.save(pointer.model_copy(update={"last_execution_id": None}))
             await store.deactivate(execution_id)
             await asyncio.to_thread(shutil.rmtree, database.path.parent)
+            await (await self.execution_index()).invalidate()
