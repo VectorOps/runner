@@ -1,9 +1,16 @@
 """Storage-independent access to workflow configuration and replay paths."""
 
-from collections.abc import AsyncGenerator
-from typing import Protocol
+from collections.abc import AsyncGenerator, Sequence
+from typing import Protocol, runtime_checkable
 
 from vectorops.runner import models
+
+
+@runtime_checkable
+class SnapshotBatchWriter(Protocol):
+    async def update_steps(self, steps: Sequence[models.WorkflowStep]) -> None:
+        """Commit all snapshots atomically, or leave every record unchanged."""
+        ...
 
 
 class WorkflowHistory(Protocol):

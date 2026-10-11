@@ -320,11 +320,13 @@ class WorkflowRunner:
                     history_path.is_file
                 ):
                     raise FileNotFoundError("execution history is missing")
-                async with CachedHistory(
-                    SQLiteHistory(history_path),
-                    write_through=self._state_store is not None,
-                ) as history:
-                    database = SQLiteHistory(history_path)
+                async with (
+                    SQLiteHistory(history_path) as database,
+                    CachedHistory(
+                        database,
+                        write_through=self._state_store is not None,
+                    ) as history,
+                ):
                     if configuration is not None:
                         await history.save_workflow(configuration)
                     else:

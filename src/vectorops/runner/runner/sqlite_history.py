@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -14,6 +14,7 @@ from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner.sqlite_writer import SQLiteWriter
 
 T = typing.TypeVar("T")
 
@@ -38,6 +39,23 @@ class SQLiteHistory:
         self.batch_size = batch_size
         self._ready = False
         self._initialization_lock = asyncio.Lock()
+        self._writer: typing.Optional[SQLiteWriter] = None
+        self._closed = False
+
+    async def __aenter__(self) -> typing.Self:
+        if self._closed or self._writer is not None:
+            raise RuntimeError("history writer is already open or closed")
+        await self._prepare()
+        self._writer = SQLiteWriter(self._connect)
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if self._writer is not None:
+            await self._writer.aclose()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -107,7 +125,11 @@ class SQLiteHistory:
                 """)
 
     async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
+        if self._closed:
+            raise RuntimeError("history writer is closed")
         await self._prepare()
+        if self._writer is not None:
+            return await self._writer.run(operation)
 
         def invoke() -> T:
             with closing(self._connect()) as connection:
@@ -677,31 +699,38 @@ class SQLiteHistory:
         await self._run(append)
 
     async def update_step(self, step: models.WorkflowStep) -> None:
-        payload = step.model_dump_json()
+        await self.update_steps((step,))
+
+    async def update_steps(self, steps: Sequence[models.WorkflowStep]) -> None:
+        """Validate and persist a snapshot batch in one durable transaction."""
+        snapshots = tuple((step, step.model_dump_json()) for step in steps)
+        if not snapshots:
+            return
 
         def update(connection: sqlite3.Connection) -> None:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                previous = self._step(connection, step.id)
-                if previous.outcome.kind not in ("streaming", "pending", "waiting"):
-                    raise ValueError("terminal steps cannot be updated")
-                if (
-                    previous.workflow_id,
-                    previous.previous_step_id,
-                    previous.operation,
-                    previous.deferred_delivery,
-                    previous.deliveries,
-                ) != (
-                    step.workflow_id,
-                    step.previous_step_id,
-                    step.operation,
-                    step.deferred_delivery,
-                    step.deliveries,
-                ):
-                    raise ValueError("step identity and links cannot change")
-                connection.execute(
-                    "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
-                )
+                for step, payload in snapshots:
+                    previous = self._step(connection, step.id)
+                    if previous.outcome.kind not in ("streaming", "pending", "waiting"):
+                        raise ValueError("terminal steps cannot be updated")
+                    if (
+                        previous.workflow_id,
+                        previous.previous_step_id,
+                        previous.operation,
+                        previous.deferred_delivery,
+                        previous.deliveries,
+                    ) != (
+                        step.workflow_id,
+                        step.previous_step_id,
+                        step.operation,
+                        step.deferred_delivery,
+                        step.deliveries,
+                    ):
+                        raise ValueError("step identity and links cannot change")
+                    connection.execute(
+                        "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
+                    )
 
         await self._run(update)
 

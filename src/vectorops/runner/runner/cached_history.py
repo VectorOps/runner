@@ -10,7 +10,8 @@ import math
 import typing
 
 from vectorops.runner import models
-from vectorops.runner.runner.history import WorkflowHistory
+from vectorops.runner.runner.history import SnapshotBatchWriter, WorkflowHistory
+from vectorops.runner.runner.resources import finish_cleanup
 
 
 class CachedHistory:
@@ -101,7 +102,7 @@ class CachedHistory:
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         async with self._lock:
             self._check()
-            await self._flush()
+            await self._flush((head_id, step_id))
             step = await self.backend.record_delivery(head_id, step_id)
             self._cache_step(step.model_copy(deep=True))
             return step
@@ -139,10 +140,31 @@ class CachedHistory:
                 self._pending.pop(step.id, None)
                 self._cache_step(snapshot)
 
-    async def _flush(self) -> None:
-        for step_id in tuple(self._pending):
-            await self.backend.update_step(self._pending[step_id])
-            del self._pending[step_id]
+    async def _flush(
+        self, identifiers: typing.Optional[tuple[str, ...]] = None
+    ) -> None:
+        """Persist selected dependencies or the current snapshot watermark."""
+        selected = {
+            identifier: self._pending[identifier]
+            for identifier in (
+                tuple(self._pending) if identifiers is None else identifiers
+            )
+            if identifier in self._pending
+        }
+        if not selected:
+            return
+
+        async def persist() -> None:
+            if isinstance(self.backend, SnapshotBatchWriter):
+                await self.backend.update_steps(tuple(selected.values()))
+                for identifier in selected:
+                    del self._pending[identifier]
+            else:
+                for identifier, snapshot in selected.items():
+                    await self.backend.update_step(snapshot)
+                    del self._pending[identifier]
+
+        await finish_cleanup(asyncio.create_task(persist()))
 
     async def flush(self) -> None:
         async with self._lock:
@@ -193,12 +215,7 @@ class CachedHistory:
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        task = asyncio.create_task(self.aclose())
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        await finish_cleanup(asyncio.create_task(self.aclose()))
 
     async def replay_path(
         self, workflow_id: str, head_step_id: str
