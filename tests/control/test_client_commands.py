@@ -6,32 +6,14 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import cli
 from vectorops.runner.control import client, commands, protocol as p
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
 
-SOURCE = """
-from vectorops.runner.api.composition import workflow
-from vectorops.runner.api.mailbox import request_input
-from tests.fixtures.library_workflows import child as imported
-
-@workflow(description="Wait in a child")
-async def main(ctx):
-    return await child()
-
-@workflow(description="Ask for text")
-async def child(ctx):
-    return await request_input("ghidra.input", "Waiting for Ghidra input...")
-
-async def plain(ctx):
-    return 42
-
-@workflow()
-async def approval(ctx):
-    return await request_input("approval", "Approve?", response_type="json")
-"""
+SOURCE = sources.read("control_catalog.py")
 
 
 def prepare(path: Path) -> None:
@@ -72,7 +54,7 @@ async def command(connection: client.RunnerClient, *words: str) -> None:
 async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
     prepare(tmp_path)
     (tmp_path / "workflows/broken.py").write_text("this is invalid python")
-    (tmp_path / "outside.py").write_text("raise RuntimeError('must not import')")
+    (tmp_path / "outside.py").write_text(sources.read("forbidden_import.py"))
     (tmp_path / "workflows/link.py").symlink_to(tmp_path / "outside.py")
     async with client.embedded(tmp_path) as connection:
         page = await connection.workflows(p.ExecutionList(limit=1))
@@ -92,7 +74,7 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
         ]
         assert (await connection.describe_workflow("flow:plain")).name == "plain"
         (tmp_path / "workflows/generated.py").write_text(
-            'from vectorops.runner.api.composition import workflow\n@workflow(description="New")\nasync def main(ctx): return None\n'
+            sources.read("catalog_generated.py")
         )
         assert "generated:main" in [
             item.descriptor.reference
@@ -376,15 +358,7 @@ async def test_catalog_reuses_unchanged_source_and_isolates_bad_callable(
     tmp_path: Path,
 ) -> None:
     prepare(tmp_path)
-    (tmp_path / "workflows/bad_schema.py").write_text("""
-from vectorops.runner.api.composition import workflow
-@workflow()
-async def invalid(ctx, arg: "MissingType"):
-    return None
-@workflow()
-async def valid(ctx):
-    return None
-""")
+    (tmp_path / "workflows/bad_schema.py").write_text(sources.read("bad_schema.py.txt"))
     async with client.embedded(tmp_path) as connection:
         page = await connection.workflows()
         assert any(item.source == "bad_schema:invalid" for item in page.errors)

@@ -6,10 +6,10 @@ import sys
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.processes import models as m
-
 
 pytestmark = pytest.mark.skipif(
     os.name != "posix", reason="process groups require POSIX"
@@ -29,13 +29,19 @@ async def test_parent_termination_selects_process_or_group(
         )
     )
     heartbeat = tmp_path / "heartbeat"
-    child_script = f"import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True)\nwhile True:\n pathlib.Path({str(heartbeat)!r}).write_text(str(time.monotonic_ns()))\n time.sleep(0.01)"
-    script = f"import subprocess,sys,time; child = subprocess.Popen([sys.executable, '-u', '-c', {child_script!r}], stdout=subprocess.PIPE); child.stdout.readline(); print(child.pid, flush=True); time.sleep(60)"
     child_pid = None
     try:
         result = await environment.exec(
             m.ExecRequest(
-                command=m.ArgvCommand(argv=[sys.executable, "-u", "-c", script]),
+                command=m.ArgvCommand(
+                    argv=[
+                        sys.executable,
+                        "-u",
+                        str(sources.path("process.py")),
+                        "parent",
+                        str(heartbeat),
+                    ]
+                ),
                 kill_tree=kill_tree,
                 yield_timeout_ms=0,
             )

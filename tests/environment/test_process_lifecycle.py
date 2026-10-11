@@ -11,7 +11,6 @@ from vectorops.runner.environment.processes import models as m
 from vectorops.runner.environment.processes.manager import ProcessManager
 from tests.environment import test_processes as helpers
 
-
 FakeDriver = helpers.FakeDriver
 command = helpers.command
 finish = helpers.finish
@@ -60,9 +59,7 @@ async def test_initial_stdin_and_binary_output(tmp_path: Path) -> None:
     try:
         result = await environment.exec(
             m.ExecRequest(
-                command=command(
-                    "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"
-                ),
+                command=command("binary_stdin"),
                 stdin=b"\x00\xff",
                 yield_timeout_ms=5000,
             )
@@ -81,9 +78,8 @@ async def test_kill_escalation_cleans_ordinary_child_group(tmp_path: Path) -> No
         )
     )
     try:
-        script = "import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); print('ready', flush=True); time.sleep(60)"
         result = await environment.exec(
-            m.ExecRequest(command=command(script), yield_timeout_ms=100)
+            m.ExecRequest(command=command("child_group"), yield_timeout_ms=100)
         )
         async with asyncio.timeout(5):
             while b"ready" not in output(result):

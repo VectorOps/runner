@@ -7,7 +7,7 @@ import connect
 import pydantic
 import pytest
 
-from tests.fixtures import replay
+from tests.fixtures import replay, sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import chat_input, composition, plan
 from vectorops.runner.api import tool_contracts, user_input
@@ -20,26 +20,20 @@ from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 
 @pytest.mark.parametrize(
-    "statement, expected",
+    "target, expected",
     [
-        ("from vectorops.runner.api import llm", []),
-        ("from vectorops.runner.api.builtin_tools.environment import environment", []),
-        ("from vectorops.runner.api.llm import read_file", ["read_file"]),
-        (
-            "from vectorops.runner.api.llm import subagent_tool",
-            ["run_agent", "subworkflow"],
-        ),
+        ("llm", []),
+        ("environment", []),
+        ("read_file", ["read_file"]),
+        ("subagent_tool", ["run_agent", "subworkflow"]),
     ],
 )
-def test_import_registration_boundaries(statement: str, expected: list[str]) -> None:
-    script = (
-        "import json\n"
-        + statement
-        + "\nfrom vectorops.runner.api import tool_registry\n"
-        + "print(json.dumps(sorted(tool_registry.registrations())))\n"
-    )
+def test_import_registration_boundaries(target: str, expected: list[str]) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", script], check=True, capture_output=True, text=True
+        [sys.executable, str(sources.path("import_registration.py")), target],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     assert json.loads(result.stdout) == expected
 
@@ -48,17 +42,7 @@ def test_explicit_bootstrap_is_idempotent() -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "-c",
-            "\n".join(
-                [
-                    "from vectorops.runner.api import builtin_tools, tool_registry",
-                    "builtin_tools.register_builtins()",
-                    "first = tool_registry.registrations()",
-                    "builtin_tools.register_builtins()",
-                    "assert first == tool_registry.registrations()",
-                    "assert {'exec', 'read_file', 'apply_patch', 'update_plan', 'run_agent', 'mcp'} <= first.keys()",
-                ]
-            ),
+            str(sources.path("bootstrap.py")),
         ],
         check=True,
         capture_output=True,

@@ -5,6 +5,7 @@ import struct
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import models
 from vectorops.runner.control import client, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
@@ -31,9 +32,7 @@ async def test_execution_history_events_and_reconnect(
     tmp_path: Path, tcp: bool
 ) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/job.py").write_text(
-        "async def main(ctx, value=7):\n    return value\n"
-    )
+    (tmp_path / "workflows/job.py").write_text(sources.read("value.py"))
     secret = secrets.token_urlsafe(32)
     async with RunnerService(tmp_path) as service:
         server = RunnerServer(service, secret)
@@ -92,9 +91,7 @@ async def test_concurrent_stop_disconnect_and_workspace_ownership(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/wait.py").write_text(
-        "import asyncio\nasync def main(ctx):\n    await asyncio.sleep(60)\n"
-    )
+    (tmp_path / "workflows/wait.py").write_text(sources.read("wait.py"))
     secret = secrets.token_urlsafe(32)
     async with RunnerService(tmp_path) as service:
         server = RunnerServer(service, secret)

@@ -1,0 +1,11 @@
+from vectorops.runner.api.composition import workflow
+
+
+@workflow()
+async def invalid(ctx, arg: "MissingType"):
+    return None
+
+
+@workflow()
+async def valid(ctx: object) -> None:
+    return None

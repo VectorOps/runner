@@ -8,6 +8,7 @@ import threading
 import pydantic
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import diagnostics as d
 from vectorops.runner.control import client, protocol as p
 from vectorops.runner.control.server import RunnerServer
@@ -226,9 +227,7 @@ async def test_host_download_and_restart(tmp_path: Path, tcp: bool) -> None:
     from vectorops.runner.control import transport
 
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/job.py").write_text(
-        "async def main(ctx):\n    return 'private-result'\n"
-    )
+    (tmp_path / "workflows/job.py").write_text(sources.read("private_result.py"))
     async with RunnerService(tmp_path) as service:
         token = secrets.token_urlsafe(32)
         server = RunnerServer(service, token)
@@ -281,12 +280,7 @@ async def test_local_runner_logs_failure_and_step_identity(tmp_path: Path) -> No
     (tmp_path / "config.toml").write_text('[logging]\nlevel = "DEBUG"\n')
     source = tmp_path / "workflows"
     source.mkdir()
-    (source / "job.py").write_text(
-        "from vectorops.runner import diagnostics\n"
-        "async def main(ctx):\n"
-        "    diagnostics.log('custom.event', fields={'password': 'private-input'})\n"
-        "    raise ValueError('private-failure')\n"
-    )
+    (source / "job.py").write_text(sources.read("private_failure.py"))
     runner = WorkflowRunner(tmp_path)
     with pytest.raises(Exception, match="private-failure"):
         await runner.run("job:main")

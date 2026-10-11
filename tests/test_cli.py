@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import cli, models
 from vectorops.runner.runner import execution_state
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
@@ -95,9 +96,7 @@ def test_missing_execution_and_invalid_identity(
 async def test_input_is_passed_to_workflow(
     workspace: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (workspace / "workflows" / "echo.py").write_text(
-        "async def workflow(ctx, value):\n    return value\n"
-    )
+    (workspace / "workflows" / "echo.py").write_text(sources.read("echo.py"))
     await cli.dispatch(
         arguments(workspace, "start", "echo:workflow", "--input", '{"value": [1, "a"]}')
     )
@@ -187,19 +186,7 @@ async def test_resume_after_process_crash(tmp_path: Path) -> None:
     workflows.mkdir()
     marker = tmp_path / "identity"
     release = tmp_path / "release"
-    (workflows / "crash.py").write_text(
-        "import asyncio\n"
-        "from pathlib import Path\n"
-        "from vectorops.runner.api.composition import activity\n"
-        "@activity()\n"
-        "async def blocked(ctx):\n"
-        f"    Path({str(marker)!r}).write_text(ctx.step_id)\n"
-        f"    while not Path({str(release)!r}).exists():\n"
-        "        await asyncio.sleep(0.01)\n"
-        "    return 42\n"
-        "async def workflow(ctx):\n"
-        "    return await blocked()\n"
-    )
+    (workflows / "crash.py").write_text(sources.read("crash.py"))
     prefix = [sys.executable, "-m", "vectorops.runner", "--project", str(tmp_path)]
     process = await asyncio.create_subprocess_exec(
         *prefix,

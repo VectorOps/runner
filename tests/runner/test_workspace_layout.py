@@ -6,6 +6,7 @@ from typing import Optional
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import cli
 from vectorops.runner.control import client
 from vectorops.runner.control.service import RunnerService
@@ -52,9 +53,7 @@ async def test_configuration_and_execution_paths(
     project = await runner.project()
     assert project.workflows_path == workspace / "flows"
     assert project.data_path == workspace / "state"
-    (project.workflows_path / "sample.py").write_text(
-        "async def main(ctx):\n    return 42\n"
-    )
+    (project.workflows_path / "sample.py").write_text(sources.read("answer.py"))
     assert await runner.run("sample:main", new_execution_id="test") == 42
     assert (workspace / "state/executions/test/history.sqlite3").is_file()
     restarted = WorkflowRunner(tmp_path, workspace_directory=directory)
@@ -140,7 +139,7 @@ def test_cli_workspace_selection(
     selected = ".voc" if directory is None else directory
     workflows = tmp_path / selected / "workflows"
     workflows.mkdir(parents=True)
-    (workflows / "sample.py").write_text("async def main(ctx):\n    return 42\n")
+    (workflows / "sample.py").write_text(sources.read("answer.py"))
     prefix = ["--project", str(tmp_path)]
     if directory is not None:
         prefix.extend(["--workspace-directory", directory])

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.runner.cached_history import CachedHistory
@@ -133,27 +134,7 @@ async def test_crash_after_one_parallel_result_is_delivered(
 ) -> None:
     workflows = tmp_path / "workflows"
     workflows.mkdir()
-    (workflows / "partial.py").write_text(
-        "import asyncio\n"
-        "from pathlib import Path\n"
-        "from vectorops.runner.api.composition import activity\n"
-        "\n"
-        "@activity()\n"
-        "async def work(ctx, name):\n"
-        "    print(f'started:{name}:{ctx.step_id}', flush=True)\n"
-        "    if name == 'A':\n"
-        "        release = Path(__file__).parent.parent / 'release-a'\n"
-        "        while not await asyncio.to_thread(release.exists):\n"
-        "            await asyncio.sleep(0.01)\n"
-        "    return name\n"
-        "\n"
-        "async def main(ctx):\n"
-        "    a = asyncio.create_task(work('A'))\n"
-        "    b = asyncio.create_task(work('B'))\n"
-        "    result_b = await b\n"
-        "    print('delivered:B', flush=True)\n"
-        "    return [await a, result_b]\n"
-    )
+    (workflows / "partial.py").write_text(sources.read("partial_delivery.py"))
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",

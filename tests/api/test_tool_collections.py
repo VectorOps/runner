@@ -5,7 +5,7 @@ import connect
 import pydantic
 import pytest
 
-from tests.fixtures import replay
+from tests.fixtures import replay, sources
 from tests.api.test_llm import FakeProvider, answer
 from tests.fixtures.history import MemoryHistory
 from tests.mcp.test_replay import configure
@@ -203,13 +203,7 @@ async def test_mcp_collection_and_persistent_replay(workspace: Path) -> None:
             'selections = [{server = "test", tools = ["echo"]}]\n'
         )
     (workspace / "workflows/collection.py").write_text(
-        "import connect\nfrom vectorops.runner.api import tools\n"
-        "async def main(ctx):\n"
-        '    bindings = await tools.load_collection("remote")\n'
-        "    assert len(bindings) == 1\n"
-        "    result = await tools.invoke_tool(bindings[0], connect.ToolCallBlock(\n"
-        '        id="echo", name=bindings[0].definition.name, arguments={"value": "hello"}))\n'
-        '    return result.model_dump(mode="json")\n'
+        sources.read("tool_collection.py")
     )
     runner = WorkflowRunner(workspace)
     first = await runner.run("collection:main")

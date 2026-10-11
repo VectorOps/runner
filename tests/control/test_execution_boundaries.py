@@ -6,6 +6,7 @@ import pytest
 
 from tests.control.test_concurrent_executions import settled
 from tests.control.test_mailbox import pending, response, WORKFLOW
+from tests.fixtures import sources
 from vectorops.runner.control import client, daemon, protocol as p
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
@@ -71,21 +72,9 @@ async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
 
 async def test_authentication_shutdown_is_execution_specific(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/flow.py").write_text("""
-import asyncio
-from vectorops.runner.api.composition import activity
-
-@activity()
-async def authorize(ctx):
-    await ctx.authentication.transport(None, "chatgpt/X", execution_id=ctx.execution_id)
-    return "authorized"
-
-async def main(ctx):
-    return await authorize()
-
-async def busy(ctx):
-    await asyncio.sleep(60)
-""")
+    (tmp_path / "workflows/flow.py").write_text(
+        sources.read("authorize.py") + "\n" + sources.read("mailbox_busy.py")
+    )
     async with client.embedded(tmp_path) as connection:
         waiting = await connection.start(
             p.Start(reference="flow:main", idempotency_key="auth")
@@ -164,7 +153,7 @@ async def test_live_retention_preserves_waiters_and_resume_reservations(
 ) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(
-        WORKFLOW + "\nasync def quick(ctx):\n    return 1\n"
+        WORKFLOW + "\n" + sources.read("mailbox_quick.py")
     )
     (tmp_path / "config.toml").write_text("[retention]\nmax_completed_executions = 0\n")
     async with client.embedded(tmp_path) as connection:

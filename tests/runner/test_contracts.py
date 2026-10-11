@@ -4,6 +4,7 @@ import typing
 import pydantic
 import pytest
 
+from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.api import composition as c
@@ -54,26 +55,7 @@ def test_decorator_contracts_are_independent_of_display_names() -> None:
         c.activity(version=0)(invoke)
 
 
-SOURCE = """from vectorops.runner.api import composition as c
-
-@c.activity(namespace="customer.acme", version=2)
-async def prepare(ctx, text):
-    return text
-
-@c.streamable_activity(kind="vocode.llm.invoke", version=3)
-async def invoke(ctx, text):
-    yield c.delta({"text": "partial"})
-    yield c.delta({"text": text})
-    yield c.final({"text": text})
-
-@c.workflow(namespace="customer.acme", version=4)
-async def turn(ctx, text):
-    return await invoke(await prepare(text))
-
-@c.workflow(kind="customer.acme.chat", version=2)
-async def workflow(ctx):
-    return await turn("hello")
-"""
+SOURCE = sources.read("contracts.py")
 
 
 async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
@@ -174,11 +156,7 @@ async def test_manual_spawn_resolves_decorated_contract_and_replays(
     workspace: Path, history: MemoryHistory
 ) -> None:
     path = workspace / "workflows" / "contracts.py"
-    path.write_text(SOURCE + """
-async def manual(ctx):
-    handle = await ctx.spawn_workflow("contracts:turn", input={"text": "hello"})
-    return (await ctx.join_workflows([handle]))[0].result
-""")
+    path.write_text(SOURCE + "\n" + sources.read("contracts_manual.py"))
     runner = WorkflowRunner(workspace, history)
     assert await runner.run("contracts:manual", workflow_id="root") == {"text": "hello"}
     child = next(w for w in history.workflows.values() if w.id != "root")

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tests.control.test_mailbox import pending, response, WORKFLOW
+from tests.fixtures import sources
 from vectorops.runner.control import client, protocol as p, transport
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.control.server import RunnerServer
@@ -152,7 +153,7 @@ async def test_shutdown_recovers_all_waiters_but_not_stopped_or_completed(
 async def test_shutdown_waiter_does_not_suspend_unrelated_work(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(
-        WORKFLOW + "\nasync def busy(ctx):\n    await asyncio.sleep(60)\n"
+        WORKFLOW + "\n" + sources.read("mailbox_busy.py")
     )
     async with client.embedded(tmp_path) as connection:
         waiter = await connection.start(
@@ -242,28 +243,10 @@ async def test_crash_recovers_multiple_executions_without_manifest(
 ) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
-    script = """
-import asyncio, json, sys
-from pathlib import Path
-from vectorops.runner.control import client, protocol as p
-from tests.control.test_mailbox import pending
-
-async def main():
-    async with client.embedded(Path(sys.argv[1])) as connection:
-        accepted = await asyncio.gather(*(
-            connection.start(p.Start(reference="flow:workflow", idempotency_key=str(i)))
-            for i in range(3)
-        ))
-        requests = [(await pending(connection, item.execution_id))[0] for item in accepted]
-        print(json.dumps([request.model_dump(mode="json") for request in requests]), flush=True)
-        await asyncio.Event().wait()
-
-asyncio.run(main())
-"""
     process = await asyncio.create_subprocess_exec(
         sys.executable,
-        "-c",
-        script,
+        "-m",
+        "tests.fixtures.scripts.concurrent_crash",
         str(tmp_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -300,7 +283,7 @@ async def test_immediate_stop_and_failure_do_not_affect_other_execution(
 ) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(
-        WORKFLOW + "\nasync def fail(ctx):\n    raise ValueError('failed root')\n"
+        WORKFLOW + "\n" + sources.read("mailbox_fail.py")
     )
     async with client.embedded(tmp_path) as connection:
         survivor = await connection.start(

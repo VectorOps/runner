@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import aiohttp
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner import global_config as g
 from vectorops.runner.authentication import models as m
 from vectorops.runner.authentication.service import AuthenticationService
@@ -296,16 +297,7 @@ async def test_host_helper_runs_callback_on_host(
             await server.aclose()
 
 
-WORKFLOW = """from vectorops.runner.api.composition import activity
-
-@activity()
-async def authorize(ctx):
-    await ctx.authentication.transport(None, "chatgpt/X", execution_id=ctx.execution_id)
-    return "authorized"
-
-async def main(ctx):
-    return await authorize()
-"""
+WORKFLOW = sources.read("authorize.py")
 
 
 async def test_pending_workflow_recovers_and_completed_activity_replays(

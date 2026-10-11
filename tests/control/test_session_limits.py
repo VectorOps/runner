@@ -5,6 +5,7 @@ import struct
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner.control import client, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
@@ -127,17 +128,7 @@ async def test_backfill_matches_update_while_workflow_is_running(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/job.py").write_text(
-        "import asyncio\n"
-        "from vectorops.runner.api import composition as c\n"
-        "@c.streamable_activity()\n"
-        "async def progress(ctx):\n"
-        "    yield c.delta('visible')\n"
-        "    await asyncio.sleep(60)\n"
-        "    yield c.final('done')\n"
-        "async def main(ctx):\n"
-        "    return await progress()\n"
-    )
+    (tmp_path / "workflows/job.py").write_text(sources.read("stream_wait.py"))
     async with client.embedded(tmp_path) as connection:
         await connection.subscribe()
         accepted = await connection.start(

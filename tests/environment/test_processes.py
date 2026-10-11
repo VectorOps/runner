@@ -7,6 +7,7 @@ import sys
 import pydantic
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
 from vectorops.runner.environment.local import LocalEnvironment
@@ -16,8 +17,10 @@ from vectorops.runner.environment.processes.manager import ProcessManager
 from vectorops.runner.environment.processes.output import OutputBuffer
 
 
-def command(script: str) -> m.ArgvCommand:
-    return m.ArgvCommand(argv=[sys.executable, "-u", "-c", script])
+def command(*arguments: str) -> m.ArgvCommand:
+    return m.ArgvCommand(
+        argv=[sys.executable, "-u", str(sources.path("process.py")), *arguments]
+    )
 
 
 def output(result: m.ProcessResult) -> bytes:
@@ -57,9 +60,7 @@ async def finish(
 async def test_quick_command_is_forgotten(environment: LocalEnvironment) -> None:
     result = await environment.exec(
         m.ExecRequest(
-            command=command(
-                "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)"
-            ),
+            command=command("streams"),
             yield_timeout_ms=5000,
         )
     )
@@ -75,13 +76,13 @@ async def test_quick_command_is_forgotten(environment: LocalEnvironment) -> None
 async def test_independent_processes_and_stdin(environment: LocalEnvironment) -> None:
     first = await environment.exec(
         m.ExecRequest(
-            command=command("import sys; print(sys.stdin.read().upper())"),
+            command=command("uppercase"),
             keep_stdin_open=True,
             yield_timeout_ms=0,
         )
     )
     second = await environment.exec(
-        m.ExecRequest(command=command("print('independent')"), yield_timeout_ms=5000)
+        m.ExecRequest(command=command("print", "independent"), yield_timeout_ms=5000)
     )
     assert first.process_id != second.process_id
     assert output(second) == b"independent\n"
@@ -98,9 +99,7 @@ async def test_cancelled_exec_and_poll_leave_session_alive(
 ) -> None:
     task = asyncio.create_task(
         environment.exec(
-            m.ExecRequest(
-                command=command("import time; time.sleep(60)"), yield_timeout_ms=30000
-            )
+            m.ExecRequest(command=command("sleep", "60"), yield_timeout_ms=30000)
         )
     )
     async with asyncio.timeout(5):
@@ -128,7 +127,7 @@ async def test_cancelled_exec_and_poll_leave_session_alive(
 async def test_execution_timeout(environment: LocalEnvironment) -> None:
     result = await environment.exec(
         m.ExecRequest(
-            command=command("import time; time.sleep(60)"),
+            command=command("sleep", "60"),
             execution_timeout_ms=50,
             yield_timeout_ms=5000,
         )
@@ -145,9 +144,7 @@ async def test_cwd_and_environment(
     (tmp_path / "sub").mkdir()
     result = await environment.exec(
         m.ExecRequest(
-            command=command(
-                "import os; print(os.getcwd()); print(os.environ['PROCESS_TEST_INHERITED']); print(os.environ['PROCESS_TEST_OVERLAY'])"
-            ),
+            command=command("environment"),
             cwd="sub",
             env={"PROCESS_TEST_OVERLAY": "overlay"},
             yield_timeout_ms=5000,
@@ -160,7 +157,7 @@ async def test_cwd_and_environment(
     ]
     invalid = await environment.exec(
         m.ExecRequest(
-            command=command("print('bad')"), cwd="../outside", yield_timeout_ms=5000
+            command=command("print", "bad"), cwd="../outside", yield_timeout_ms=5000
         )
     )
     assert invalid.state == "failed" and invalid.error
@@ -170,7 +167,7 @@ async def test_unsupported_pty_shell_and_spawn_failure(
     environment: LocalEnvironment,
 ) -> None:
     with pytest.raises(EnvironmentError) as pty:
-        await environment.exec(m.ExecRequest(command=command("pass"), mode="pty"))
+        await environment.exec(m.ExecRequest(command=command("noop"), mode="pty"))
     assert pty.value.code == ErrorCode.UNSUPPORTED
     with pytest.raises(EnvironmentError) as shell:
         await environment.exec(
@@ -194,7 +191,7 @@ async def test_large_output_is_bounded_and_drained(tmp_path: Path) -> None:
     try:
         result = await environment.exec(
             m.ExecRequest(
-                command=command("import sys; sys.stdout.write('x' * 1000000)"),
+                command=command("large_output"),
                 yield_timeout_ms=5000,
             )
         )
@@ -211,16 +208,14 @@ async def test_close_stops_sessions_and_rejects_exec(
     environment: LocalEnvironment,
 ) -> None:
     result = await environment.exec(
-        m.ExecRequest(
-            command=command("import time; time.sleep(60)"), yield_timeout_ms=0
-        )
+        m.ExecRequest(command=command("sleep", "60"), yield_timeout_ms=0)
     )
     reports = await environment.close()
     assert len(reports) == 1 and reports[0].process_id == result.process_id
     assert reports[0].termination_confirmed
     assert await environment.close() == reports
     with pytest.raises(EnvironmentError):
-        await environment.exec(m.ExecRequest(command=command("pass")))
+        await environment.exec(m.ExecRequest(command=command("noop")))
 
 
 @pytest.mark.parametrize("operation", ["poll", "stdin", "eof", "kill"])
@@ -229,7 +224,7 @@ async def test_process_operations_fail_after_environment_restart(
 ) -> None:
     result = await environment.exec(
         m.ExecRequest(
-            command=command("import time; time.sleep(60)"),
+            command=command("sleep", "60"),
             keep_stdin_open=True,
             yield_timeout_ms=0,
         )
@@ -261,7 +256,7 @@ async def test_process_operations_fail_after_environment_restart(
         assert "Start a new process with exec" in str(error.value)
         assert await restarted.list_processes() == []
         replacement = await restarted.exec(
-            m.ExecRequest(command=command("print('restarted')"), yield_timeout_ms=5000)
+            m.ExecRequest(command=command("print", "restarted"), yield_timeout_ms=5000)
         )
         assert replacement.process_id != result.process_id
         assert output(replacement) == b"restarted\n"

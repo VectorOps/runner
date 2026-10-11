@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pydantic
 import pytest
 
-from tests.fixtures import replay
+from tests.fixtures import replay, sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import composition, definitions
 from vectorops.runner.api.configuration import get_config
@@ -47,25 +47,9 @@ async def test_executor_validates_before_body_and_retains_typed_values(
 ) -> None:
     directory = tmp_path / "workflows"
     directory.mkdir()
-    source = """
-from typing import Annotated
-import pydantic
-from vectorops.runner.api.composition import workflow
-
-class Payload(pydantic.BaseModel):
-    value: int
-
-def positive(value: int) -> int:
-    if value < 0:
-        raise ValueError("negative input")
-    return value
-
-DECORATOR
-async def main(ctx, payload: Payload, value: Annotated[int, pydantic.AfterValidator(positive)]):
-    return payload.value + value
-"""
+    source = sources.read("checked.py")
     (directory / "checked.py").write_text(
-        source.replace("DECORATOR", "@workflow()" if decorated else "")
+        source if decorated else source.replace("@workflow()", "")
     )
     runner = WorkflowRunner(tmp_path, history)
     with pytest.raises(ActivityError, match="negative input"):
@@ -79,12 +63,7 @@ async def main(ctx, payload: Payload, value: Annotated[int, pydantic.AfterValida
 
 
 async def test_callable_reference_lookup_has_no_filesystem_work(tmp_path: Path) -> None:
-    (tmp_path / "flow.py").write_text("""
-from vectorops.runner.api.composition import workflow
-@workflow()
-async def child(ctx, value: int = 1):
-    return value
-""")
+    (tmp_path / "flow.py").write_text(sources.read("callable_reference.py"))
     resolver = WorkflowResolver(tmp_path)
     entry = await resolver.resolve("flow:child")
     assert isinstance(entry, composition.WorkflowDefinition)

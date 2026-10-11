@@ -8,6 +8,7 @@ from jsonschema.exceptions import ValidationError
 
 from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import command, pending, settled
+from tests.fixtures import sources
 from vectorops.runner import cli
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
@@ -97,15 +98,7 @@ async def test_builtin_chat_as_subagent(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text(
         "[components.tools.approval]\napprove_all = true\n"
     )
-    (tmp_path / "workflows/parent.py").write_text(
-        "import connect\n"
-        "from vectorops.runner.api import llm\n"
-        "async def main(ctx):\n"
-        '    tool = await llm.subagent_tool(["builtin:chat"])\n'
-        "    return (await llm.invoke_tool(tool, connect.ToolCallBlock(\n"
-        '        id="chat", name="run_agent", arguments={"reference": "builtin:chat"}\n'
-        '    ))).model_dump(mode="json")\n'
-    )
+    (tmp_path / "workflows/parent.py").write_text(sources.read("chat_subagent.py"))
     async with client.embedded(tmp_path) as connection:
         accepted = await connection.start(
             protocol.Start(reference="parent:main", idempotency_key="child")

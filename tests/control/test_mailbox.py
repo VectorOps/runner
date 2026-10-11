@@ -6,46 +6,13 @@ import sys
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner.control import client, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
 
-WORKFLOW = """
-import asyncio
-from vectorops.runner.api.mailbox import request_input
-
-async def workflow(ctx):
-    return await request_input("user.message", {"prompt": "Your message?"})
-
-async def parallel(ctx):
-    return await asyncio.gather(
-        request_input("user.message", "First"),
-        request_input("user.message", "Second"),
-        request_input("approval", "Approve?"),
-    )
-
-async def tool(ctx):
-    import connect
-    import pydantic
-    from vectorops.runner.api import llm
-
-    class Arguments(pydantic.BaseModel):
-        value: int
-
-    async def execute(context, arguments):
-        return llm.ToolResponse(content=[connect.TextBlock(text="done")])
-
-    result = await llm.invoke_tool(
-        llm.Tool("test", "Test", Arguments, execute),
-        connect.ToolCallBlock(id="call", name="test", arguments={"value": 1}),
-    )
-    return result.model_dump(mode="json")
-
-async def tool_twice(ctx):
-    await tool(ctx)
-    return await tool(ctx)
-"""
+WORKFLOW = sources.read("mailbox.py")
 
 
 async def pending(
@@ -205,50 +172,10 @@ async def test_process_crash_recovers_wait_and_undelivered_answer(
 ) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
-    script = """
-import asyncio, json, sys
-from pathlib import Path
-from vectorops.runner.control import protocol as p
-from vectorops.runner.control.service import RunnerService
-from vectorops.runner.runner import mailbox
-from vectorops.runner.runner.sqlite_history import SQLiteHistory
-
-async def main():
-    async with RunnerService(Path(sys.argv[1])) as service:
-        accepted = p.Accepted.model_validate(await service.dispatch("executions.start", {
-            "reference": f"flow:{sys.argv[3]}", "idempotency_key": "start"
-        }))
-        query = mailbox.RequestQuery(execution_id=accepted.execution_id)
-        while True:
-            try:
-                page = await service.runner.pending_inputs(query)
-            except (FileNotFoundError, KeyError):
-                await asyncio.sleep(0.01)
-                continue
-            if page.requests:
-                break
-            await asyncio.sleep(0.01)
-        request = page.requests[0]
-        if sys.argv[2] == "True":
-            original = SQLiteHistory.update_step
-            async def hold(self, step):
-                if step.operation.kind in (mailbox.KIND, "llm.tool") and step.outcome.kind == "completed":
-                    await asyncio.Event().wait()
-                await original(self, step)
-            SQLiteHistory.update_step = hold
-            await service.runner.answer_input(mailbox.Answer(
-                execution_id=request.execution_id, request_id=request.request_id,
-                response={"approved": True, "scope": "workflow"} if sys.argv[3].startswith("tool") else "before crash", idempotency_key="answer"
-            ))
-        print(request.model_dump_json(), flush=True)
-        await asyncio.Event().wait()
-
-asyncio.run(main())
-"""
     process = await asyncio.create_subprocess_exec(
         sys.executable,
-        "-c",
-        script,
+        "-m",
+        "tests.fixtures.scripts.mailbox_crash",
         str(tmp_path),
         str(answered),
         callable_name,

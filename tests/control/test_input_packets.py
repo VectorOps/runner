@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from tests.control.test_mailbox import completed, pending
+from tests.fixtures import sources
 from vectorops.runner import input_schema, models
 from vectorops.runner.control import client, protocol
 from vectorops.runner.runner import history_query, mailbox
@@ -37,13 +38,7 @@ def test_public_request_model_has_no_schema_fields() -> None:
 
 async def test_input_history_and_responses_are_schema_free(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/flow.py").write_text(
-        "from vectorops.runner.api.mailbox import request_input\n"
-        "async def main(ctx):\n"
-        "    return await request_input('test', {'prompt': 'Answer?'}, response_type='json',\n"
-        "        request_type='test.v1', request_schema={'type': 'object'},\n"
-        "        response_schema={'type': 'integer'})\n"
-    )
+    (tmp_path / "workflows/flow.py").write_text(sources.read("input_contract.py"))
     async with client.embedded(tmp_path) as connection:
         accepted = await connection.start(
             protocol.Start(reference="flow:main", idempotency_key="start")

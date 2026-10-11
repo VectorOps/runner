@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+from tests.fixtures import sources
 from vectorops.runner import models
 from vectorops.runner.control import client, protocol as p
 from vectorops.runner.runner import history_query as h
@@ -8,16 +9,7 @@ from vectorops.runner.runner import history_query as h
 
 async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/stream.py").write_text(
-        "from vectorops.runner.api import composition as c\n"
-        "@c.streamable_activity()\n"
-        "async def progress(ctx):\n"
-        "    yield c.delta('first')\n"
-        "    yield c.delta('second')\n"
-        "    yield c.final('done')\n"
-        "async def main(ctx):\n"
-        "    return await progress()\n"
-    )
+    (tmp_path / "workflows/stream.py").write_text(sources.read("stream.py"))
     async with client.embedded(tmp_path) as connection:
         await connection.subscribe()
         accepted = await connection.start(
@@ -46,7 +38,7 @@ async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> Non
 
 async def test_resume_and_filters(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/job.py").write_text("async def main(ctx):\n    return 42\n")
+    (tmp_path / "workflows/job.py").write_text(sources.read("answer.py"))
     async with client.embedded(tmp_path) as connection:
         subscription = await connection.subscribe(
             p.Subscribe(kinds=["execution.completed"])
@@ -71,9 +63,7 @@ async def test_resume_and_filters(tmp_path: Path) -> None:
 
 async def test_shutdown_cancels_active_execution(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/wait.py").write_text(
-        "import asyncio\nasync def main(ctx):\n    await asyncio.sleep(60)\n"
-    )
+    (tmp_path / "workflows/wait.py").write_text(sources.read("wait.py"))
     async with asyncio.timeout(5):
         async with client.embedded(tmp_path) as connection:
             await connection.start(

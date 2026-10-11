@@ -9,6 +9,7 @@ from jsonschema.exceptions import ValidationError
 
 from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
+from tests.fixtures import sources
 from tests.workflows.test_chat import reply
 from vectorops.runner.api import tools
 from vectorops.runner.api.llm import provider
@@ -156,11 +157,7 @@ async def test_parent_configures_available_agents(
         "[components.workflows.agent]\nagents = " + json.dumps(agents) + "\n",
     )
     (tmp_path / "workflows").mkdir()
-    (tmp_path / "workflows/custom.py").write_text(
-        "from vectorops.runner.api.composition import workflow\n"
-        '@workflow(description="Custom researcher")\n'
-        'async def research(ctx, task: str): return "evidence"\n'
-    )
+    (tmp_path / "workflows/custom.py").write_text(sources.read("research.py"))
     backend = FakeProvider([answer("done")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:

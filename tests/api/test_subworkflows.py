@@ -6,33 +6,15 @@ import connect
 import pydantic
 import pytest
 
+from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import tool_policy
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.resolver import WorkflowResolver
 from vectorops.runner.runner.workflow import WorkflowRunner
 
-CHILD = """
-from vectorops.runner.api.composition import workflow
-
-@workflow(description="Double a number")
-async def double(ctx, value: int) -> int:
-    if value < 0:
-        raise ValueError("negative input")
-    return value * 2
-"""
-
-PARENT = """
-import connect
-from vectorops.runner.api import tools
-
-async def main(ctx, reference: str = "child:double", value: int = 3):
-    tool = await tools.subagent_tool(["child:double"])
-    result = await tools.invoke_tool(tool, connect.ToolCallBlock(
-        id="call", name="run_agent", arguments={"reference": reference, "input": {"value": value}}
-    ))
-    return result.model_dump(mode="json")
-"""
+CHILD = sources.read("subworkflow_child.py")
+PARENT = sources.read("subworkflow_parent.py")
 
 
 def prepare(workspace: Path, *, allow: bool = True) -> None:
@@ -49,16 +31,7 @@ async def test_subagent_factory_does_not_spawn(
     workspace: Path, history: MemoryHistory, name: str
 ) -> None:
     prepare(workspace)
-    (workspace / "workflows/parent.py").write_text("""
-from vectorops.runner.api import llm
-
-async def main(ctx, name: str):
-    if name == "run_agent":
-        tool = await llm.subagent_tool(["child:double"])
-    else:
-        tool = await llm.subagent_tool(["child:double"], name=name)
-    return tool.definition.name
-""")
+    (workspace / "workflows/parent.py").write_text(sources.read("subagent_factory.py"))
     result = await WorkflowRunner(workspace, history).run(
         "parent:main", input={"name": name}, workflow_id="root"
     )
@@ -179,23 +152,9 @@ async def test_approval_precedes_child_spawn_and_survives_restart(
 
 async def test_dynamic_factory_refresh(workspace: Path, history: MemoryHistory) -> None:
     prepare(workspace)
-    (workspace / "workflows/parent.py").write_text("""
-import asyncio
-from pathlib import Path
-from vectorops.runner.api import llm
-from vectorops.runner.api.composition import activity
-
-@activity()
-async def generate(ctx, directory: str):
-    await asyncio.to_thread((Path(directory) / "generated.py").write_text,
-        "async def main(ctx, text: str): return text")
-
-async def main(ctx):
-    first = await llm.subworkflow_tool(["child:double"])
-    await generate(str(ctx.project.workflows_path))
-    second = await llm.subworkflow_tool(["child:double", "generated:main"])
-    return [first.definition.description, second.definition.description]
-""")
+    (workspace / "workflows/parent.py").write_text(
+        sources.read("subworkflow_refresh.py")
+    )
     result = await WorkflowRunner(workspace, history).run("parent:main")
     assert isinstance(result, list)
     assert "generated:main" not in str(result[0])
@@ -221,15 +180,9 @@ async def test_mandatory_denial_prevents_child(
 
 async def test_pending_child_resumes_after_cancellation(workspace: Path) -> None:
     prepare(workspace)
-    (workspace / "workflows/child.py").write_text("""
-from vectorops.runner.api.composition import workflow
-from vectorops.runner.api.mailbox import request_input
-
-@workflow()
-async def double(ctx, value: int) -> int:
-    await request_input("continue", "Ready?")
-    return value * 2
-""")
+    (workspace / "workflows/child.py").write_text(
+        sources.read("subworkflow_pending.py")
+    )
     runner = WorkflowRunner(workspace)
     task = asyncio.create_task(runner.run("parent:main"))
     try:
@@ -272,33 +225,7 @@ async def test_llm_tool_loop_with_parallel_subworkflows(
     workspace: Path, history: MemoryHistory
 ) -> None:
     prepare(workspace)
-    (workspace / "workflows/parent.py").write_text("""
-import connect
-from vectorops.runner.api import llm
-from vectorops.runner.api.composition import final
-
-class Provider:
-    def __init__(self):
-        self.calls = 0
-
-    async def stream(self, ctx, settings, request):
-        self.calls += 1
-        if self.calls == 1:
-            content = [connect.ToolCallBlock(id=str(value), name="subworkflow",
-                arguments={"reference": "child:double", "input": {"value": value}})
-                for value in (3, 4)]
-        else:
-            content = [connect.TextBlock(text="done")]
-        yield final(connect.AssistantMessage(content=content,
-            finish_reason="tool_call" if self.calls == 1 else "stop").model_dump(mode="json"))
-
-async def main(ctx):
-    tool = await llm.subworkflow_tool(["child:double"])
-    conversation = llm.LLM("agent", model="test", backend=Provider())
-    conversation.add_user_message("Double 3 and 4")
-    answer = await conversation.run(tools=[tool])
-    return answer.model_dump(mode="json")
-""")
+    (workspace / "workflows/parent.py").write_text(sources.read("subworkflow_llm.py"))
     runner = WorkflowRunner(workspace, history)
     result = await runner.run("parent:main", workflow_id="root")
     assert len(history.workflows) == 3

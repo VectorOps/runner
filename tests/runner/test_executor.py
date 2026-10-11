@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.runner.executor import WorkflowExecutor
@@ -56,7 +57,7 @@ async def test_absolute_and_symlink_targets(
     with pytest.raises(ValueError):
         await executor.load(f"{workspace / 'workflows/activities'}:workflow")
     outside = workspace.parent / f"{workspace.name}-outside.py"
-    outside.write_text("async def workflow(ctx): return 1")
+    outside.write_text(sources.read("workflow_one.py"))
     (workspace / "workflows/link.py").symlink_to(outside)
     with pytest.raises(ValueError):
         await executor.load("link:workflow")
@@ -65,9 +66,7 @@ async def test_absolute_and_symlink_targets(
 async def test_import_exception_cleans_module(
     workspace: Path, history: MemoryHistory
 ) -> None:
-    (workspace / "workflows/broken.py").write_text(
-        'raise RuntimeError("import failed")'
-    )
+    (workspace / "workflows/broken.py").write_text(sources.read("import_failure.py"))
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     before = set(sys.modules)
     with pytest.raises(RuntimeError, match="import failed"):

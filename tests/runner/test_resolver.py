@@ -5,20 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.fixtures import sources
 from vectorops.runner.api import composition
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.resolver import WorkflowResolver
 
-SOURCE = """
-from vectorops.runner.api.composition import workflow
-
-@workflow(name="Double", description="Double a number", kind="math.double", version=2)
-async def double(ctx, value: int, scale: int = 2) -> int:
-    return value * scale
-
-async def plain(ctx, text: str = "hello") -> str:
-    return text
-"""
+SOURCE = sources.read("resolver.py")
 
 
 @pytest.mark.parametrize(
@@ -103,7 +95,7 @@ async def test_new_deleted_and_broken_sources(tmp_path: Path) -> None:
         await resolver.describe("math:double")
     path.write_text(SOURCE)
     assert (await resolver.describe("math:double")).name == "Double"
-    path.write_text("raise RuntimeError('broken update')")
+    path.write_text(sources.read("broken_update.py"))
     with pytest.raises(RuntimeError, match="broken update"):
         await resolver.describe("math:double")
     path.unlink()
@@ -143,11 +135,12 @@ async def test_same_size_update_does_not_use_timestamp_bytecode_cache(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "value.py"
-    path.write_text("async def main(ctx): return 1\n")
+    path.write_text(sources.read("return_one.py"))
     resolver = WorkflowResolver(tmp_path)
     first = await resolver.resolve("value:main")
     stat = path.stat()
-    path.write_text("async def main(ctx): return 2\n")
+    path.write_text(sources.read("return_two.py"))
+    assert path.stat().st_size == stat.st_size
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     second = await resolver.resolve("value:main")
     assert await first(None) == 1

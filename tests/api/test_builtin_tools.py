@@ -12,7 +12,7 @@ import connect
 import pydantic
 import pytest
 
-from tests.fixtures import replay
+from tests.fixtures import replay, sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import composition, tools
 from vectorops.runner.api.llm import plan
@@ -112,8 +112,8 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
                     "argv": [
                         sys.executable,
                         "-u",
-                        "-c",
-                        "import sys; print(sys.stdin.read())",
+                        str(sources.path("process.py")),
+                        "stdin",
                     ],
                 },
                 "keep_stdin_open": True,
@@ -152,7 +152,7 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
         {
             "command": {
                 "kind": "argv",
-                "argv": [sys.executable, "-c", "raise SystemExit(3)"],
+                "argv": [sys.executable, str(sources.path("process.py")), "exit", "3"],
             },
             "yield_timeout_ms": 1000,
         },
@@ -164,7 +164,12 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
             {
                 "command": {
                     "kind": "argv",
-                    "argv": [sys.executable, "-c", "import time; time.sleep(30)"],
+                    "argv": [
+                        sys.executable,
+                        str(sources.path("process.py")),
+                        "sleep",
+                        "30",
+                    ],
                 },
                 "yield_timeout_ms": 0,
             },
@@ -393,8 +398,8 @@ async def test_binary_process_output(context: ActivityExecutionContext) -> None:
                 "kind": "argv",
                 "argv": [
                     sys.executable,
-                    "-c",
-                    "import os; os.write(1, bytes([255, 0]))",
+                    str(sources.path("process.py")),
+                    "binary_output",
                 ],
             },
             "yield_timeout_ms": 1000,
@@ -417,19 +422,7 @@ async def test_environment_tools_replay_without_io(
         f"[environment]\nkind = 'local'\nbase_project_path = {json.dumps(str(workspace))}\n"
         "[components.tools.approval]\napprove_all = true\n"
     )
-    (workspace / "workflows/tool_replay.py").write_text("""
-import connect
-import sys
-from vectorops.runner.api import tools
-
-async def main(ctx):
-    read = await tools.invoke_tool(tools.read_file_tool(), connect.ToolCallBlock(
-        id="read", name="read_file", arguments={"path": "sample.bin"}))
-    process = await tools.invoke_tool(tools.exec_tool(), connect.ToolCallBlock(
-        id="exec", name="exec", arguments={"command": {"kind": "argv",
-        "argv": [sys.executable, "-c", "print('hello')"]}, "yield_timeout_ms": 1000}))
-    return [read.model_dump(mode="json"), process.model_dump(mode="json")]
-""")
+    (workspace / "workflows/tool_replay.py").write_text(sources.read("tool_replay.py"))
     runner = WorkflowRunner(workspace, history)
     first = await runner.run("tool_replay:main", workflow_id="root")
     assert isinstance(first, list)

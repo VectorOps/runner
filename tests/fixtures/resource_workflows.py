@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 import sys
 
+from tests.fixtures import sources
 from vectorops.runner import models
 from vectorops.runner.environment.processes import models as processes
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -38,8 +39,8 @@ async def launch(ctx: ActivityExecutionContext) -> str:
                 argv=[
                     sys.executable,
                     "-u",
-                    "-c",
-                    "import os, time; print(os.getpid(), flush=True); time.sleep(60)",
+                    str(sources.path("process.py")),
+                    "pid",
                 ]
             ),
             yield_timeout_ms=0,
