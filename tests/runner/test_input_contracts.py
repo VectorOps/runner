@@ -75,7 +75,7 @@ async def test_durable_schema_rejection_retry_and_contract_identity(
     spec = approval()
     original = await database.register_input("request", spec)
     reopened = SQLiteHistory(database.path)
-    assert (await reopened.get_input("request")).specification() == spec
+    assert await reopened.get_input_spec("request") == spec
     with pytest.raises(input_schema.InputValidationError) as error:
         await reopened.answer_input(answer({"approved": "yes"}))
     assert error.value.issues[0].path == ["response", "approved"]

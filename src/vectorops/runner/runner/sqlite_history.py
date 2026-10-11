@@ -396,13 +396,15 @@ class SQLiteHistory:
         return await self._run(lambda connection: self._step(connection, step_id))
 
     @staticmethod
-    def _input(connection: sqlite3.Connection, request_id: str) -> mailbox.InputRequest:
+    def _input(
+        connection: sqlite3.Connection, request_id: str
+    ) -> mailbox.StoredInputRequest:
         row = connection.execute(
             "SELECT payload FROM input_requests WHERE request_id = ?", (request_id,)
         ).fetchone()
         if row is None:
             raise KeyError(request_id)
-        return mailbox.InputRequest.model_validate_json(row[0])
+        return mailbox.StoredInputRequest.model_validate_json(row[0])
 
     async def register_input(
         self, request_id: str, spec: mailbox.InputSpec
@@ -428,8 +430,8 @@ class SQLiteHistory:
                 if existing is not None:
                     if existing.specification() != spec:
                         raise mailbox.MailboxConflict("input request contract changed")
-                    return existing
-                request = mailbox.InputRequest(
+                    return existing.public()
+                request = mailbox.StoredInputRequest(
                     **spec.model_dump(),
                     request_id=request_id,
                     execution_id=execution.id,
@@ -439,12 +441,19 @@ class SQLiteHistory:
                     "INSERT INTO input_requests VALUES (?, ?)",
                     (request_id, request.model_dump_json()),
                 )
-                return request
+                return request.public()
 
         return await self._run(register)
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
-        return await self._run(lambda connection: self._input(connection, request_id))
+        return await self._run(
+            lambda connection: self._input(connection, request_id).public()
+        )
+
+    async def get_input_spec(self, request_id: str) -> mailbox.InputSpec:
+        return await self._run(
+            lambda connection: self._input(connection, request_id).specification()
+        )
 
     async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
         return await self._run(
@@ -481,7 +490,8 @@ class SQLiteHistory:
                     [*values, query.limit + 1],
                 ).fetchall()
                 requests = [
-                    mailbox.InputRequest.model_validate_json(row[0]) for row in rows
+                    mailbox.StoredInputRequest.model_validate_json(row[0]).public()
+                    for row in rows
                 ]
                 return mailbox.RequestPage(
                     requests=requests[: query.limit],
@@ -508,7 +518,7 @@ class SQLiteHistory:
                         request.idempotency_key == answer.idempotency_key
                         and request.response == answer.response
                     ):
-                        return request
+                        return request.public()
                     raise mailbox.MailboxConflict("input request is already answered")
                 if (
                     request.status != "pending"
@@ -539,7 +549,7 @@ class SQLiteHistory:
                             "ON CONFLICT(workflow_id, tool_name) DO NOTHING",
                             (step.workflow_id, tool_name, request.request_id),
                         )
-                return request
+                return request.public()
 
         return await self._run(respond)
 

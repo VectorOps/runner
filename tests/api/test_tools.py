@@ -25,14 +25,14 @@ class Arguments(pydantic.BaseModel):
 
 class ApprovalStore:
     def __init__(self) -> None:
-        self.requests: dict[str, mailbox.InputRequest] = {}
+        self.requests: dict[str, mailbox.StoredInputRequest] = {}
         self.registered = asyncio.Event()
 
     async def register_input(
         self, request_id: str, spec: mailbox.InputSpec
     ) -> mailbox.InputRequest:
         if request_id not in self.requests:
-            self.requests[request_id] = mailbox.InputRequest(
+            self.requests[request_id] = mailbox.StoredInputRequest(
                 request_id=request_id,
                 execution_id="test",
                 workflow_id="test",
@@ -41,10 +41,13 @@ class ApprovalStore:
         else:
             assert self.requests[request_id].payload == spec.payload
         self.registered.set()
-        return self.requests[request_id]
+        return self.requests[request_id].public()
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
-        return self.requests[request_id]
+        return self.requests[request_id].public()
+
+    async def get_input_spec(self, request_id: str) -> mailbox.InputSpec:
+        return self.requests[request_id].specification()
 
     async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
         return any(
@@ -62,7 +65,7 @@ class ApprovalStore:
             update={"status": "answered", "response": answer.response}
         )
         self.requests[answer.request_id] = updated
-        return updated
+        return updated.public()
 
     async def cancel_inputs(self, request_id: Optional[str] = None) -> None:
         raise AssertionError("unexpected cancellation of durable approval")

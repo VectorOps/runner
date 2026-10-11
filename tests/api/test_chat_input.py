@@ -11,6 +11,7 @@ from vectorops.runner import input_schema
 from vectorops.runner.api import composition, llm, mailbox as api_mailbox
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.errors import ReplayMismatchError
 
 
 @pytest.mark.parametrize(
@@ -97,6 +98,25 @@ async def test_chat_helper_mixed_content_and_replay(history: MemoryHistory) -> N
     first = await asyncio.wait_for(task, 2)
     assert first.outcome.kind == "completed", first.outcome
     assert (await replay.run(history, workflow, first.id)).outcome == first.outcome
+
+
+async def test_changed_runtime_contract_rejects_replay(history: MemoryHistory) -> None:
+    store = ApprovalStore()
+    box = mailbox.Mailbox(store)
+    schema: input_schema.Schema = {"type": "string"}
+
+    async def workflow() -> pydantic.JsonValue:
+        return await api_mailbox.request_input("test", response_schema=schema)
+
+    task = asyncio.create_task(replay.run(history, workflow, mailbox=box))
+    await asyncio.wait_for(store.registered.wait(), 2)
+    await approve(box, next(iter(store.requests.values())), "hello")
+    first = await asyncio.wait_for(task, 2)
+    assert first.outcome.kind == "completed"
+    assert (await replay.run(history, workflow, first.id)).outcome == first.outcome
+    schema = {"type": "string", "minLength": 10}
+    with pytest.raises(ReplayMismatchError):
+        await replay.run(history, workflow, first.id)
 
 
 async def test_invalid_workflow_payload_never_reaches_mailbox(

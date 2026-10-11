@@ -18,8 +18,8 @@ async def test_approval_schema_error_survives_transport_and_restart(
         )
         original = (await pending(connection, accepted.execution_id))[0]
         assert original.request_type == "tool.approval.v1"
-        assert original.request_schema is not None
-        assert original.response_schema is not None
+        assert "request_schema" not in original.model_dump()
+        assert "response_schema" not in original.model_dump()
     async with client.embedded(tmp_path) as connection:
         request = (await pending(connection, accepted.execution_id))[0]
         assert request == original

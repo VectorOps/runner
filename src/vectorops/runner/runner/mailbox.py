@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import hashlib
+import json
 import logging
 import typing
 
@@ -19,13 +21,20 @@ class Model(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
-class InputSpec(Model):
+class InputFields(Model):
     channel: str = pydantic.Field(min_length=1, max_length=256, pattern=r"^\S+$")
     payload: pydantic.JsonValue = None
     response_type: typing.Literal["text", "json"] = "text"
     request_type: typing.Optional[str] = pydantic.Field(
         default=None, min_length=1, max_length=256, pattern=r"^\S+$"
     )
+
+    def validate_response(self, value: pydantic.JsonValue) -> None:
+        if self.response_type == "text" and not isinstance(value, str):
+            raise ValueError("input request requires a text response")
+
+
+class InputSpec(InputFields):
     request_schema: typing.Optional[input_schema.Schema] = None
     response_schema: typing.Optional[input_schema.Schema] = None
 
@@ -49,14 +58,34 @@ class InputSpec(Model):
             self.model_dump(include=set(InputSpec.model_fields))
         )
 
+    def fields(self) -> InputFields:
+        return InputFields(
+            channel=self.channel,
+            payload=self.payload,
+            response_type=self.response_type,
+            request_type=self.request_type,
+        )
+
+    @staticmethod
+    def contract_digest(
+        request_schema: typing.Optional[input_schema.Schema],
+        response_schema: typing.Optional[input_schema.Schema],
+    ) -> str:
+        value = json.dumps(
+            [request_schema, response_schema],
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(value.encode()).hexdigest()
+
     def validate_response(self, value: pydantic.JsonValue) -> None:
-        if self.response_type == "text" and not isinstance(value, str):
-            raise ValueError("input request requires a text response")
+        super().validate_response(value)
         if self.response_schema is not None:
             input_schema.validate(self.response_schema, value, field="response")
 
 
-class InputRequest(InputSpec):
+class InputRequest(InputFields):
     request_id: str
     execution_id: str
     workflow_id: str
@@ -65,6 +94,23 @@ class InputRequest(InputSpec):
     answered_at: typing.Optional[str] = None
     response: pydantic.JsonValue = None
     idempotency_key: typing.Optional[str] = None
+
+
+class StoredInputRequest(InputRequest, InputSpec):
+    """Internal durable validation contract, never returned as a public request."""
+
+    def public(self) -> InputRequest:
+        return InputRequest(
+            **self.fields().model_dump(),
+            request_id=self.request_id,
+            execution_id=self.execution_id,
+            workflow_id=self.workflow_id,
+            status=self.status,
+            created_at=self.created_at,
+            answered_at=self.answered_at,
+            response=self.response,
+            idempotency_key=self.idempotency_key,
+        )
 
 
 class RequestRef(Model):
@@ -101,6 +147,8 @@ class MailboxStore(typing.Protocol):
 
     async def get_input(self, request_id: str) -> InputRequest: ...
 
+    async def get_input_spec(self, request_id: str) -> InputSpec: ...
+
     async def answer_input(self, answer: Answer) -> InputRequest: ...
 
     async def tool_approved(self, workflow_id: str, tool_name: str) -> bool: ...
@@ -126,9 +174,9 @@ class Mailbox:
     def waiting(self) -> bool:
         return bool(self._waiters)
 
-    async def existing(self, request_id: str) -> typing.Optional[InputRequest]:
+    async def existing(self, request_id: str) -> typing.Optional[InputSpec]:
         try:
-            return await self.store.get_input(request_id)
+            return await self.store.get_input_spec(request_id)
         except KeyError:
             return None
 
