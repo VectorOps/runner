@@ -380,6 +380,7 @@ class WorkflowDefinition(typing.Generic[P, T]):
             input=configuration.input,
             kind=self.kind,
             version=self.version,
+            description=self.description,
         )
         outcomes = await context.join_workflows([handle])
         outcome = outcomes[0]

@@ -38,6 +38,7 @@ class SpawnRequest:
     input: dict[str, pydantic.JsonValue]
     contract_kind: typing.Optional[str] = None
     version: typing.Optional[int] = None
+    description: typing.Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ class WorkflowExecutionContext:
         input: typing.Optional[dict[str, pydantic.JsonValue]] = None,
         kind: typing.Optional[str] = None,
         version: typing.Optional[int] = None,
+        description: typing.Optional[str] = None,
     ) -> ChildWorkflowHandle:
         response = await self.submitter.submit(
             SpawnRequest(
@@ -122,6 +124,7 @@ class WorkflowExecutionContext:
                 {} if input is None else input,
                 kind,
                 version,
+                description,
             )
         )
         if response.kind != "spawn":

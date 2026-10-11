@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import typing
 from unittest.mock import patch
 
 import connect
@@ -42,13 +43,16 @@ async def test_subagent_factory_does_not_spawn(
     assert "workflow.spawn" not in kinds
 
 
+@pytest.mark.parametrize("description", [None, "Double the requested number"])
 async def test_subworkflow_history_and_descriptor_replay(
-    workspace: Path, history: MemoryHistory
+    workspace: Path, history: MemoryHistory, description: typing.Optional[str]
 ) -> None:
     prepare(workspace)
     runner = WorkflowRunner(workspace, history)
     result = connect.ToolResultMessage.model_validate(
-        await runner.run("parent:main", workflow_id="root")
+        await runner.run(
+            "parent:main", input={"description": description}, workflow_id="root"
+        )
     )
     assert not result.is_error
     assert result.content == [connect.TextBlock(text="6")]
@@ -58,6 +62,8 @@ async def test_subworkflow_history_and_descriptor_replay(
     assert kinds.count("llm.tool") == 1
     assert kinds.count("workflow.spawn") == 1
     assert kinds.count("workflow.join") == 1
+    spawn = next(step for step in path if step.operation.kind == "workflow.spawn")
+    assert spawn.operation.model_dump(mode="json")["description"] == description
     before = list(history.appended)
     (workspace / "workflows/child.py").unlink()
     with (

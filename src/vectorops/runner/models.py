@@ -54,6 +54,7 @@ class WorkflowSpawnOperation(_JsonModel):
 
     kind: typing.Literal["workflow.spawn"] = "workflow.spawn"
     child_workflow_id: str = pydantic.Field(min_length=1)
+    description: typing.Optional[str] = None
 
 
 class WorkflowJoinOperation(_JsonModel):

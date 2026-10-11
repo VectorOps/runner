@@ -21,6 +21,9 @@ class SubworkflowArguments(pydantic.BaseModel):
 
     reference: str
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+    description: typing.Optional[str] = pydantic.Field(
+        default=None, description="Brief description of this workflow task for the UI."
+    )
 
 
 class SubworkflowTool(tools.WorkflowToolBinding):
@@ -91,6 +94,7 @@ class SubworkflowTool(tools.WorkflowToolBinding):
             input=parsed.input,
             kind=descriptor.kind,
             version=descriptor.version,
+            description=parsed.description,
         )
         outcomes = await context.join_workflows([handle], failure_policy="collect")
         outcome = outcomes[0]

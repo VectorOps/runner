@@ -68,6 +68,28 @@ def test_workflow_json_defaults_and_frozen_fields() -> None:
         workflow.id = "changed"
 
 
+@pytest.mark.parametrize("description", [None, "", "Review the workflow"])
+def test_spawn_description_roundtrip(description: typing.Optional[str]) -> None:
+    step = m.WorkflowStep(
+        id="spawn",
+        workflow_id="parent",
+        operation=m.WorkflowSpawnOperation(
+            child_workflow_id="child", description=description
+        ),
+        outcome=m.StepCompleted(),
+    )
+    serialized = step.model_dump_json()
+    assert json.loads(serialized)["operation"]["description"] == description
+    assert m.WorkflowStep.model_validate_json(serialized) == step
+
+
+def test_legacy_spawn_has_no_description() -> None:
+    operation = m.WorkflowSpawnOperation.model_validate(
+        {"kind": "workflow.spawn", "child_workflow_id": "child"}
+    )
+    assert operation.description is None
+
+
 @pytest.mark.parametrize(
     "patch",
     [

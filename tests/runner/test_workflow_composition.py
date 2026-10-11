@@ -4,6 +4,7 @@ import typing
 
 import pytest
 
+from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from tests.fixtures.probe import ExecutionProbe
 from tests.fixtures.library_workflows import child as library_child
@@ -31,6 +32,29 @@ async def test_direct_await_records_spawn_join_and_returns_result(
     assert await runner.run("composed:workflow", continue_from_step_id=root[-1].id) == 6
     assert history.appended == appended
     assert execution_probe.calls == [3]
+
+
+async def test_workflow_description_is_recorded_and_preserved_on_replay(
+    runner: WorkflowRunner, history: MemoryHistory, workspace: Path
+) -> None:
+    source = sources.read("described_workflow.py")
+    workflow_path = workspace / "workflows/described.py"
+    workflow_path.write_text(source)
+    assert await runner.run("described:main", workflow_id="root") == 6
+    path = history.path(history.heads["root"])
+    assert path[0].operation.model_dump(mode="json")["description"] == (
+        "Double the requested number"
+    )
+    before = list(history.appended)
+    workflow_path.write_text(source.replace("Double the requested number", "Updated"))
+    assert (
+        await WorkflowRunner(workspace, history).run(
+            "described:main", continue_from_step_id=path[-1].id
+        )
+        == 6
+    )
+    assert history.appended == before
+    assert history.path(history.heads["root"]) == path
 
 
 async def test_standard_gather_runs_children_concurrently(

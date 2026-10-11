@@ -247,7 +247,9 @@ class SpawnHandler:
             child = await self.runtime.prepare_workflow(child)
             await self.runtime.history.save_workflow(child)
             step = await self.runtime.append(
-                models.WorkflowSpawnOperation(child_workflow_id=child.id),
+                models.WorkflowSpawnOperation(
+                    child_workflow_id=child.id, description=request.description
+                ),
                 models.StepCompleted(),
             )
             self.runtime.start_child(child)
