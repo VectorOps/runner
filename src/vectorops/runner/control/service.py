@@ -163,6 +163,17 @@ class RunnerService:
     def _emit(self, event: dict[str, pydantic.JsonValue]) -> None:
         kind = event.get("kind")
         execution_id = event.get("execution_id")
+        if isinstance(execution_id, str) and kind in (
+            "execution.paused",
+            "execution.resumed",
+        ):
+            active = self._active.get(execution_id)
+            if active is not None and active.status != "stopping":
+                self._active[execution_id] = active.model_copy(
+                    update={
+                        "status": "paused" if kind == "execution.paused" else "running"
+                    }
+                )
         if isinstance(kind, str) and kind.startswith(("execution.", "mailbox.")):
             with diagnostics.bind(
                 execution_id=execution_id if isinstance(execution_id, str) else None
@@ -328,7 +339,11 @@ class RunnerService:
         return summary.model_copy(
             update={
                 "active": active is not None,
-                "status": active.status if active is not None else summary.status,
+                "status": (
+                    active.status
+                    if active is not None and active.status in ("starting", "stopping")
+                    else summary.status
+                ),
                 "awaiting_authentication": self.authentication.waiting_for(identifier),
             }
         )
@@ -567,7 +582,22 @@ class RunnerService:
             selected = p.Execution.model_validate(params)
             async with self._lock:
                 if selected.execution_id not in self._active:
-                    raise p.RemoteError("execution_conflict", "execution is not active")
+                    try:
+                        await self.runner.stop_unloaded(selected.execution_id)
+                    except (ValueError, KeyError, FileNotFoundError) as exc:
+                        raise p.RemoteError(
+                            "execution_conflict", "execution is not active"
+                        ) from exc
+                    self._emit(
+                        {
+                            "kind": "execution.cancelled",
+                            "execution_id": selected.execution_id,
+                            "error": None,
+                        }
+                    )
+                    return p.json_value(
+                        p.Active(execution_id=selected.execution_id, status="stopping")
+                    )
                 self._stop(selected.execution_id)
                 return p.json_value(self._active[selected.execution_id])
         if method == "executions.get":
@@ -607,7 +637,16 @@ class RunnerService:
                 if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                     raise p.RemoteError("runner_stopping", "runner is shutting down")
                 try:
-                    return p.json_value(await self.runner.answer_input(answer))
+                    receipt = await self.runner.answer_input(answer)
+                    if answer.execution_id not in self._active:
+                        record = await self.runner.execution_state(answer.execution_id)
+                        if record.status == "running":
+                            assert self._store is not None
+                            self._store.scheduled.add(answer.execution_id)
+                            self._schedule(
+                                p.Accepted(execution_id=answer.execution_id), None, None
+                            )
+                    return p.json_value(receipt)
                 except input_schema.InputValidationError as exc:
                     raise p.RemoteError(
                         "input_validation", str(exc), exc.details()

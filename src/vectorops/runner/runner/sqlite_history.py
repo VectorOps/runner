@@ -158,9 +158,14 @@ class SQLiteHistory:
         )
 
     async def save_execution(
-        self, execution: state.ExecutionRecord, *, replace_heads: bool = False
+        self,
+        execution: state.ExecutionRecord,
+        *,
+        replace_heads: bool = False,
+        preserve_status: bool = False,
     ) -> None:
         def save(connection: sqlite3.Connection) -> None:
+            saved = execution
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._workflow(connection, execution.root_workflow_id)
@@ -174,12 +179,14 @@ class SQLiteHistory:
                         execution.root_workflow_id,
                     ):
                         raise ValueError("execution identity cannot change")
+                    if preserve_status:
+                        saved = execution.model_copy(update={"status": previous.status})
                 for workflow_id, step_id in execution.checkpoint.heads.items():
                     if self._step(connection, step_id).workflow_id != workflow_id:
                         raise ValueError("checkpoint head belongs to another workflow")
                 connection.execute(
                     "INSERT INTO execution VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET payload = excluded.payload",
-                    (execution.model_dump_json(),),
+                    (saved.model_dump_json(),),
                 )
                 if existing is None or replace_heads:
                     connection.execute("DELETE FROM workflow_heads")
@@ -189,6 +196,62 @@ class SQLiteHistory:
                     )
 
         await self._run(save)
+
+    async def set_paused(self, requests: set[str]) -> bool:
+        """Pause only if every observed dependency is still unanswered at commit."""
+        if not requests:
+            return False
+
+        def pause(connection: sqlite3.Connection) -> bool:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                execution = self._execution(connection)
+                if execution.status != "running" or any(
+                    self._input(connection, request).status != "pending"
+                    for request in requests
+                ):
+                    return False
+                self._set_status(connection, "paused")
+                return True
+
+        return await self._run(pause)
+
+    @staticmethod
+    def _set_status(
+        connection: sqlite3.Connection, status: state.ExecutionStatus
+    ) -> None:
+        connection.execute(
+            "UPDATE execution SET payload = json_set(payload, '$.status', ?, '$.updated_at', ?) "
+            "WHERE singleton = 1",
+            (status, state.timestamp()),
+        )
+
+    async def wake_execution(self) -> bool:
+        def wake(connection: sqlite3.Connection) -> bool:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._execution(connection).status != "paused":
+                    return False
+                self._set_status(connection, "running")
+                return True
+
+        return await self._run(wake)
+
+    async def stop_execution(self) -> None:
+        """Cancel an unloaded execution and its requests in one transaction."""
+
+        def stop(connection: sqlite3.Connection) -> None:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._execution(connection).status not in ("running", "paused"):
+                    raise ValueError("execution is not active")
+                connection.execute(
+                    "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
+                    "WHERE json_extract(payload, '$.status') = 'pending'"
+                )
+                self._set_status(connection, "cancelled")
+
+        await self._run(stop)
 
     async def get_execution(self) -> state.ExecutionRecord:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -431,7 +494,7 @@ class SQLiteHistory:
                 connection.execute("BEGIN IMMEDIATE")
                 step = self._step(connection, request_id)
                 execution = self._execution(connection)
-                if execution.status != "running":
+                if execution.status not in ("running", "paused"):
                     raise mailbox.MailboxConflict("execution is not running")
                 if (
                     step.operation.kind not in (mailbox.KIND, "llm.tool")
@@ -535,10 +598,9 @@ class SQLiteHistory:
                     ):
                         return request.public()
                     raise mailbox.MailboxConflict("input request is already answered")
-                if (
-                    request.status != "pending"
-                    or self._execution(connection).status != "running"
-                ):
+                if request.status != "pending" or self._execution(
+                    connection
+                ).status not in ("running", "paused"):
                     raise mailbox.MailboxConflict("input request is closed")
                 request.validate_response(answer.response)
                 request = request.model_copy(
@@ -553,6 +615,8 @@ class SQLiteHistory:
                     "UPDATE input_requests SET payload = ? WHERE request_id = ?",
                     (request.model_dump_json(), request.request_id),
                 )
+                if self._execution(connection).status == "paused":
+                    self._set_status(connection, "running")
                 step = self._step(connection, request.request_id)
                 if step.operation.kind == "llm.tool":
                     tool_name = tool_policy.workflow_grant(

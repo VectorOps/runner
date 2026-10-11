@@ -14,6 +14,9 @@ import pydantic
 from vectorops.runner import input_schema
 from vectorops.runner.runner.execution_state import timestamp
 
+if typing.TYPE_CHECKING:
+    from vectorops.runner.runner.pause import ExecutionPause
+
 KIND: typing.Final = "mailbox.input"
 
 
@@ -163,10 +166,14 @@ class Mailbox:
     """Use durable rows as truth and events only to wake local activity waiters."""
 
     def __init__(
-        self, store: MailboxStore, sink: typing.Optional[EventSink] = None
+        self,
+        store: MailboxStore,
+        sink: typing.Optional[EventSink] = None,
+        pause: typing.Optional[ExecutionPause] = None,
     ) -> None:
         self.store = store
         self.sink = sink
+        self.pause = pause
         self.suspending = False
         self._waiters: dict[str, asyncio.Event] = {}
 
@@ -213,6 +220,8 @@ class Mailbox:
                     return request.response
                 if request.status != "pending":
                     raise MailboxConflict("input request is closed")
+                if self.pause is not None:
+                    await self.pause.wait(request_id)
                 await wakeup.wait()
         except asyncio.CancelledError:
             if not self.suspending:
@@ -220,6 +229,8 @@ class Mailbox:
             raise
         finally:
             self._waiters.pop(request_id, None)
+            if self.pause is not None:
+                await self.pause.release(request_id)
 
     async def answer(self, answer: Answer) -> InputRequest:
         try:

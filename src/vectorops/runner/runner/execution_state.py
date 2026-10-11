@@ -5,6 +5,10 @@ import typing
 
 import pydantic
 
+ExecutionStatus: typing.TypeAlias = typing.Literal[
+    "running", "paused", "completed", "failed", "cancelled"
+]
+
 
 def timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -27,7 +31,7 @@ class ExecutionRecord(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
     id: str = pydantic.Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     root_workflow_id: str = pydantic.Field(min_length=1)
-    status: typing.Literal["running", "completed", "failed", "cancelled"] = "running"
+    status: ExecutionStatus = "running"
     created_at: str = pydantic.Field(default_factory=timestamp)
     updated_at: str = pydantic.Field(default_factory=timestamp)
     checkpoint: ExecutionCheckpoint = pydantic.Field(

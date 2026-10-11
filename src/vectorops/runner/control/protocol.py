@@ -171,7 +171,7 @@ class Accepted(Model):
 
 class Active(Model):
     execution_id: str
-    status: typing.Literal["starting", "running", "stopping"] = "starting"
+    status: typing.Literal["starting", "running", "paused", "stopping"] = "starting"
 
 
 class ActivePage(Model):

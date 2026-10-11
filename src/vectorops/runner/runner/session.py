@@ -103,6 +103,8 @@ class ExecutionSession:
         self.event_sink = event_sink
         self.configure_workflow = configure_workflow
         self.mailbox = mailbox
+        self.pause = None if mailbox is None else mailbox.pause
+        self._dispatching = False
         self.authentication = authentication
         self.environment = environment
         self.resources = resources
@@ -123,7 +125,46 @@ class ExecutionSession:
         pending = _Invocation(request, asyncio.get_running_loop().create_future())
         pending.response.add_done_callback(pending.cancel_wait)
         self.queue.put_nowait(pending)
+        if self.pause is not None:
+            await self.pause.running()
         return await pending.response
+
+    def blocked_inputs(self) -> typing.Optional[set[str]]:
+        """Report mailbox dependencies only after replay and deliveries settle."""
+        if (
+            self.closed
+            or self.replaying
+            or self._dispatching
+            or not self.queue.empty()
+            or self.deliveries
+            or not self.invocations
+            or self.pause is None
+        ):
+            return None
+        requests: set[str] = set()
+        for identifier, invocation in self.invocations.items():
+            if (
+                invocation.task is None
+                or invocation.task.done()
+                or invocation.response.done()
+            ):
+                return None
+            if identifier in self.pause.requests:
+                requests.add(identifier)
+            elif isinstance(invocation.request, context.JoinRequest):
+                if not self.children or any(
+                    not task.done() and child not in self.pause.sessions
+                    for child, task in self.children.items()
+                ):
+                    return None
+            else:
+                return None
+        if any(
+            not task.done() and child not in self.pause.sessions
+            for child, task in self.children.items()
+        ):
+            return None
+        return requests
 
     async def _path(self) -> AsyncGenerator[models.WorkflowStep, None]:
         if self.replay_head is not None:
@@ -149,6 +190,8 @@ class ExecutionSession:
             asyncio.get_running_loop().create_future()
         )
         dispatcher = asyncio.create_task(self._dispatch(fatal))
+        if self.pause is not None:
+            self.pause.sessions[self.workflow.id] = self.blocked_inputs
         try:
             try:
                 await asyncio.wait((task, fatal), return_when=asyncio.FIRST_COMPLETED)
@@ -165,6 +208,8 @@ class ExecutionSession:
                 raise fatal.result()
             return await self._complete(task)
         finally:
+            if self.pause is not None:
+                self.pause.sessions.pop(self.workflow.id, None)
             fatal.cancel()
             await replay.aclose()
 
@@ -185,7 +230,13 @@ class ExecutionSession:
                         await self.recorded(step.operation)
                         await self._replay_delivery(step.operation.step_id)
                         continue
+                self._dispatching = False
+                if self.pause is not None:
+                    await self.pause.refresh()
                 item = await self.queue.get()
+                self._dispatching = True
+                if self.pause is not None:
+                    await self.pause.running()
                 if isinstance(item, str):
                     if not self.replaying:
                         invocation = self.invocations.get(item)

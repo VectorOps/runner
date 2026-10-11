@@ -25,7 +25,7 @@ class ExecutionSummary(pydantic.BaseModel):
     reference: typing.Optional[str] = None
     root_workflow_id: typing.Optional[str] = None
     status: typing.Literal[
-        "starting", "running", "stopping", "completed", "failed", "cancelled"
+        "starting", "running", "paused", "stopping", "completed", "failed", "cancelled"
     ]
     pending_inputs: int = 0
     awaiting_authentication: bool = False

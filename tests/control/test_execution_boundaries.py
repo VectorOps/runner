@@ -65,9 +65,10 @@ async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
                 )
             ).requests:
                 await asyncio.sleep(0.01)
-        assert (
-            await service.runner.execution_state(accepted.execution_id)
-        ).status == "running"
+        assert (await service.runner.execution_state(accepted.execution_id)).status in (
+            "running",
+            "paused",
+        )
 
 
 async def test_authentication_shutdown_is_execution_specific(tmp_path: Path) -> None:
@@ -166,7 +167,7 @@ async def test_live_retention_preserves_waiters_and_resume_reservations(
                 p.Start(reference="flow:quick", idempotency_key=str(index))
             )
             await settled(connection, quick.execution_id)
-            assert (await connection.execution(waiter.execution_id)).status == "running"
+            assert (await connection.execution(waiter.execution_id)).status == "paused"
         await connection.answer_input(response(request))
         await settled(connection, waiter.execution_id)
         assert (await connection.execution(waiter.execution_id)).status == "completed"

@@ -45,9 +45,7 @@ class ExecutionCheckpointer:
 
     async def persist(
         self,
-        status: typing.Literal[
-            "running", "completed", "failed", "cancelled"
-        ] = "running",
+        status: typing.Optional[state.ExecutionStatus] = None,
     ) -> None:
         async with self._lock:
             await self.history.flush()
@@ -64,13 +62,15 @@ class ExecutionCheckpointer:
                     completion_id = root.id
             self.execution = self.execution.model_copy(
                 update={
-                    "status": status,
+                    "status": self.execution.status if status is None else status,
                     "updated_at": state.timestamp(),
                     "checkpoint": state.ExecutionCheckpoint(heads=heads),
                     "completion_step_id": completion_id,
                 }
             )
-            await self.store.save_execution(self.execution)
+            await self.store.save_execution(
+                self.execution, preserve_status=status is None
+            )
             self._dirty = self.heads != heads
 
     async def _periodic(self) -> None:

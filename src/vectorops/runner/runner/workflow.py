@@ -36,6 +36,7 @@ from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner.pause import ExecutionPause
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.resources import ExecutionResources, finish_cleanup
 
@@ -177,7 +178,7 @@ class WorkflowRunner:
                         if (
                             cancelled
                             and execution_id not in self._suspending
-                            and record.status == "running"
+                            and record.status in ("running", "paused")
                         ):
                             database = await self._database(project, execution_id)
                             await database.cancel_inputs()
@@ -201,6 +202,8 @@ class WorkflowRunner:
             )
             if waiting and owner is not None:
                 owner.suspending = True
+                if owner.pause is not None:
+                    owner.pause.frozen = True
                 self._suspending.add(execution_id)
             return waiting
         waiting = self.authentication.waiting or any(
@@ -209,6 +212,8 @@ class WorkflowRunner:
         if waiting:
             for identifier, owner in self._mailboxes.items():
                 owner.suspending = True
+                if owner.pause is not None:
+                    owner.pause.frozen = True
                 self._suspending.add(identifier)
             self.stop()
         return waiting
@@ -233,6 +238,14 @@ class WorkflowRunner:
         async with self._writer(project):
             database = await self._database(project, answer.execution_id)
             return await mailbox.Mailbox(database, self.mailbox_sink).answer(answer)
+
+    async def stop_unloaded(self, execution_id: str) -> None:
+        project = await self.project()
+        async with self._writer(project) as store:
+            async with store.reserve(execution_id):
+                database = await self._database(project, execution_id)
+                await database.stop_execution()
+                await store.deactivate(execution_id)
 
     async def _execute(
         self,
@@ -366,7 +379,18 @@ class WorkflowRunner:
                     if is_new:
                         await (await self.execution_index()).invalidate()
                     await store.activate(execution_id)
-                    owner = mailbox.Mailbox(database, self.mailbox_sink)
+
+                    def changed(status: str) -> None:
+                        if self.mailbox_sink is not None:
+                            self.mailbox_sink(
+                                {
+                                    "kind": "execution." + status,
+                                    "execution_id": execution_id,
+                                }
+                            )
+
+                    pause = ExecutionPause(database, checkpointer.persist, changed)
+                    owner = mailbox.Mailbox(database, self.mailbox_sink, pause)
                     self._mailboxes[execution_id] = owner
                     try:
                         if on_started is not None:
@@ -388,7 +412,7 @@ class WorkflowRunner:
                             )
                     except asyncio.CancelledError:
                         if owner.suspending:
-                            await checkpointer.persist("running")
+                            await checkpointer.persist()
                         else:
                             await database.cancel_inputs()
                             await checkpointer.persist("cancelled")
@@ -598,7 +622,7 @@ class WorkflowRunner:
         async with RunnerStateStore(project.data_path) as store:
             database = await self._database(project, execution_id)
             record = await database.get_execution()
-            if record.status == "running":
+            if record.status in ("running", "paused"):
                 raise ValueError("active execution history cannot be removed")
             pointer = await store.load()
             if pointer.last_execution_id == execution_id:
