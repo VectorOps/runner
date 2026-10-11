@@ -30,7 +30,7 @@ async def run():
         return history
 ```
 
-`embedded` owns the service lifetime and stops remaining executions on exit, preserving executions waiting for mailbox input or authentication for recovery. Closing an ordinary `RunnerClient` does not stop its runner. `RunnerService` and `RunnerServer` can be managed separately when an embedded service must outlive clients.
+`embedded` owns the service lifetime and stops remaining executions on exit, preserving executions waiting for mailbox input for recovery. Authentication must be configured before workflows run; it never suspends execution. Closing an ordinary `RunnerClient` does not stop its runner. `RunnerService` and `RunnerServer` can be managed separately when an embedded service must outlive clients.
 
 ## Framing and authentication
 
@@ -112,19 +112,22 @@ and definitions are sorted by reference. Errors are returned on each page.
 `workflows.describe` also accepts explicit undecorated and library references.
 
 Each catalog entry contains `descriptor`, `active_executions`, `pending_inputs`,
-and `awaiting_authentication` (number of active executions awaiting authentication).
+and `awaiting_authentication` (retained field, always zero).
 Counts aggregate active root executions matching that definition; pending inputs
 include all children of those roots. An unavailable definition does not hide its
 running executions from `executions.summaries`.
 
 Execution summaries contain `execution_id`, nullable `reference` and
 `root_workflow_id`, `status`, `active`, `pending_inputs`, and
-`awaiting_authentication` (boolean). Startup entries can lack root identity before
+`awaiting_authentication` (retained boolean, always false). Startup entries can lack root identity before
 history is initialized. `status` includes live `starting`/`stopping` states as well
 as persisted lifecycle states. `active` identifies current service ownership;
 persisted `running` alone is not proof of active execution. The input count is
 queried across root and child mailbox records without decoding step histories.
-Authentication is not a mailbox request. Pagination is lexical by execution ID
+Authentication is managed separately through explicit `auth.login` or `mcp.login`
+and the [authentication protocol](../config/authentication.md#authentication-rpc-reference).
+Missing or failing authentication fails workflow execution without creating a login request.
+Pagination is lexical by execution ID
 and views can change between requests. Existing `executions.list` and
 `executions.get` response shapes remain unchanged.
 
@@ -154,7 +157,7 @@ async def manage(host):
     return await host.current(second.execution_id)
 ```
 
-Shutdown rejects new start/resume requests. Cancel mode stops all roots, but suspends each execution waiting for mailbox input or authentication instead of cancelling its durable wait. Explicit stops remain cancellations. Drain mode waits for every active execution and continues accepting input/authentication responses and connections; it can wait indefinitely for user input. Shutdown waits for owned cleanup before releasing workspace ownership.
+Shutdown rejects new start/resume requests. Cancel mode stops all roots, but suspends each execution waiting for mailbox input instead of cancelling its durable wait. Explicit stops remain cancellations. Drain mode waits for every active execution and continues accepting input responses and connections; it can wait indefinitely for mailbox input, but never for login. Shutdown waits for owned cleanup before releasing workspace ownership.
 
 Workspace `runner-state.json` retains `last_execution_id` and adds `active_execution_ids`. Updates are serialized; legacy manifests default to an empty active list. Per-execution databases remain authoritative for status and recovery heads. Startup reconciles the manifest with retained histories and recovers every record still marked `running`, including histories missed by a crash during manifest publication. Completed, failed, and cancelled histories do not auto-resume. Runtime process sessions are not restored.
 

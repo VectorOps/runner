@@ -71,21 +71,26 @@ async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
         )
 
 
-async def test_authentication_shutdown_is_execution_specific(tmp_path: Path) -> None:
+async def test_authentication_is_independent_of_execution_and_shutdown(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(
         sources.read("authorize.py") + "\n" + sources.read("mailbox_busy.py")
     )
     async with client.embedded(tmp_path) as connection:
+        login = await connection.login("chatgpt")
         waiting = await connection.start(
             p.Start(reference="flow:main", idempotency_key="auth")
         )
         busy = await connection.start(
             p.Start(reference="flow:busy", idempotency_key="busy")
         )
+        await settled(connection, waiting.execution_id)
+        assert (await connection.execution(waiting.execution_id)).status == "failed"
+        assert (await connection.pending_authentication())[0].id == login.id
+        assert (await connection.pending_authentication())[0].execution_ids == []
         async with asyncio.timeout(10):
-            while not await connection.pending_authentication():
-                await asyncio.sleep(0.01)
             while (
                 busy.execution_id
                 not in (
@@ -95,15 +100,7 @@ async def test_authentication_shutdown_is_execution_specific(tmp_path: Path) -> 
                 await asyncio.sleep(0.01)
     async with client.embedded(tmp_path) as connection:
         assert (await connection.execution(busy.execution_id)).status == "cancelled"
-        assert (await connection.execution(waiting.execution_id)).status == "running"
-        async with asyncio.timeout(10):
-            while not await connection.pending_authentication():
-                await asyncio.sleep(0.01)
-        assert (await connection.pending_authentication())[0].execution_ids == [
-            waiting.execution_id
-        ]
-        await connection.stop(waiting.execution_id)
-        await settled(connection, waiting.execution_id)
+        assert (await connection.execution(waiting.execution_id)).status == "failed"
         assert await connection.pending_authentication() == []
 
 

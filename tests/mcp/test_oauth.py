@@ -20,9 +20,10 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.control import client, oauth_host
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
-from vectorops.runner.mcp import models
+from vectorops.runner.mcp import models, management
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.workflow import WorkflowRunner
+from vectorops.runner.runner.errors import ActivityError
 
 
 class OAuthServer:
@@ -189,12 +190,11 @@ async def test_pkce_login_shared_refresh_and_resource_binding() -> None:
     async with server() as remote:
         auth = AuthenticationService()
         adapter = await auth.mcp_adapter(remote.settings())
-        tasks = [
-            asyncio.create_task(auth.acquire(adapter.profile, f"run-{i}"))
-            for i in range(2)
-        ]
+        await auth.login(adapter.profile.provider, adapter.profile.profile)
         await authorize(auth)
-        values = await asyncio.gather(*tasks)
+        values = await asyncio.gather(
+            *(auth.acquire(adapter.profile) for _ in range(2))
+        )
         assert values[0].secret == values[1].secret == "private-access-1"
         grant = remote.grants[0]
         assert grant["resource"] == remote.settings().resource
@@ -231,12 +231,11 @@ async def test_mcp_uses_existing_host_callback_flow(
             token = (await runner.configuration.load()).control_token
             transport = RunnerServer(runner, token)
             port = await transport.listen()
-            task = asyncio.create_task(
-                runner.authentication.acquire(adapter.profile, "execution")
-            )
             try:
-                requirement = await pending(runner.authentication)
                 async with await client.RunnerClient.tcp(port) as host:
+                    requirement = await host.login(
+                        adapter.profile.provider, adapter.profile.profile
+                    )
 
                     async def launch(url: str) -> None:
                         query = parse_qs(urlsplit(url).query)
@@ -258,10 +257,10 @@ async def test_mcp_uses_existing_host_callback_flow(
                                 assert response.status == 200
 
                     await oauth_host.authenticate(host, requirement.id, launch=launch)
-                    assert (await task).secret == "private-access-1"
+                    assert (
+                        await runner.authentication.acquire(adapter.profile)
+                    ).secret == "private-access-1"
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
                 await transport.aclose()
 
 
@@ -269,9 +268,9 @@ async def test_refresh_rotation_is_published_before_cancellation() -> None:
     async with server() as remote:
         auth = AuthenticationService()
         adapter = await auth.mcp_adapter(remote.settings())
-        login = asyncio.create_task(auth.acquire(adapter.profile))
+        await auth.login(adapter.profile.provider, adapter.profile.profile)
         await authorize(auth)
-        value = await login
+        value = await auth.acquire(adapter.profile)
         remote.release.clear()
         remote.token_started.clear()
         task = asyncio.create_task(auth.acquire(adapter.profile, rejected=value.secret))
@@ -284,7 +283,7 @@ async def test_refresh_rotation_is_published_before_cancellation() -> None:
         assert persisted is not None and persisted.refresh_token == "private-refresh-2"
 
 
-async def test_workflow_oauth_suspension_restart_and_no_secret_storage(
+async def test_workflow_requires_mcp_login_and_no_secret_storage(
     workspace: Path,
 ) -> None:
     async with server() as remote:
@@ -299,26 +298,19 @@ async def test_workflow_oauth_suspension_restart_and_no_secret_storage(
             )
         )
         runner = WorkflowRunner(workspace)
-        task = asyncio.create_task(
-            runner.run("python:tests.fixtures.mcp_workflows:echo")
-        )
-        await pending(runner.authentication)
+        with pytest.raises(ActivityError):
+            await asyncio.wait_for(
+                runner.run("python:tests.fixtures.mcp_workflows:echo"), 5
+            )
         identifier = runner.last_execution_id
-        assert identifier is not None and runner.suspend_inputs(identifier)
-        runner.stop()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert identifier is not None and not runner.suspend_inputs(identifier)
         assert not runner.authentication.pending()
-        assert (await runner.execution_state(identifier)).status == "running"
-        restarted = WorkflowRunner(workspace)
-        resumed = asyncio.create_task(restarted.resume(identifier))
-        try:
-            await authorize(restarted.authentication)
-            await asyncio.wait_for(resumed, 5)
-        finally:
-            if not resumed.done():
-                resumed.cancel()
-                await asyncio.gather(resumed, return_exceptions=True)
+        assert (await runner.execution_state(identifier)).status == "failed"
+        async with RunnerService(workspace) as service:
+            requirement = await service.mcp.login(management.Query(server="test"))
+            assert requirement.execution_ids == []
+            await authorize(service.authentication)
+        await WorkflowRunner(workspace).run("python:tests.fixtures.mcp_workflows:echo")
         for path in (workspace / "data").rglob("*"):
             if path.is_file():
                 data = path.read_bytes()
@@ -342,37 +334,27 @@ async def test_configuration_contract_retains_pre_oauth_digest(workspace: Path) 
     assert await WorkflowRunner(workspace).resume(runner.last_execution_id) == result
 
 
-async def test_cancellation_keeps_other_execution_login_pending() -> None:
+async def test_missing_credentials_do_not_modify_explicit_login() -> None:
     async with server() as remote:
         auth = AuthenticationService()
         adapter = await auth.mcp_adapter(remote.settings())
-        first = asyncio.create_task(auth.acquire(adapter.profile, "first"))
-        second = asyncio.create_task(auth.acquire(adapter.profile, "second"))
-        try:
-            async with asyncio.timeout(5):
-                while not (auth.waiting_for("first") and auth.waiting_for("second")):
-                    await asyncio.sleep(0.01)
-            first.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await first
-            assert auth.waiting_for("second") and not auth.waiting_for("first")
-            auth.cancel((await pending(auth)).id)
-            with pytest.raises(am.AuthenticationCancelled):
-                await second
-            assert not auth.pending()
-        finally:
-            first.cancel()
-            second.cancel()
-            await asyncio.gather(first, second, return_exceptions=True)
+        requirement = await auth.login(
+            adapter.profile.provider, adapter.profile.profile
+        )
+        for identifier in ("first", "second"):
+            with pytest.raises(am.LoginRequired):
+                await auth.acquire(adapter.profile, identifier)
+        assert auth.pending() == [requirement]
+        auth.cancel(requirement.id)
+        assert not auth.pending()
 
 
 async def test_401_refresh_is_bounded_and_does_not_follow_challenge_urls() -> None:
     async with server() as remote:
         auth = AuthenticationService()
         adapter = await auth.mcp_adapter(remote.settings())
-        task = asyncio.create_task(auth.acquire(adapter.profile))
+        await auth.login(adapter.profile.provider, adapter.profile.profile)
         await authorize(auth)
-        await task
         transport = MCPHTTPAuth(
             await auth.mcp.token_source(remote.settings()),
             remote.settings().resource,
@@ -409,7 +391,7 @@ async def test_token_failures_are_sanitized(failure: str) -> None:
         assert "private-code" not in str(error.value)
 
 
-async def test_runtime_login_outlives_startup_timeout_and_replay_is_offline(
+async def test_preconfigured_login_and_replay_is_offline(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async with server() as remote:
@@ -425,16 +407,16 @@ async def test_runtime_login_outlives_startup_timeout_and_replay_is_offline(
             )
         )
         runner = WorkflowRunner(workspace)
-        task = asyncio.create_task(
-            runner.run("python:tests.fixtures.mcp_workflows:echo")
+        adapter = await runner.authentication.mcp_adapter(settings)
+        await runner.authentication.login(
+            adapter.profile.provider, adapter.profile.profile
         )
-        await pending(runner.authentication)
         await asyncio.sleep(0.2)
-        assert not task.done()
-        assert runner.last_execution_id is not None
-        assert runner.authentication.waiting_for(runner.last_execution_id)
+        assert runner.last_execution_id is None
         await authorize(runner.authentication)
-        first = await asyncio.wait_for(task, 5)
+        first = await asyncio.wait_for(
+            runner.run("python:tests.fixtures.mcp_workflows:echo"), 5
+        )
         identifier = runner.last_execution_id
         assert identifier is not None
         output = workspace / "history.jsonl"

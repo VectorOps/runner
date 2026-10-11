@@ -120,12 +120,11 @@ async def test_execution_summary_counts_child_input_and_auth(tmp_path: Path) -> 
                     if item.descriptor.reference == "flow:main"
                 )
                 assert root.active_executions == root.pending_inputs == 1
-                with patch.object(
-                    service.authentication, "waiting_for", return_value=True
-                ):
-                    assert (
-                        await connection.execution_summary(accepted.execution_id)
-                    ).awaiting_authentication
+                login = await connection.login("chatgpt")
+                assert login.execution_ids == []
+                assert not (
+                    await connection.execution_summary(accepted.execution_id)
+                ).awaiting_authentication
                 answer = mailbox.Answer(
                     execution_id=accepted.execution_id,
                     request_id=request.request_id,
@@ -339,6 +338,29 @@ def test_command_parse_errors() -> None:
         commands.parser().parse_args(
             ["input", "send", "e", "r", "--text", "x", "--value", "{}"]
         )
+
+
+async def test_login_command_preconfigures_without_workflow(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with client.embedded(tmp_path) as connection:
+        await connection.add_authentication_profile("work")
+        await command(
+            connection,
+            "auth",
+            "login",
+            "chatgpt",
+            "--profile",
+            "work",
+            "--no-browser",
+            "--json",
+        )
+        result = json.loads(capsys.readouterr().out)
+        assert result["provider"] == "chatgpt" and result["profile"] == "work"
+        assert result["execution_ids"] == []
+        assert (await connection.active()).executions == []
+        await connection.cancel_authentication(result["id"])
+        assert await connection.pending_authentication() == []
 
 
 async def test_summary_pagination_and_starting_state(tmp_path: Path) -> None:

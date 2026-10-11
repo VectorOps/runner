@@ -12,7 +12,7 @@ class CredentialResolver(Protocol):
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
-        interactive: bool = True,
+        interactive: bool = False,
     ) -> models.Credential: ...
 
 
@@ -22,5 +22,5 @@ class TokenSource(Protocol):
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
-        interactive: bool = True,
+        interactive: bool = False,
     ) -> models.Credential: ...

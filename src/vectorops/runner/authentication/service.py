@@ -18,6 +18,7 @@ from vectorops.runner.authentication import mcp, mcp_settings
 from vectorops.runner.authentication import provider as provider_auth
 from vectorops.runner.authentication.provider import ProviderAuth as ProviderAuth
 from vectorops.runner.authentication.store import CredentialStore
+from vectorops.runner.runner.resources import finish_cleanup
 
 EventSink = Callable[[dict[str, pydantic.JsonValue]], None]
 
@@ -25,10 +26,6 @@ EventSink = Callable[[dict[str, pydantic.JsonValue]], None]
 @dataclass
 class Pending:
     requirement: m.Requirement
-    changed: asyncio.Event = field(default_factory=asyncio.Event)
-    executions: dict[str, int] = field(default_factory=dict)
-    waiters: int = 0
-    cancelled: bool = False
     owner: Optional[str] = None
     claim: Optional[m.Claim] = None
     verifier: str = field(default="", repr=False)
@@ -46,23 +43,44 @@ class AuthenticationService:
     ) -> None:
         self.configuration = configuration or global_config.GlobalConfiguration()
         self.store = CredentialStore(self.configuration)
+        self.profiles = self.store.profiles
         self.adapters: dict[str, oauth.OAuthAdapter] = (
             provider_auth.adapters() if adapters is None else dict(adapters)
         )
         self.mcp = mcp.MCPCredentials(self.store, self, self.register)
         self.event_sink = event_sink
         self._pending: dict[str, Pending] = {}
-        self._users: dict[str, int] = {}
 
     def register(self, provider: str, adapter: oauth.OAuthAdapter) -> None:
         self.adapters[provider] = adapter
 
-    @property
-    def waiting(self) -> bool:
-        return bool(self._pending)
-
-    def waiting_for(self, execution_id: str) -> bool:
-        return any(execution_id in item.executions for item in self._pending.values())
+    async def login(
+        self, provider: str, profile: Optional[str] = None
+    ) -> m.Requirement:
+        """Begin an explicit OAuth login without executing or waiting for a workflow."""
+        selected = m.Profile(
+            provider=provider, profile=await self.profiles.resolve(profile)
+        )
+        if selected.provider not in self.adapters:
+            raise m.AuthenticationError(
+                "provider does not support OAuth login; provision an API key instead"
+            )
+        async with self.profiles.locked(selected.profile):
+            item = self._pending.get(selected.key)
+            if item is None:
+                item = Pending(
+                    m.Requirement(
+                        provider=selected.provider,
+                        profile=selected.profile,
+                        id=uuid4().hex,
+                    )
+                )
+                self._pending[selected.key] = item
+                self._emit("auth.required", item)
+            self._expire(item)
+            return item.requirement.model_copy(
+                update={"status": "claimed" if item.claim else "waiting"}
+            )
 
     def _emit(self, kind: str, item: Pending) -> None:
         if self.event_sink is not None:
@@ -98,7 +116,6 @@ class AuthenticationService:
                 item.requirement.model_copy(
                     update={
                         "status": "claimed" if item.claim else "waiting",
-                        "execution_ids": sorted(item.executions),
                     }
                 )
             )
@@ -164,8 +181,7 @@ class AuthenticationService:
         item = self._find(identifier)
         if item.completing:
             raise m.AuthenticationConflict("authentication exchange is in progress")
-        item.cancelled = True
-        item.changed.set()
+        self._pending.pop(item.requirement.key)
         self._emit("auth.cancelled", item)
 
     async def complete(self, callback: m.Callback, owner: str) -> None:
@@ -185,28 +201,30 @@ class AuthenticationService:
         item.completing = True
 
         async def exchange() -> None:
-            async with self.store.locked(item.requirement):
-                await self.store.publish(
-                    item.requirement,
-                    lambda: self.adapters[item.requirement.provider].exchange(
-                        item.requirement, callback.code or "", item.verifier
-                    ),
-                )
-
-        task = asyncio.create_task(exchange())
-        try:
             try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
+                async with self.store.locked(item.requirement):
+                    await self.store.publish(
+                        item.requirement,
+                        lambda: self.adapters[item.requirement.provider].exchange(
+                            item.requirement, callback.code or "", item.verifier
+                        ),
+                    )
+            except BaseException:
+                self._release(item)
                 raise
-        finally:
-            item.completing = False
-            self._release(item)
-            item.changed.set()
-        self._emit("auth.completed", item)
+            else:
+                self._pending.pop(item.requirement.key, None)
+                self._emit("auth.completed", item)
+            finally:
+                item.completing = False
+
+        await finish_cleanup(asyncio.create_task(exchange()))
 
     async def provision(self, value: m.Credential) -> None:
+        if "profile" not in value.model_fields_set:
+            value = value.model_copy(
+                update={"profile": await self.profiles.resolve(None)}
+            )
         if value.kind == "oauth2" and (
             value.provider not in self.adapters or not value.refresh_token
         ):
@@ -214,40 +232,6 @@ class AuthenticationService:
                 "OAuth provisioning requires a supported provider and refresh token"
             )
         await self.store.provision(value)
-        item = self._pending.get(value.key)
-        if item is not None:
-            item.changed.set()
-
-    async def _wait(self, profile: m.Profile, execution_id: Optional[str]) -> None:
-        item = self._pending.get(profile.key)
-        if item is None:
-            item = Pending(
-                m.Requirement(
-                    provider=profile.provider, profile=profile.profile, id=uuid4().hex
-                )
-            )
-            self._pending[profile.key] = item
-            self._emit("auth.required", item)
-        item.waiters += 1
-        if execution_id is not None:
-            item.executions[execution_id] = item.executions.get(execution_id, 0) + 1
-        try:
-            if item.cancelled:
-                raise m.AuthenticationCancelled("provider authentication was cancelled")
-            try:
-                async with asyncio.timeout(1):
-                    await item.changed.wait()
-            except TimeoutError:
-                pass
-            if item.cancelled:
-                raise m.AuthenticationCancelled("provider authentication was cancelled")
-            item.changed.clear()
-        finally:
-            item.waiters -= 1
-            if execution_id is not None:
-                item.executions[execution_id] -= 1
-                if not item.executions[execution_id]:
-                    del item.executions[execution_id]
 
     async def acquire(
         self,
@@ -255,46 +239,36 @@ class AuthenticationService:
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
-        interactive: bool = True,
+        interactive: bool = False,
     ) -> m.Credential:
-        """Serialize refresh across processes; wait outside the lock for user consent."""
-        invalid: Optional[str] = None
-        self._users[profile.key] = self._users.get(profile.key, 0) + 1
-        try:
-            while True:
-                async with self.store.locked(profile):
-                    value = await self.store.load(profile)
-                    if value is not None and value.secret != invalid:
-                        if value.kind == "api_key":
-                            if rejected == value.secret:
-                                raise m.AuthenticationError("provider rejected API key")
-                            return value
-                        adapter = self.adapters.get(profile.provider)
-                        if adapter is None:
-                            raise m.AuthenticationError("unsupported OAuth provider")
-                        if not value.reusable(time.time(), rejected):
-                            try:
-                                return await self.store.publish(
-                                    profile, lambda: adapter.refresh(value)
-                                )
-                            except m.LoginRequired:
-                                invalid = value.secret
-                        else:
-                            return value
-                    elif value is None and profile.provider not in self.adapters:
-                        raise m.AuthenticationError(
-                            "provider API key is not configured"
-                        )
-                if not interactive:
+        """Load or refresh configured credentials; never create interactive login requests."""
+        async with self.store.locked(profile):
+            value = await self.store.load(profile)
+            if value is None:
+                if profile.provider in self.adapters:
                     raise m.LoginRequired(
-                        "OAuth authorization required before retrying MCP"
+                        "OAuth credentials are not configured; log in before starting the workflow"
                     )
-                await self._wait(profile, execution_id)
-        finally:
-            self._users[profile.key] -= 1
-            if not self._users[profile.key]:
-                del self._users[profile.key]
-                self._pending.pop(profile.key, None)
+                raise m.AuthenticationError(
+                    "provider API key is not configured; provision it before starting the workflow"
+                )
+            if value.kind == "api_key":
+                if rejected == value.secret:
+                    raise m.AuthenticationError("provider rejected API key")
+                if value.expires_at is not None and value.expires_at <= time.time():
+                    raise m.AuthenticationError("provider API key has expired")
+                return value
+            adapter = self.adapters.get(profile.provider)
+            if adapter is None:
+                raise m.AuthenticationError("unsupported OAuth provider")
+            if value.reusable(time.time(), rejected):
+                return value
+            try:
+                return await self.store.publish(profile, lambda: adapter.refresh(value))
+            except m.LoginRequired:
+                raise m.LoginRequired(
+                    "OAuth authorization failed; log in before starting the workflow"
+                ) from None
 
     async def mcp_secret(self, profile: str) -> str:
         """Resolve a provisioned MCP API key without interactive provider login."""
@@ -315,9 +289,10 @@ class AuthenticationService:
         self,
         provider: Optional[str],
         model: str,
-        profile: str = "default",
+        profile: Optional[str] = None,
         execution_id: Optional[str] = None,
     ) -> "ProviderAuth":
+        selected = await self.profiles.resolve(profile)
         return await provider_auth.transport(
-            self, provider, model, profile, execution_id
+            self, provider, model, selected, execution_id
         )

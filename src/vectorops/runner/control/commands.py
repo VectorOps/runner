@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pydantic
 
-from vectorops.runner.control import client, protocol as p
+from vectorops.runner.control import client, protocol as p, oauth_host
 from vectorops.runner.runner import mailbox
 
 
@@ -35,6 +35,11 @@ class Arguments(argparse.Namespace):
     idempotency_key: typing.Optional[str]
     workflow_id: typing.Optional[str]
     channel: typing.Optional[str]
+    profile_action: typing.Optional[str] = None
+    profile_name: str
+    provider: str
+    profile: typing.Optional[str]
+    no_browser: bool
 
 
 class CommandError(ValueError):
@@ -56,6 +61,30 @@ def parser() -> Parser:
     families.add_parser("info", help="show runner information")
     families.add_parser("help", help="show commands")
     families.add_parser("exit", help="disconnect without stopping executions")
+    auth = families.add_parser(
+        "auth", help="manage runner-global authentication profiles"
+    )
+    auth_actions = auth.add_subparsers(dest="action")
+    login = auth_actions.add_parser(
+        "login", help="authenticate before starting workflows"
+    )
+    login.add_argument("provider")
+    login.add_argument("--profile", help="credential profile (default: active profile)")
+    login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="create a login request for a separate host",
+    )
+    login.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    profiles = auth_actions.add_parser("profile", help="manage named profiles")
+    profile_actions = profiles.add_subparsers(dest="profile_action")
+    for name in ("list", "add", "switch", "delete"):
+        action_parser = profile_actions.add_parser(name)
+        action_parser.add_argument(
+            "--json", action="store_true", default=argparse.SUPPRESS
+        )
+        if name != "list":
+            action_parser.add_argument("profile_name")
     for family, actions in (
         ("workflow", ("list", "show")),
         ("execution", ("list", "show", "start", "stop", "resume", "watch")),
@@ -145,6 +174,74 @@ def _key(args: Arguments) -> str:
 async def execute(connection: client.RunnerClient, args: Arguments) -> None:
     """Dispatch typed client operations without replaying mutations on transport failure."""
     family, action = args.family, args.action
+    if family == "auth":
+        if action == "login":
+            requirement = await connection.login(args.provider, args.profile)
+            if args.no_browser:
+                _emit(
+                    requirement,
+                    args,
+                    [
+                        f"Login requested: {requirement.id} ({requirement.provider}/{requirement.profile})."
+                    ],
+                )
+            else:
+                print(
+                    f"Authenticating {requirement.provider}/{requirement.profile} in your browser...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await oauth_host.authenticate(connection, requirement.id)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "authenticated",
+                                "provider": requirement.provider,
+                                "profile": requirement.profile,
+                            }
+                        )
+                    )
+                else:
+                    print(
+                        f"Authenticated {requirement.provider}/{requirement.profile}."
+                    )
+            return
+        if action is None or args.profile_action is None:
+            try:
+                parser().parse_args(["auth", *([action] if action else []), "--help"])
+            except SystemExit:
+                pass
+            return
+        if args.profile_action == "list":
+            listing = await connection.authentication_profiles()
+            _emit(
+                listing,
+                args,
+                [
+                    "Authentication profiles:",
+                    *(
+                        f"  {name}"
+                        + (" (active)" if name == listing.active_profile else "")
+                        for name in listing.profiles
+                    ),
+                ],
+            )
+            return
+        operations = {
+            "add": connection.add_authentication_profile,
+            "switch": connection.switch_authentication_profile,
+            "delete": connection.delete_authentication_profile,
+        }
+        result = await operations[args.profile_action](args.profile_name)
+        descriptions = {"add": "Added", "switch": "Switched to", "delete": "Deleted"}
+        message = (
+            f"{descriptions[args.profile_action]} authentication profile '{args.profile_name}'."
+            if result.changed
+            else f"No change to authentication profile '{args.profile_name}'."
+        )
+        _emit(result, args, [message, f"Active profile: {result.active_profile}"])
+        return
     if family == "info":
         print(json.dumps(await connection.info(), indent=None if args.json else 2))
         return
@@ -156,7 +253,7 @@ async def execute(connection: client.RunnerClient, args: Arguments) -> None:
                 pass
         else:
             parser().print_help()
-            print("Use workflow, execution, or input with --help for commands.")
+            print("Use workflow, execution, input, or auth with --help for commands.")
         return
     if family == "workflow":
         if action == "show":

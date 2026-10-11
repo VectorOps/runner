@@ -165,7 +165,7 @@ async def test_http_auth_uses_only_token_source_and_bound_resource() -> None:
         with pytest.raises(am.AuthenticationError, match="destination"):
             await client.get("https://other.test/mcp")
     assert sent == ["Bearer token-1", "Bearer token-2"]
-    assert source.calls == [("run", None, True), ("run", "token-1", False)]
+    assert source.calls == [("run", None, False), ("run", "token-1", False)]
     assert auth.rejected == "token-2"
 
 

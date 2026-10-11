@@ -311,6 +311,42 @@ class RunnerClient:
             result["requests"]
         )
 
+    async def login(
+        self, provider: str, profile: typing.Optional[str] = None
+    ) -> am.Requirement:
+        return am.Requirement.model_validate(
+            await self.request(
+                "auth.login",
+                am.Login(provider=provider, profile=profile).model_dump(mode="json"),
+            )
+        )
+
+    async def authentication_profiles(self) -> am.ProfileListing:
+        return am.ProfileListing.model_validate(await self.request("auth.profile.list"))
+
+    async def add_authentication_profile(self, name: str) -> am.ProfileResult:
+        return am.ProfileResult.model_validate(
+            await self.request(
+                "auth.profile.add", am.ProfileQuery(name=name).model_dump(mode="json")
+            )
+        )
+
+    async def switch_authentication_profile(self, name: str) -> am.ProfileResult:
+        return am.ProfileResult.model_validate(
+            await self.request(
+                "auth.profile.switch",
+                am.ProfileQuery(name=name).model_dump(mode="json"),
+            )
+        )
+
+    async def delete_authentication_profile(self, name: str) -> am.ProfileResult:
+        return am.ProfileResult.model_validate(
+            await self.request(
+                "auth.profile.delete",
+                am.ProfileQuery(name=name).model_dump(mode="json"),
+            )
+        )
+
     async def mcp_servers(self, component: str = "mcp") -> mm.ServerPage:
         return mm.ServerPage.model_validate(
             await self.request("mcp.list", {"component": component})
@@ -334,8 +370,8 @@ class RunnerClient:
 
     async def mcp_login(
         self, server: str, *, component: str = "mcp", timeout: float = 600
-    ) -> SessionStatus:
-        return SessionStatus.model_validate(
+    ) -> am.Requirement:
+        return am.Requirement.model_validate(
             await self.request(
                 "mcp.login", {"server": server, "component": component}, timeout=timeout
             )
@@ -412,7 +448,9 @@ class RunnerClient:
         await self.request("auth.cancel", {"id": identifier})
 
     async def provision_credentials(self, credential: am.Credential) -> None:
-        await self.request("auth.provision", credential.model_dump(mode="json"))
+        await self.request(
+            "auth.provision", credential.model_dump(mode="json", exclude_unset=True)
+        )
 
     async def aclose(self) -> None:
         self._reader.cancel()

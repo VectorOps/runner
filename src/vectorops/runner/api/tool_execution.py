@@ -8,6 +8,7 @@ import connect
 import pydantic
 
 from vectorops.runner import diagnostics
+from vectorops.runner.authentication.models import AuthenticationError
 from vectorops.runner.api import composition as c
 from vectorops.runner.api import tool_contracts, tool_approval
 from vectorops.runner.runner import mailbox as runtime_mailbox
@@ -184,6 +185,8 @@ async def _execute_tool(
             response = await binding.execute(ctx, request.arguments)
             _log_result(request, response)
             return _result(request, response).model_dump(mode="json")
+        except AuthenticationError:
+            raise
         except Exception as exc:
             _log_failure(request, exc)
             if raise_errors:
@@ -233,6 +236,8 @@ async def _gated_tool(
             result = await binding.execute(ctx, request.arguments)
             _log_result(request, result)
             return _result(request, result).model_dump(mode="json")
+        except AuthenticationError:
+            raise
         except Exception as exc:
             _log_failure(request, exc)
             if raise_errors:

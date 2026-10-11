@@ -133,7 +133,8 @@ async def test_refresh_is_shared_across_services_and_durable(tmp_path: Path) -> 
     )
     assert adapter.refreshes == 1
     assert all(value.secret == "refreshed-access" for value in results)
-    assert (await second.store.load(value)).refresh_token == "rotated-refresh"
+    stored = await second.store.load(value)
+    assert stored is not None and stored.refresh_token == "rotated-refresh"
     transport = await second.transport(None, "chatgpt/X")
     assert (await transport.resolve()).headers[
         "Authorization"
@@ -160,17 +161,20 @@ async def test_cancelled_refresh_finishes_rotated_token_publication(
     adapter.release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert (await auth.store.load(value)).refresh_token == "rotated-refresh"
+    stored = await auth.store.load(value)
+    assert stored is not None and stored.refresh_token == "rotated-refresh"
 
 
-async def test_oauth_wait_claim_disconnect_callback_and_restart(tmp_path: Path) -> None:
+async def test_explicit_login_claim_disconnect_callback_and_restart(
+    tmp_path: Path,
+) -> None:
     adapter = OAuth()
     auth = service(tmp_path, adapter)
-    tasks = [
-        asyncio.create_task(auth.transport(None, "chatgpt/X", execution_id="execution"))
-        for _ in range(3)
-    ]
-    requirement = await pending(auth)
+    requirement = await auth.login("chatgpt")
+    assert await auth.login("chatgpt") == requirement
+    assert requirement.execution_ids == []
+    with pytest.raises(m.LoginRequired):
+        await auth.transport(None, "chatgpt/X")
     claim = auth.claim(requirement.id, "host-one")
     assert auth.claim(requirement.id, "host-one") == claim
     with pytest.raises(m.AuthenticationConflict):
@@ -198,7 +202,9 @@ async def test_oauth_wait_claim_disconnect_callback_and_restart(tmp_path: Path) 
         "host-two",
     )
     async with asyncio.timeout(3):
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(
+            *(auth.transport(None, "chatgpt/X") for _ in range(3))
+        )
     assert adapter.exchanges == 1
     assert auth.pending() == []
     assert all(
@@ -215,15 +221,14 @@ async def test_oauth_wait_claim_disconnect_callback_and_restart(tmp_path: Path) 
 
 async def test_expired_claim_and_explicit_cancellation(tmp_path: Path) -> None:
     auth = service(tmp_path, OAuth())
-    task = asyncio.create_task(auth.acquire(m.Profile(provider="chatgpt")))
-    requirement = await pending(auth)
+    requirement = await auth.login("chatgpt")
     claim = auth.claim(requirement.id, "host")
     claim.expires_at = 0
     replacement = auth.claim(requirement.id, "replacement")
     assert replacement.attempt != claim.attempt
     auth.cancel(requirement.id)
-    with pytest.raises(m.AuthenticationCancelled):
-        await task
+    with pytest.raises(m.LoginRequired):
+        await auth.acquire(m.Profile(provider="chatgpt"))
     assert auth.pending() == []
 
 
@@ -241,13 +246,10 @@ async def test_invalid_refresh_requires_login_without_refresh_loop(
         expires_at=1,
     )
     await auth.provision(value)
-    task = asyncio.create_task(auth.acquire(value))
-    requirement = await pending(auth)
-    await asyncio.sleep(1.1)
+    with pytest.raises(m.LoginRequired):
+        await asyncio.wait_for(auth.acquire(value), 3)
     assert adapter.refreshes == 1
-    auth.cancel(requirement.id)
-    with pytest.raises(m.AuthenticationCancelled):
-        await task
+    assert auth.pending() == []
 
 
 async def test_host_helper_runs_callback_on_host(
@@ -260,10 +262,9 @@ async def test_host_helper_runs_callback_on_host(
         token = (await runner.configuration.load()).control_token
         server = RunnerServer(runner, token)
         port = await server.listen()
-        task = asyncio.create_task(runner.authentication.transport(None, "chatgpt/X"))
         try:
-            requirement = await pending(runner.authentication)
             async with await client.RunnerClient.tcp(port) as host:
+                requirement = await host.login("chatgpt")
 
                 async def launch(url: str) -> None:
                     state = parse_qs(urlsplit(url).query)["state"][0]
@@ -280,7 +281,9 @@ async def test_host_helper_runs_callback_on_host(
                             assert response.status == 200
 
                 await oauth_host.authenticate(host, requirement.id, launch=launch)
-                assert (await task).value.secret == "private-access"
+                assert (
+                    await runner.authentication.transport(None, "chatgpt/X")
+                ).value.secret == "private-access"
                 with pytest.raises(p.RemoteError) as error:
                     await host.request(
                         "auth.provision",
@@ -292,15 +295,13 @@ async def test_host_helper_runs_callback_on_host(
                     )
                 assert "never-echo" not in str(error.value)
         finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
             await server.aclose()
 
 
 WORKFLOW = sources.read("authorize.py")
 
 
-async def test_pending_workflow_recovers_and_completed_activity_replays(
+async def test_workflow_requires_preconfigured_auth_and_completed_activity_replays(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "workflows").mkdir()
@@ -313,11 +314,18 @@ async def test_pending_workflow_recovers_and_completed_activity_replays(
                 {"reference": "job:main", "idempotency_key": "auth"},
             )
         )
-        await pending(runner.authentication)
+        async with asyncio.timeout(3):
+            while await runner.dispatch("executions.current", {}) is not None:
+                await asyncio.sleep(0.01)
+        assert (
+            await runner.runner.execution_state(accepted.execution_id)
+        ).status == "failed"
+        assert not runner.authentication.pending()
     async with RunnerService(tmp_path) as runner:
         adapter = OAuth()
         runner.authentication.adapters["chatgpt"] = adapter
-        requirement = await pending(runner.authentication)
+        assert await runner.dispatch("executions.current", {}) is None
+        requirement = await runner.authentication.login("chatgpt")
         claim = runner.authentication.claim(requirement.id, "host")
         await runner.authentication.complete(
             m.Callback(
@@ -328,13 +336,12 @@ async def test_pending_workflow_recovers_and_completed_activity_replays(
             ),
             "host",
         )
-        async with asyncio.timeout(3):
-            while await runner.dispatch("executions.current", {}) is not None:
-                await asyncio.sleep(0.01)
-        assert (
-            await runner.runner.execution_state(accepted.execution_id)
-        ).status == "completed"
-        assert await runner.runner.resume(accepted.execution_id) == "authorized"
+        assert await runner.runner.run("job:main") == "authorized"
+        identifier = runner.runner.last_execution_id
+        assert identifier is not None
+        assert (await runner.runner.execution_state(identifier)).status == "completed"
+        await runner.authentication.store.delete(m.Profile(provider="chatgpt"))
+        assert await runner.runner.resume(identifier) == "authorized"
         assert adapter.exchanges == 1
     for path in (tmp_path / "data").rglob("*"):
         if path.is_file():

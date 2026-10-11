@@ -72,7 +72,7 @@ def file_lock(path: Path) -> Iterator[None]:
 
 
 @asynccontextmanager
-async def async_file_lock(path: Path) -> AsyncIterator[None]:
+async def async_file_lock(path: Path, *, shared: bool = False) -> AsyncIterator[None]:
     opening = asyncio.create_task(
         asyncio.to_thread(os.open, path, os.O_CREAT | os.O_RDWR, 0o600)
     )
@@ -84,7 +84,8 @@ async def async_file_lock(path: Path) -> AsyncIterator[None]:
     try:
         while True:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 await asyncio.sleep(0.05)

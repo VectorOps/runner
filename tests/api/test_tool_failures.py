@@ -10,12 +10,36 @@ from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import diagnostics
 from vectorops.runner.api import llm
+from vectorops.runner.authentication.models import AuthenticationError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 
 
 class Arguments(pydantic.BaseModel):
     value: int = 0
+
+
+async def test_tool_authentication_failure_fails_workflow(
+    history: MemoryHistory,
+) -> None:
+    async def execute(
+        context: ActivityExecutionContext, arguments: Arguments
+    ) -> llm.ToolResponse:
+        raise AuthenticationError("configure credentials before starting workflow")
+
+    async def workflow() -> pydantic.JsonValue:
+        await llm.invoke_tool(
+            llm.Tool("test", "Test", Arguments, execute),
+            connect.ToolCallBlock(id="call", name="test", arguments={}),
+        )
+        raise AssertionError("authentication failure was swallowed")
+
+    completion = await replay.run(history, workflow)
+    assert completion.outcome.kind == "failed"
+    assert completion.outcome.error.type == "AuthenticationError"
+    assert (
+        await replay.run(history, workflow, completion.id)
+    ).outcome == completion.outcome
 
 
 @pytest.mark.parametrize("strict", [False, True])

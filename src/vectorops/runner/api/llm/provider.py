@@ -88,7 +88,7 @@ class ConnectProvider:
                 auth = await authentication.transport(
                     settings.provider,
                     settings.model,
-                    settings.credential_profile or "default",
+                    settings.credential_profile,
                     context.execution_id,
                 )
         options = connect.RequestOptions(

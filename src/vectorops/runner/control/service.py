@@ -323,7 +323,6 @@ class RunnerService:
                 reference=self._references.get(identifier),
                 status="starting",
                 active=True,
-                awaiting_authentication=self.authentication.waiting_for(identifier),
             )
         try:
             summary = await self.runner.execution_summary(identifier)
@@ -344,7 +343,6 @@ class RunnerService:
                     if active is not None and active.status in ("starting", "stopping")
                     else summary.status
                 ),
-                "awaiting_authentication": self.authentication.waiting_for(identifier),
             }
         )
 
@@ -426,6 +424,30 @@ class RunnerService:
             if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
             try:
+                if method == "auth.login":
+                    login = am.Login.model_validate(params)
+                    return (
+                        await self.authentication.login(login.provider, login.profile)
+                    ).model_dump(mode="json")
+                if method == "auth.profile.list":
+                    p.Empty.model_validate(params)
+                    return (await self.authentication.profiles.listing()).model_dump(
+                        mode="json"
+                    )
+                if method in (
+                    "auth.profile.add",
+                    "auth.profile.switch",
+                    "auth.profile.delete",
+                ):
+                    profile_name = am.ProfileQuery.model_validate(params).name
+                    operations = {
+                        "auth.profile.add": self.authentication.profiles.add,
+                        "auth.profile.switch": self.authentication.profiles.switch,
+                        "auth.profile.delete": self.authentication.profiles.delete,
+                    }
+                    return (await operations[method](profile_name)).model_dump(
+                        mode="json"
+                    )
                 if method == "auth.list":
                     p.Empty.model_validate(params)
                     return {

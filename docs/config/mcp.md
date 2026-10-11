@@ -149,22 +149,22 @@ profile = "work"
 
 The runner discovers protected-resource metadata at `/.well-known/oauth-protected-resource` followed by the resource path, and issuer metadata at `/.well-known/oauth-authorization-server` followed by the issuer path. It requires exact resource/issuer matches, an authorized configured issuer, PKCE S256, and authorization/token endpoints on the issuer's origin. Metadata and token redirects are rejected. Challenge-provided metadata URLs do not replace configured trust. Arbitrary query-bearing endpoints and alternative metadata discovery layouts are not supported by this implementation.
 
-Use the existing host helper after a workflow requests authentication:
+Complete login explicitly before starting a workflow:
 
 ```python
 from vectorops.runner.control import oauth_host
 
 
-async def authenticate_pending(host):
-    for requirement in await host.pending_authentication():
-        await oauth_host.authenticate(host, requirement.id)
+async def login(host):
+    requirement = await host.mcp_login("remote")
+    await oauth_host.authenticate(host, requirement.id)
 ```
 
 The host claims a requirement, listens on its own loopback interface, opens the browser, and relays the authorization code. The runner retains the PKCE verifier and tokens. MCP requirements use an opaque `mcp-oauth-...` provider identifier, derived from settings and validated endpoints; hosts must not assume all requirements are for ChatGPT. See the shared [authentication RPC reference](authentication.md#authentication-rpc-reference).
 
-Encrypted credentials are bound to the resource, issuer, client, callback, scopes, profile, and validated endpoints. Changing those inputs selects a different credential identity. Refresh is serialized through the existing credential store, and rotated tokens finish publication before cancellation propagates. Interactive waits occur before MCP startup/request deadlines and retain execution attribution for shutdown and recovery.
+Encrypted credentials are bound to the resource, issuer, client, callback, scopes, profile, and validated endpoints. Changing those inputs selects a different credential identity. Refresh is serialized through the existing credential store, and rotated tokens finish publication before cancellation propagates. Workflows and connection operations never initiate or wait for interactive authentication; missing credentials and failed refresh fail the operation.
 
-A Bearer 401 permits one non-interactive refresh and HTTP retry. A second rejection is returned without another retry. Invalid refresh grants require a later interactive acquisition; the runner does not open a browser from inside a request deadline. It does not automatically escalate scopes after a 403. Token exchanges are bounded to 30 seconds and 64 KiB and are not automatically retried after unknown outcomes. Token responses must be Bearer credentials with a finite `expires_in` greater than 60 seconds; a returned scope must include configured scopes. Refresh tokens are optional, but expiry without one requires login again.
+A Bearer 401 permits one non-interactive refresh and HTTP retry. A second rejection is returned without another retry. Invalid refresh grants require a separate explicit login before starting new work. The runner does not open a browser from workflow execution or automatically escalate scopes after a 403. Token exchanges are bounded to 30 seconds and 64 KiB and are not automatically retried after unknown outcomes. Token responses must be Bearer credentials with a finite `expires_in` greater than 60 seconds; a returned scope must include configured scopes. Refresh tokens are optional, but expiry without one requires login again.
 
 Dynamic client registration, confidential authorization-code clients, automatic scope escalation, and cross-origin authorization/token endpoints for metadata-discovered public clients are not implemented.
 
@@ -213,7 +213,7 @@ Access tokens are encrypted and cached under a configuration/resource-bound iden
 
 ## Shared pool and management APIs
 
-The daemon and embedded control service own one shared pool for management and workflows. Matching effective server configurations reuse the same process/HTTP session, including one connected during management login. Sessions stay open until explicit disconnect or service shutdown; there is no idle eviction yet. A standalone `WorkflowRunner` without an injected pool retains execution-owned cleanup.
+The daemon and embedded control service own one shared pool for management and workflows. Matching effective server configurations reuse the same process/HTTP session, including one opened through `mcp.connect` after login. Sessions stay open until explicit disconnect or service shutdown; there is no idle eviction yet. A standalone `WorkflowRunner` without an injected pool retains execution-owned cleanup.
 
 Workflow runtimes lease each session they use until the root and its children finish. Management discovery leases it for the duration of the operation. Management cannot disconnect or change roots while a session is leased. Sharing transport does not share tool selections, conversations, approval grants, or recorded catalogs. It can share state maintained by the remote server; choose different effective configurations when transport-level isolation is required.
 
@@ -232,7 +232,7 @@ async def inspect_servers(port):
         return listing, catalog, status
 ```
 
-An OAuth connect/login can wait for a host callback. Run the existing authentication helper concurrently, using the same or another authenticated client. `mcp_connect`, `mcp_login`, `mcp_discover`, `mcp_refresh`, and `mcp_content` default to a 600-second client wait and accept `timeout`. A client timeout is not proof an operation failed; query status before retrying. Connections established before a host disconnect remain pooled. Shutdown cancels outstanding management operations before closing the pool.
+`mcp_login` returns a standalone OAuth requirement for the configured server/profile, without connecting an MCP session. Complete it with the host helper before `mcp_connect` or starting workflows. `mcp_connect`, `mcp_login`, `mcp_discover`, `mcp_refresh`, and `mcp_content` default to a 600-second client wait and accept `timeout`. A client timeout is not proof an operation failed; query status before retrying. Connections established before a host disconnect remain pooled. Shutdown cancels outstanding management operations before closing the pool.
 
 All server-targeted RPCs accept `server` and optional `component` (default `mcp`). No credentials are accepted in these parameters. They operate on trusted current workspace settings, not model-supplied executable definitions.
 
@@ -240,7 +240,8 @@ All server-targeted RPCs accept `server` and optional `component` (default `mcp`
 | --- | --- | --- |
 | `mcp.list` | `mcp_servers(component="mcp")` | Configured names, transports, and session status |
 | `mcp.status` | `mcp_status(server)` | Session digest, connected flag, lease count, roots, catalog-stale flag |
-| `mcp.connect`, `mcp.login` | `mcp_connect`, `mcp_login` | Initialize/authenticate a reusable session |
+| `mcp.connect` | `mcp_connect` | Initialize a reusable session with preconfigured credentials |
+| `mcp.login` | `mcp_login` | Standalone OAuth login requirement for the configured server/profile |
 | `mcp.disconnect` | `mcp_disconnect(server)` | Close an unleased session without deleting credentials |
 | `mcp.discover`, `mcp.refresh` | `mcp_discover`, `mcp_refresh` | Fresh tool catalog; does not change workflow snapshots |
 | `mcp.content` | `mcp_content(server)` | Fresh prompt/resource catalog |
@@ -376,7 +377,7 @@ Configure per-server limits with `[components.mcp.servers.<name>.limits]`:
 
 | Field | Default | Allowed range and use |
 | --- | --- | --- |
-| `startup_seconds` | 15 | Greater than 0, at most 300; transport/session startup, excluding interactive OAuth preparation |
+| `startup_seconds` | 15 | Greater than 0, at most 300; transport/session startup, excluding credential resolution |
 | `request_seconds` | 30 | Greater than 0, at most 3600; request or paginated catalog operation |
 | `shutdown_seconds` | 10 | Greater than 0, at most 60; owned teardown budget |
 | `max_bytes` | 1048576 | 1024-16777216; stdio frames, HTTP response streams, catalog/result and relevant request checks |
@@ -387,7 +388,7 @@ All durations must be finite. Repeated cursors and duplicate identities fail dis
 
 | Symptom | Check or action |
 | --- | --- |
-| Workflow waits before discovery completes | Query pending authentication; run the host helper and check its callback port |
+| Authentication fails before discovery completes | Provision credentials or complete explicit `mcp_login` before starting a new workflow |
 | Workflow waits on a tool step | Inspect the `tool.approval` mailbox request; authentication and approval are separate |
 | Component configuration is invalid | Check field names, discriminator, URL rules, absolute cwd, and mutually exclusive `credential`/`oauth`; errors deliberately omit input values |
 | Stdio initialization fails | Check the executable on the runner host and run it separately; stdout must be protocol-only and runner stderr capture is disabled |

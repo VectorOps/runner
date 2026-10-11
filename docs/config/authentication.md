@@ -1,6 +1,6 @@
 # Runner secrets and provider authentication
 
-The runner stores API keys and OAuth credentials durably outside workspaces. It owns OAuth token exchange and refresh; a connected host is needed only for browser interaction.
+The runner stores API keys and OAuth credentials durably outside workspaces. Configure authentication before starting workflows. Login is an explicit control operation, never a workflow wait; missing credentials or authentication failures fail the affected operation and workflow rather than prompting a host. Existing OAuth tokens can refresh automatically without user interaction.
 
 ## Quick start
 
@@ -25,6 +25,17 @@ The input describes one credential. This example contains a placeholder, not a u
 
 Import prints only a success status. The source file is not removed or protected by the runner; manage it separately. Authenticated hosts can also call `RunnerClient.provision_credentials(Credential(...))` over the protected control connection.
 
+For ChatGPT OAuth, create a profile and complete browser login before starting work:
+
+```bash
+uv run vops-runner client --port 43821 auth profile add work
+uv run vops-runner client --port 43821 auth login chatgpt --profile work
+```
+
+The connected shell provides `/auth login chatgpt --profile work`. Omitting
+`--profile` selects the active profile. `--no-browser` returns a standalone login
+request for another host to complete instead of opening the local browser.
+
 ## Global configuration
 
 The default directory is `~/.config/vops-runner`. Selection order is explicit `--config-dir` or Python `config_dir`, then `VOPS_RUNNER_CONFIG_DIR`, then the default. The environment override contains a directory path, never a secret.
@@ -32,6 +43,7 @@ The default directory is `~/.config/vops-runner`. Selection order is explicit `-
 | File | Contents |
 | --- | --- |
 | `secrets.json` | Version 1, 32-byte hex `encryption_key`, and URL-safe `control_token` |
+| `profiles.json` | Non-secret profile names, active selection, and deleted-profile guards |
 | `credentials/<provider>.<profile>.encrypted` | AES-GCM encrypted credential, bound to its provider/profile |
 | Lock files | Synchronization only; no secrets |
 
@@ -43,7 +55,47 @@ Explicit daemon `--token-stdin` and `--token-file` options remain supported as p
 
 ## Credential profiles and workflow behavior
 
-The default profile is `default`. Set a non-secret profile reference in LLM configuration:
+Authentication profiles group provider credentials under a name. The initial active
+profile is `default`. Manage the local global credential directory with:
+
+```bash
+uv run vops-runner auth profile list
+uv run vops-runner auth profile add work
+uv run vops-runner auth profile switch work
+uv run vops-runner credentials-import < /protected/work-openai.json
+uv run vops-runner auth profile delete work
+```
+
+Add `--config-dir PATH` before `auth` to select a different credential directory.
+For an existing runner, use `client --port PORT auth profile ...`; its connected
+shell accepts `/auth profile list`, `add NAME`, `switch NAME`, and `delete NAME`.
+Local commands print JSON; client commands support `--json`. Lists mark the active
+profile. Mutations report whether anything changed. Bare client command families
+show help without changing state.
+
+Adding a profile does not select it. Switching requires an existing profile.
+`default` cannot be deleted. Deleting the active profile selects `default` and
+removes locally stored credentials with that profile name across providers; it
+does not revoke remote tokens or erase credentials already held by in-flight
+requests or connected MCP sessions. Re-adding a deleted profile starts empty.
+Deletion is serialized against token publication, and deleted-profile guards
+prevent late refresh or provisioning from recreating credentials until explicitly
+re-added. Profile names and selection are shared across runners using the same
+global credential directory, not stored in workspace history.
+
+Omitting `profile` in credential import/provisioning selects the active profile.
+An explicit name targets that profile and registers it if new; a deleted profile
+must first be added again. Responses and listings never include credential values.
+
+Omitting `credential_profile` in LLM settings selects the active profile when a
+live provider request starts. An explicit `default` or named reference stays
+pinned. Switching does not retarget an in-flight transport, refresh, or explicit login;
+subsequent requests use the new selection. Completed activities still replay
+without credential access. Interrupted unpinned activities use the current active
+profile when restarted. MCP's explicit credential references and resource-bound
+OAuth selections do not follow the active LLM profile automatically.
+
+Set a non-secret pinned profile reference in LLM configuration:
 
 ```toml
 [components.llm]
@@ -55,7 +107,7 @@ Profile names contain 1-64 ASCII letters, digits, underscores, or hyphens. Provi
 
 The default LLM adapter uses the runner's store instead of provider environment variables. Explicit custom `ConnectProvider(auth=...)` remains available. API-key headers support OpenAI/OpenRouter bearer tokens, Anthropic `x-api-key`, and Gemini `x-goog-api-key`; other API-key providers use bearer authentication. ChatGPT is the interactive LLM OAuth provider. MCP public-client OAuth uses the same host coordination with resource-bound adapters; see [MCP credentials and OAuth](mcp.md#credentials-and-oauth).
 
-Missing API keys fail the affected workflow without asking the host. OAuth without usable credentials suspends the affected activity until authorization completes or is canceled. Other activities can continue. Token refresh is serialized per profile across runner processes; rotated credentials are saved before refresh succeeds. ChatGPT token requests have bounded timeouts and transient retries; MCP token exchanges have bounded timeouts but are not automatically retried after unknown outcomes. Invalid grants require login; storage failures and other token failures are not treated as missing credentials.
+Missing API keys and missing OAuth credentials fail without asking the host. Expired OAuth credentials can refresh using an already stored refresh token; rejected grants or refresh failures propagate rather than starting login. Token refresh is serialized per profile across runner processes; rotated credentials are saved before refresh succeeds. ChatGPT token requests have bounded timeouts and transient retries; MCP token exchanges have bounded timeouts but are not automatically retried after unknown outcomes. Configure or repair authentication explicitly, then start a new workflow. Completed failed activities retain their recorded failure on replay.
 
 OAuth credentials can also be preconfigured with `kind: "oauth2"`, `secret` (access token), `refresh_token`, `expires_at` (Unix seconds), and optional `account_id`. A supported provider and refresh token are required. ChatGPT requests need the account ID, which can be extracted from the access token.
 
@@ -64,16 +116,16 @@ OAuth credentials can also be preconfigured with `kind: "oauth2"`, `secret` (acc
 ```python
 from vectorops.runner.control import oauth_host
 
-async def authenticate_pending(host):
-    for request in await host.pending_authentication():
-        await oauth_host.authenticate(host, request.id)
+async def login(host):
+    request = await host.login("chatgpt", profile="work")
+    await oauth_host.authenticate(host, request.id)
 ```
 
 The helper claims an attempt, starts a callback listener on the host, then opens its browser. For ChatGPT the callback is `http://localhost:1455/auth/callback`. The runner retains the PKCE verifier and exchanges the relayed code itself. The helper never receives provider access or refresh tokens. A custom asynchronous `launch(url)` callback can replace browser launch.
 
-Claims expire after ten minutes. A busy callback port or browser-launch failure releases the claim without canceling the workflow. Hosts can retry, but must close an old listener before taking a replacement claim. Disconnect releases an idle claim; an already accepted token exchange finishes independently. User cancellation through `cancel_authentication(id)` fails all activities waiting on that shared authentication requirement. Stale attempts, wrong states, and callbacks from a different connection are rejected.
+Claims expire after ten minutes. A busy callback port or browser-launch failure releases the claim so another host can retry. Hosts must close an old listener before taking a replacement claim. Disconnect releases an idle claim; an already accepted token exchange finishes independently. `cancel_authentication(id)` removes that standalone login request without affecting workflows. Stale attempts, wrong states, and callbacks from a different connection are rejected.
 
-Authentication requirements are reconstructed from interrupted activities after restart, not stored in mailbox or saga records. Reconnect and query them again. Clean shutdown while waiting preserves execution for automatic recovery; explicit execution stop cancels it. Completed generation activities replay without credential resolution.
+Repeated login requests for the same provider/profile share a pending request. Login requests live only in the authentication service, with no execution ownership or workflow-recovery behavior. After a runner restart, initiate login again if needed; successfully stored credentials survive. Reconnecting to the same live runner can list and claim existing requests. Starting, stopping, or failing a workflow does not create or cancel login requests. Completed generation activities replay without credential resolution.
 
 ## Authentication RPC reference
 
@@ -81,13 +133,23 @@ All methods require control authentication. Parameters and results are not store
 
 | Method | Parameters | Result |
 | --- | --- | --- |
-| `auth.list` | None | `requests`: ID, provider, profile, waiting/claimed status, execution IDs |
+| `auth.login` | `provider`, optional `profile` (active when omitted) | Standalone login requirement |
+| `auth.list` | None | `requests`: ID, provider, profile, waiting/claimed status; `execution_ids` is always empty |
 | `auth.claim` | `id` | `id`, `attempt`, `state`, `redirect_uri`, `expires_at` |
 | `auth.ready` | `id`, `attempt` | `url`; call after starting the host listener |
 | `auth.complete` | `id`, `attempt`, `state`, `code` or `error` | Null after durable token storage, or cancellation |
-| `auth.release` | `id`, `attempt` | Null; release without canceling waiters |
-| `auth.cancel` | `id` | Null; fail all waiters |
+| `auth.release` | `id`, `attempt` | Null; release the claim without canceling login |
+| `auth.cancel` | `id` | Null; cancel standalone login |
 | `auth.provision` | Credential object | Null after durable storage |
+| `auth.profile.list` | None | `active_profile`, ordered `profiles` (default first) |
+| `auth.profile.add` | `name` | `changed`, `active_profile`, `profiles` |
+| `auth.profile.switch` | `name` | `changed`, `active_profile`, `profiles` |
+| `auth.profile.delete` | `name` | `changed`, `active_profile`, `profiles` |
+
+Typed clients expose `authentication_profiles`, `add_authentication_profile`,
+`switch_authentication_profile`, and `delete_authentication_profile`. All profile
+operations are local to the runner's global credential store and perform no provider
+network requests.
 
 `auth.required`, `auth.completed`, and `auth.cancelled` events contain only ID, provider, and profile. Subscribe without an execution filter and reconcile with `auth.list`; events are advisory. Authentication conflicts return `authentication_error`. Malformed secret-bearing input returns a generic `invalid_argument`, without input values. Completion is not durably idempotent: after a lost response, query current requirements rather than replaying an old code.
 

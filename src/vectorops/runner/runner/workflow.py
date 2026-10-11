@@ -197,18 +197,14 @@ class WorkflowRunner:
         """Preserve durable waits when shutting down, unlike an explicit stop."""
         if execution_id is not None:
             owner = self._mailboxes.get(execution_id)
-            waiting = self.authentication.waiting_for(execution_id) or (
-                owner is not None and bool(owner.waiting)
-            )
+            waiting = owner is not None and bool(owner.waiting)
             if waiting and owner is not None:
                 owner.suspending = True
                 if owner.pause is not None:
                     owner.pause.frozen = True
                 self._suspending.add(execution_id)
             return waiting
-        waiting = self.authentication.waiting or any(
-            owner.waiting for owner in self._mailboxes.values()
-        )
+        waiting = any(owner.waiting for owner in self._mailboxes.values())
         if waiting:
             for identifier, owner in self._mailboxes.items():
                 owner.suspending = True

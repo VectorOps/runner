@@ -11,18 +11,23 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from vectorops.runner import global_config as g
 from vectorops.runner.authentication import models as m
+from vectorops.runner.authentication.profiles import ProfileStore
 
 
 class CredentialStore:
     def __init__(self, configuration: g.GlobalConfiguration) -> None:
         self.configuration = configuration
         self.path = configuration.path / "credentials"
+        self.profiles = ProfileStore(configuration)
 
     @asynccontextmanager
     async def locked(self, profile: m.Profile) -> AsyncIterator[None]:
         await self.configuration.load()
         await asyncio.to_thread(g.private_directory, self.path)
-        async with g.async_file_lock(self.path / (profile.key + ".lock")):
+        async with (
+            self.profiles.locked(profile.profile),
+            g.async_file_lock(self.path / (profile.key + ".lock")),
+        ):
             yield
 
     async def load(self, profile: m.Profile) -> Optional[m.Credential]:
@@ -67,6 +72,7 @@ class CredentialStore:
 
     async def provision(self, value: m.Credential) -> None:
         async with self.locked(value):
+            await self.profiles.ensure(value.profile)
             await self.save(value)
 
     async def publish(

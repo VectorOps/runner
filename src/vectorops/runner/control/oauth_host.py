@@ -74,6 +74,8 @@ async def authenticate(
             if disconnected.done():
                 raise ConnectionError("runner disconnected during authentication")
             await client.complete_authentication(callback.result())
+            if callback.result().error:
+                raise m.AuthenticationCancelled("OAuth authorization was cancelled")
     except BaseException:
         if not client.closed.is_set():
             try:

@@ -6,6 +6,7 @@ from typing import Literal, Optional
 import pydantic
 
 from vectorops.runner.runner.project import Configuration
+from vectorops.runner.authentication import models as auth_models, mcp_settings
 
 from . import models
 from .content import ContentCatalog
@@ -96,9 +97,25 @@ class Management:
                 assert isinstance(query, RootUpdate)
                 updated = await self.pool.roots(base, query.roots)
                 return self.pool.status(updated).model_dump(mode="json")
+            if method == "mcp.login":
+                authentication = (
+                    server.authentication_settings()
+                    if isinstance(server, models.HTTPServer)
+                    else mcp_settings.NoAuth()
+                )
+                if not isinstance(authentication, mcp_settings.Settings):
+                    raise MCPError(
+                        "MCP login requires authorization-code OAuth configuration"
+                    )
+                adapter = await self.pool.authentication.mcp_adapter(authentication)
+                return (
+                    await self.pool.authentication.login(
+                        adapter.profile.provider, adapter.profile.profile
+                    )
+                ).model_dump(mode="json")
             runtime = MCPRuntime(self.pool.authentication, pool=self.pool)
             try:
-                if method in ("mcp.connect", "mcp.login"):
+                if method == "mcp.connect":
                     await runtime._connection(server)
                     return self.pool.status(server).model_dump(mode="json")
                 if method in ("mcp.discover", "mcp.refresh"):
@@ -135,6 +152,11 @@ class Management:
     async def connect(self, query: Query) -> SessionStatus:
         return SessionStatus.model_validate(
             await self.dispatch("mcp.connect", query.model_dump(mode="json"))
+        )
+
+    async def login(self, query: Query) -> auth_models.Requirement:
+        return auth_models.Requirement.model_validate(
+            await self.dispatch("mcp.login", query.model_dump(mode="json"))
         )
 
     async def disconnect(self, query: Query) -> None:

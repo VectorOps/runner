@@ -15,7 +15,7 @@ import pydantic
 
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.authentication.mcp_http import MCPHTTPAuth
-from vectorops.runner.authentication import mcp_settings
+from vectorops.runner.authentication import mcp_settings, models as auth_models
 from vectorops.runner.runner.resources import finish_cleanup
 from . import models, schema, transport
 from . import content, content_runtime
@@ -149,6 +149,9 @@ class Connection:
             if not self.ready.done():
                 self.ready.set_exception(transport.MCPError("MCP startup cancelled"))
             raise
+        except auth_models.AuthenticationError as exc:
+            if not self.ready.done():
+                self.ready.set_exception(exc)
         except Exception:
             if not self.ready.done():
                 self.ready.set_exception(
@@ -157,6 +160,10 @@ class Connection:
 
     async def session(self) -> ClientSession:
         if self.task.done():
+            if self.ready.done() and not self.ready.cancelled():
+                error = self.ready.exception()
+                if isinstance(error, auth_models.AuthenticationError):
+                    raise error
             raise transport.MCPError(
                 "MCP session disconnected; remote outcome may be unknown"
             )
@@ -313,7 +320,7 @@ class MCPRuntime:
                 protocol_version=connection.protocol_version,
                 tools=sorted(tools, key=lambda item: item.remote_name),
             )
-        except transport.MCPError:
+        except (transport.MCPError, auth_models.AuthenticationError):
             raise
         except Exception:
             raise transport.MCPError("MCP discovery failed") from None
@@ -350,7 +357,7 @@ class MCPRuntime:
             if len(result.model_dump_json().encode()) > server.limits.max_bytes:
                 raise transport.MCPError("MCP result exceeds the byte limit")
             return result
-        except transport.MCPError:
+        except (transport.MCPError, auth_models.AuthenticationError):
             raise
         except Exception:
             raise transport.MCPError(
@@ -369,7 +376,7 @@ class MCPRuntime:
                 prompts=connection.supports_prompts,
                 resources=connection.supports_resources,
             )
-        except transport.MCPError:
+        except (transport.MCPError, auth_models.AuthenticationError):
             raise
         except Exception:
             raise transport.MCPError("MCP content discovery failed") from None
@@ -394,7 +401,7 @@ class MCPRuntime:
             return await content_runtime.retrieve(
                 await connection.session(), server, kind, identity, arguments
             )
-        except transport.MCPError:
+        except (transport.MCPError, auth_models.AuthenticationError):
             raise
         except Exception:
             raise transport.MCPError("MCP content retrieval failed") from None

@@ -32,6 +32,8 @@ class Arguments(argparse.Namespace):
     token_stdin: bool
     token_file: typing.Optional[Path]
     config_dir: typing.Optional[Path]
+    profile_action: str
+    profile_name: str
 
 
 def _input(value: str) -> dict[str, pydantic.JsonValue]:
@@ -65,6 +67,17 @@ def parser() -> argparse.ArgumentParser:
         "credentials-import",
         help="import one credential JSON object from stdin without echoing secrets",
     )
+    auth_parser = commands.add_parser(
+        "auth", help="manage global authentication profiles"
+    )
+    auth_commands = auth_parser.add_subparsers(dest="auth_command", required=True)
+    profiles = auth_commands.add_parser(
+        "profile", help="list, add, switch, or delete profiles"
+    )
+    actions = profiles.add_subparsers(dest="profile_action", required=True)
+    actions.add_parser("list", help="list profiles and the active selection")
+    for action in ("add", "switch", "delete"):
+        actions.add_parser(action).add_argument("profile_name")
     start = commands.add_parser("start", help="start a new workflow in the foreground")
     start.add_argument(
         "workflow",
@@ -148,6 +161,22 @@ async def dispatch(args: Arguments) -> None:
         await client_cli.dispatch(client_cli.Options(**vars(args)), args.config_dir)
         return
     configuration = global_config.GlobalConfiguration(args.config_dir)
+    if args.command == "auth":
+        profiles = AuthenticationService(configuration).profiles
+        if args.profile_action == "list":
+            print((await profiles.listing()).model_dump_json())
+        else:
+            operations = {
+                "add": profiles.add,
+                "switch": profiles.switch,
+                "delete": profiles.delete,
+            }
+            print(
+                (
+                    await operations[args.profile_action](args.profile_name)
+                ).model_dump_json()
+            )
+        return
     if args.command == "credentials-import":
         data = await asyncio.to_thread(sys.stdin.buffer.read, 262145)
         try:

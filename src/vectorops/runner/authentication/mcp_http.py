@@ -22,9 +22,9 @@ class MCPHTTPAuth(httpx.Auth):
         self.rejected: Optional[str] = None
 
     async def prepare(self, execution_id: Optional[str] = None) -> None:
-        """Allow host interaction only before MCP startup/request deadlines begin."""
+        """Resolve preconfigured credentials without requesting host interaction."""
         value = await self._acquire(
-            self.rejected, execution_id or self.execution_id, interactive=True
+            self.rejected, execution_id or self.execution_id, interactive=False
         )
         if value.kind != "oauth2":
             raise models.AuthenticationError("MCP OAuth requires an OAuth credential")

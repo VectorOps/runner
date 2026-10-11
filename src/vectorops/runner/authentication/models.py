@@ -1,6 +1,6 @@
 """Authentication contracts; secret-bearing messages never enter workflow history."""
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import pydantic
 
@@ -9,9 +9,33 @@ class Model(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
+ProfileName = Annotated[str, pydantic.Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
+
+
+class ProfileQuery(Model):
+    name: ProfileName
+
+
+class ProfileListing(Model):
+    active_profile: ProfileName = "default"
+    profiles: list[ProfileName] = pydantic.Field(default_factory=lambda: ["default"])
+
+    @pydantic.model_validator(mode="after")
+    def valid_profiles(self) -> "ProfileListing":
+        if "default" not in self.profiles or self.active_profile not in self.profiles:
+            raise ValueError("default and active profiles must exist")
+        if len(set(self.profiles)) != len(self.profiles):
+            raise ValueError("profile names must be unique")
+        return self
+
+
+class ProfileResult(ProfileListing):
+    changed: bool
+
+
 class Profile(Model):
     provider: str = pydantic.Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
-    profile: str = pydantic.Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    profile: ProfileName = "default"
 
     @property
     def key(self) -> str:
@@ -34,6 +58,11 @@ class Credential(Profile):
             and self.expires_at is not None
             and self.expires_at > now + 60
         )
+
+
+class Login(Model):
+    provider: str = pydantic.Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    profile: Optional[ProfileName] = None
 
 
 class Requirement(Profile):

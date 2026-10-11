@@ -23,7 +23,7 @@ class ProfileTokenSource:
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
-        interactive: bool = True,
+        interactive: bool = False,
     ) -> models.Credential:
         return await self.resolver.acquire(
             self.profile, execution_id, rejected=rejected, interactive=interactive
@@ -42,7 +42,7 @@ class ClientTokenSource:
         execution_id: Optional[str] = None,
         *,
         rejected: Optional[str] = None,
-        interactive: bool = True,
+        interactive: bool = False,
     ) -> models.Credential:
         return await self.owner.client_token(self.settings, rejected=rejected)
 
