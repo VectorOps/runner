@@ -79,7 +79,6 @@ async def test_workflow_grant_cannot_bypass_mandatory_checks(
     assert len(store.requests) == 1
     assert {step.operation.kind for step in history.path(first.id)} == {
         "llm.tool",
-        "workflow.resume",
         "workflow.complete",
     }
     assert (

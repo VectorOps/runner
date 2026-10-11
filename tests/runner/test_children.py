@@ -31,7 +31,6 @@ async def test_parallel_children_preserve_invocation_order(
         "workflow.spawn",
         "workflow.spawn",
         "workflow.join",
-        "workflow.resume",
         "workflow.complete",
     ]
     assert path[2].outcome.kind == "joined"
@@ -173,7 +172,7 @@ async def test_deep_partial_recovery_forks_each_level_without_replaying_effects(
     assert all(
         history.steps[step_id] == step for step_id, step in original_steps.items()
     )
-    assert len(history.steps) == len(original_steps) + 10
+    assert len(history.steps) == len(original_steps) + 6
 
     fork_paths = {
         "root": history.path(history.heads["root"]),

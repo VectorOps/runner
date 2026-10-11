@@ -98,6 +98,14 @@ class CachedHistory:
             await self.backend.append_step(step)
             self._cache_step(step.model_copy(deep=True))
 
+    async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
+        async with self._lock:
+            self._check()
+            await self._flush()
+            step = await self.backend.record_delivery(head_id, step_id)
+            self._cache_step(step.model_copy(deep=True))
+            return step
+
     async def update_step(self, step: models.WorkflowStep) -> None:
         async with self._lock:
             self._check()
@@ -109,11 +117,13 @@ class CachedHistory:
                 previous.previous_step_id,
                 previous.operation,
                 previous.deferred_delivery,
+                previous.deliveries,
             ) != (
                 step.workflow_id,
                 step.previous_step_id,
                 step.operation,
                 step.deferred_delivery,
+                step.deliveries,
             ):
                 raise ValueError("step identity and links cannot change")
             snapshot = step.model_copy(deep=True)

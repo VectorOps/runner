@@ -201,6 +201,35 @@ class WorkflowStep(_JsonModel):
     metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
     deferred_delivery: bool = False
     revision: int = pydantic.Field(default=1, ge=1, strict=True)
+    deliveries: list[str] = pydantic.Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
+
+    @pydantic.field_validator("deliveries", mode="after")
+    @classmethod
+    def validate_deliveries(cls, values: list[str]) -> list[str]:
+        if any(not value for value in values) or len(set(values)) != len(values):
+            raise ValueError("delivery step IDs must be nonempty and unique")
+        return values
+
+    def delivered(self, target: WorkflowStep) -> WorkflowStep:
+        """Append delivery order without changing the anchor's outcome or links."""
+        if (
+            target.workflow_id != self.workflow_id
+            or not target.deferred_delivery
+            or target.outcome.kind in ("pending", "streaming", "waiting")
+        ):
+            raise ValueError("delivery requires a terminal invocation in this workflow")
+        if isinstance(self.operation, WorkflowCompleteOperation):
+            raise ValueError("cannot deliver after workflow completion")
+        if target.id in self.deliveries:
+            raise ValueError("invocation was already delivered at this position")
+        return self.model_copy(
+            update={
+                "deliveries": [*self.deliveries, target.id],
+                "revision": self.revision + 1,
+            }
+        )
 
     @pydantic.model_validator(mode="after")
     def validate_relationships(self) -> typing.Self:

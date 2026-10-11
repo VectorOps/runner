@@ -9,7 +9,7 @@ import pytest
 from tests.fixtures.history import MemoryHistory
 from tests.fixtures.probe import ExecutionProbe
 from vectorops.runner import models
-from vectorops.runner.runner import context
+from vectorops.runner.runner import context, history_query
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.session import ExecutionSession
@@ -38,6 +38,10 @@ async def test_branch_delivery_order_survives_replay(
     before = list(execution_probe.calls)
     assert await asyncio.wait_for(WorkflowRunner(workspace).resume(), 2) == [24, 28]
     assert execution_probe.calls == before
+    page = await runner.query_history(
+        history_query.HistoryQuery(execution_id=str(runner.last_execution_id))
+    )
+    assert all(item.step.operation.kind != "workflow.resume" for item in page.items)
 
 
 async def test_nested_fanout_executes_leaves_concurrently_and_replays(

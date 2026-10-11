@@ -395,6 +395,21 @@ class SQLiteHistory:
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))
 
+    async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
+        def record(connection: sqlite3.Connection) -> models.WorkflowStep:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                head = self._step(connection, head_id)
+                target = self._step(connection, step_id)
+                updated = head.delivered(target)
+                connection.execute(
+                    "UPDATE steps SET payload = ? WHERE id = ?",
+                    (updated.model_dump_json(), head_id),
+                )
+                return updated
+
+        return await self._run(record)
+
     @staticmethod
     def _input(
         connection: sqlite3.Connection, request_id: str
@@ -611,11 +626,13 @@ class SQLiteHistory:
                     previous.previous_step_id,
                     previous.operation,
                     previous.deferred_delivery,
+                    previous.deliveries,
                 ) != (
                     step.workflow_id,
                     step.previous_step_id,
                     step.operation,
                     step.deferred_delivery,
+                    step.deliveries,
                 ):
                     raise ValueError("step identity and links cannot change")
                 connection.execute(

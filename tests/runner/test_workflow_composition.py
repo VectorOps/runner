@@ -20,7 +20,6 @@ async def test_direct_await_records_spawn_join_and_returns_result(
     assert [step.operation.kind for step in root] == [
         "workflow.spawn",
         "workflow.join",
-        "workflow.resume",
         "workflow.complete",
     ]
     child = next(

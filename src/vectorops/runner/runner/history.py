@@ -15,6 +15,10 @@ class WorkflowHistory(Protocol):
 
     async def get_step(self, step_id: str) -> models.WorkflowStep: ...
 
+    async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
+        """Atomically append delivery metadata to the current branch head."""
+        ...
+
     async def append_step(self, step: models.WorkflowStep) -> None:
         """Persist a new step, including unfinished identity, before invoking effects."""
         ...

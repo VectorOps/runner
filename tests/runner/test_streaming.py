@@ -31,7 +31,7 @@ async def test_stream_replaces_one_record_with_latest_state(
     execution_probe.gate.set()
     assert await asyncio.wait_for(task, 2) == {"count": 2}
     assert history.steps[head].outcome == models.StepCompleted(result={"count": 2})
-    assert len(history.steps) == 3
+    assert len(history.steps) == 2
     assert history.appended[0] == head
     assert history.updated == 4
     assert execution_probe.cancelled == 1
@@ -79,12 +79,8 @@ async def test_invalid_streams_record_one_failure_and_close_generator(
 ) -> None:
     with pytest.raises(ActivityError, match=message):
         await runner.run("streaming:workflow", input={"mode": mode}, workflow_id="root")
-    assert len(history.steps) == 3
-    assert all(
-        step.outcome.kind == "failed"
-        for step in history.steps.values()
-        if step.operation.kind != "workflow.resume"
-    )
+    assert len(history.steps) == 2
+    assert all(step.outcome.kind == "failed" for step in history.steps.values())
     assert execution_probe.cancelled == 1
     updated = history.updated
     with pytest.raises(ActivityError, match=message):
@@ -121,7 +117,7 @@ async def test_cancelled_stream_keeps_latest_snapshot_and_restarts_same_step(
     }
     assert history.steps[head].outcome == models.StepCompleted(result={"count": 2})
     assert history.appended[0] == head
-    assert len(history.steps) == 3
+    assert len(history.steps) == 2
     assert execution_probe.calls == [2, 2]
     assert execution_probe.cancelled == 2
 
@@ -143,8 +139,8 @@ async def test_many_updates_do_not_accumulate_step_versions(
     assert await runner.run("streaming:workflow", input={"count": 1000}) == {
         "count": 1000
     }
-    assert len(history.steps) == 3
-    assert len(history.appended) == 3
+    assert len(history.steps) == 2
+    assert len(history.appended) == 2
     assert history.updated == 1002
 
 

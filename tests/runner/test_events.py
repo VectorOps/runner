@@ -50,6 +50,7 @@ async def test_nested_stream_updates_do_not_become_workflow_results(
         "step.updated",
         "step.updated",
         "step.completed",
+        "step.completed",
     ]
     snapshots = [
         event.step.outcome.model_dump().get("state")

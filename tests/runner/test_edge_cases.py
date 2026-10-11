@@ -83,7 +83,7 @@ async def test_concurrent_root_sessions_isolate_activity_context(
     assert results == [12, 22]
     for workflow_id in ("a", "b"):
         path = history.path(history.heads[workflow_id])
-        assert len(path) == 5
+        assert len(path) == 3
         assert all(step.workflow_id == workflow_id for step in path)
 
 

@@ -66,6 +66,9 @@ class GeneratedHistory:
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         raise AssertionError("replay must use the stream")
 
+    async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
+        raise AssertionError("replay must not record delivery")
+
     async def append_step(self, step: models.WorkflowStep) -> None:
         self.appended += 1
 
@@ -207,9 +210,7 @@ async def test_replay_exhaustion_delivers_ready_invocations_once(
         await asyncio.gather(run, return_exceptions=True)
     assert completion.outcome == models.StepCompleted(result=1 if cancel_caller else 2)
     delivered = [
-        step.operation.step_id
-        for step in history.path(completion.id)
-        if isinstance(step.operation, models.WorkflowResumeOperation)
+        step_id for step in history.path(completion.id) for step_id in step.deliveries
     ]
     assert delivered == (["1"] if cancel_caller else ["0", "1"])
     assert not session.invocations

@@ -49,7 +49,6 @@ async def test_grants_and_replay_without_policy_reads(
     assert calls == [1]
     assert {step.operation.kind for step in history.path(first.id)} == {
         "llm.tool",
-        "workflow.resume",
         "workflow.complete",
     }
     config.write_text("invalid TOML")

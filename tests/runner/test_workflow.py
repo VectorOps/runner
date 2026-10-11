@@ -21,9 +21,7 @@ async def test_records_activities_in_order(
     steps = history.path(history.heads["root"])
     assert [step.operation.kind for step in steps] == [
         "test.increment",
-        "workflow.resume",
         "test.increment",
-        "workflow.resume",
         "workflow.complete",
     ]
     assert steps[0].previous_step_id is None
@@ -46,7 +44,7 @@ async def test_result_is_recorded_before_next_activity(
     runner: WorkflowRunner, history: MemoryHistory, execution_probe: ExecutionProbe
 ) -> None:
     def check() -> None:
-        assert len(history.steps) == 2 * len(execution_probe.calls) + 1
+        assert len(history.steps) == len(execution_probe.calls) + 1
         assert (
             history.steps[execution_probe.contexts[-1].step_id].outcome.kind
             == "pending"
@@ -321,5 +319,5 @@ async def test_long_history_is_consumed_incrementally(
         == 300
     )
     assert execution_probe.calls == []
-    assert len(history.consumed) == 601
+    assert len(history.consumed) == 301
     assert len(history.steps) == before

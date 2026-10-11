@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from collections.abc import Mapping
 from contextlib import aclosing
@@ -88,6 +89,8 @@ class ExecutionSession:
         self.invocations: dict[str, _Invocation] = {}
         self.buffered: typing.Optional[models.WorkflowStep] = None
         self.ordered_replay = False
+        self.deliveries: deque[str] = deque()
+        self._history_lock = asyncio.Lock()
         self.live = asyncio.Event()
         if continue_from_step_id is None:
             self.live.set()
@@ -170,27 +173,17 @@ class ExecutionSession:
         pending: typing.Optional[_Invocation] = None
         try:
             while True:
+                if self.deliveries:
+                    await self._replay_delivery(self.deliveries.popleft())
+                    continue
                 if self.ordered_replay:
                     step = await self._peek()
                     self._start_live()
                     if step is not None and isinstance(
                         step.operation, models.WorkflowResumeOperation
                     ):
-                        invocation = self.invocations.get(step.operation.step_id)
-                        if invocation is None or invocation.step is None:
-                            raise ReplayMismatchError(
-                                "resume references an inactive invocation"
-                            )
-                        if invocation.step.outcome.kind in (
-                            "pending",
-                            "streaming",
-                            "waiting",
-                        ):
-                            raise ReplayMismatchError(
-                                "resume references an unfinished invocation"
-                            )
                         await self.recorded(step.operation)
-                        await self._deliver(invocation, replay=True)
+                        await self._replay_delivery(step.operation.step_id)
                         continue
                 item = await self.queue.get()
                 if isinstance(item, str):
@@ -239,6 +232,14 @@ class ExecutionSession:
         with diagnostics.bind(step_id=deferred.step.id):
             return await deferred.invoke()
 
+    async def _replay_delivery(self, step_id: str) -> None:
+        invocation = self.invocations.get(step_id)
+        if invocation is None or invocation.step is None:
+            raise ReplayMismatchError("delivery references an inactive invocation")
+        if invocation.step.outcome.kind in ("pending", "streaming", "waiting"):
+            raise ReplayMismatchError("delivery references an unfinished invocation")
+        await self._deliver(invocation, replay=True)
+
     def _resolved(
         self,
         invocation: _Invocation,
@@ -286,9 +287,12 @@ class ExecutionSession:
             return
         response = await asyncio.shield(task)
         if not replay and step.deferred_delivery:
-            await self.append(
-                models.WorkflowResumeOperation(step_id=step.id), models.StepCompleted()
-            )
+            assert self.head is not None
+            async with self._history_lock:
+                updated = await self.history.record_delivery(self.head, step.id)
+                self._emit(updated)
+                if self.reporter is not None:
+                    self.reporter.record(self.workflow.id, self.head)
         invocation.deliver(response)
         self.invocations.pop(step.id)
         await asyncio.sleep(0)
@@ -347,6 +351,8 @@ class ExecutionSession:
     async def recorded(
         self, operation: typing.Optional[models.WorkflowOperation]
     ) -> typing.Optional[models.WorkflowStep]:
+        if self.deliveries:
+            raise ReplayMismatchError("operation submitted before recorded deliveries")
         step = await self._peek()
         self.buffered = None
         if step is None:
@@ -354,6 +360,7 @@ class ExecutionSession:
         if operation is not None and step.operation != operation:
             raise ReplayMismatchError("operation differs from recorded history")
         self.ordered_replay = self.ordered_replay or step.deferred_delivery
+        self.deliveries.extend(step.deliveries)
         self.head = step.id
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
@@ -428,10 +435,16 @@ class ExecutionSession:
     async def update(self, step: models.WorkflowStep) -> None:
         if step.workflow_id != self.workflow.id:
             raise ValueError("step belongs to another workflow")
-        previous = await self.history.get_step(step.id)
-        step = step.model_copy(update={"revision": previous.revision + 1})
-        await self.history.update_step(step)
-        self._emit(step)
+        async with self._history_lock:
+            previous = await self.history.get_step(step.id)
+            step = step.model_copy(
+                update={
+                    "revision": previous.revision + 1,
+                    "deliveries": previous.deliveries,
+                }
+            )
+            await self.history.update_step(step)
+            self._emit(step)
         if self.reporter is not None:
             if self.head is not None:
                 self.reporter.record(self.workflow.id, self.head)
