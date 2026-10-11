@@ -334,18 +334,19 @@ class RunnerService:
         )
 
     async def _summaries(self, query: p.SummaryQuery) -> p.SummaryPage:
-        identifiers = set(self._active)
-        if not query.active_only:
-            identifiers.update(
-                await self.runner.execution_ids(
-                    after=query.after, limit=query.limit + 1
-                )
-            )
-        selected = sorted(
+        identifiers = await self.runner.execution_ids(limit=None)
+        persisted = set(identifiers)
+        selected = [
             identifier
-            for identifier in identifiers
-            if query.after is None or identifier > query.after
-        )
+            for identifier in reversed(tuple(self._active))
+            if identifier not in persisted
+        ] + identifiers
+        if query.active_only:
+            selected = [
+                identifier for identifier in selected if identifier in self._active
+            ]
+        if query.after is not None:
+            selected = selected[selected.index(query.after) + 1 :]
         return p.SummaryPage(
             executions=[
                 await self._summary(identifier)

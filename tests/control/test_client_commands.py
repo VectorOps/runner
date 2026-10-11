@@ -352,13 +352,40 @@ async def test_summary_pagination_and_starting_state(tmp_path: Path) -> None:
             ids.append(accepted.execution_id)
             await pending(connection, accepted.execution_id)
         first = await connection.execution_summaries(p.SummaryQuery(limit=1))
-        assert first.executions[0].execution_id == min(ids)
-        assert first.next_after == min(ids)
+        assert first.executions[0].execution_id == ids[-1]
+        assert first.next_after == ids[-1]
         rest = await connection.execution_summaries(
             p.SummaryQuery(after=first.next_after)
         )
-        assert [item.execution_id for item in rest.executions] == sorted(ids)[1:]
+        assert [item.execution_id for item in rest.executions] == ids[-2::-1]
         assert rest.next_after is None
+        listing = await connection.executions(p.ExecutionList(limit=1))
+        assert listing.execution_ids == [ids[-1]]
+        assert listing.next_after == ids[-1]
+        remaining = await connection.executions(
+            p.ExecutionList(after=listing.next_after)
+        )
+        assert remaining.execution_ids == ids[-2::-1]
+        assert remaining.next_after is None
+
+        request = await pending(connection, ids[0])
+        await connection.answer_input(
+            mailbox.Answer(
+                execution_id=ids[0],
+                request_id=request.request_id,
+                response="new message",
+                idempotency_key="reply",
+            )
+        )
+        await settled(connection, ids[0])
+        refreshed = await connection.execution_summaries()
+        assert [item.execution_id for item in refreshed.executions] == [
+            ids[0],
+            ids[2],
+            ids[1],
+        ]
+        active = await connection.execution_summaries(p.SummaryQuery(active_only=True))
+        assert [item.execution_id for item in active.executions] == ids[:0:-1]
 
 
 async def test_catalog_reuses_unchanged_source_and_isolates_bad_callable(

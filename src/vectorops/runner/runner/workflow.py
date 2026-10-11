@@ -525,8 +525,12 @@ class WorkflowRunner:
         return await (await self._selected_database(query.execution_id)).query(query)
 
     async def execution_ids(
-        self, *, after: typing.Optional[str] = None, limit: int = 100
+        self, *, after: typing.Optional[str] = None, limit: typing.Optional[int] = 100
     ) -> list[str]:
+        """Page newest-updated executions, breaking timestamp ties by ID.
+
+        ID cursors resume in the current ordering rather than a frozen snapshot.
+        """
         project = await self.project()
 
         def listing() -> list[str]:
@@ -537,10 +541,20 @@ class WorkflowRunner:
                 path.name
                 for path in directory.iterdir()
                 if (path / "history.sqlite3").is_file()
-                and (after is None or path.name > after)
-            )[:limit]
+            )
 
-        return await asyncio.to_thread(listing)
+        records = []
+        for identifier in await asyncio.to_thread(listing):
+            try:
+                record = await self.execution_state(identifier)
+                updated_at = record.updated_at
+            except KeyError:
+                updated_at = ""
+            records.append((identifier, updated_at))
+        records.sort(key=lambda item: item[1], reverse=True)
+        identifiers = [identifier for identifier, _ in records]
+        start = identifiers.index(after) + 1 if after is not None else 0
+        return identifiers[start : None if limit is None else start + limit]
 
     async def export_execution(
         self, output: Path, execution_id: typing.Optional[str] = None
