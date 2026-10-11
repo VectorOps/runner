@@ -5,7 +5,6 @@ import pytest
 
 from vectorops.runner import models
 from vectorops.runner.runner import execution_state
-from vectorops.runner.runner.execution_index import IndexState
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -44,10 +43,11 @@ async def test_execution_order_uses_updated_time_and_id_cursors(tmp_path: Path) 
     restarted = WorkflowRunner(tmp_path)
     assert await restarted.execution_ids() == ["b", "z", "c", "a"]
     index = await restarted.execution_index()
-    snapshot = IndexState.model_validate_json(index.path.read_bytes())
+    _, refreshed_at = await index.database.index_status()
+    assert refreshed_at is not None
     with patch(
         "vectorops.runner.runner.execution_index.time",
-        return_value=snapshot.refreshed_at + 30,
+        return_value=refreshed_at + 30,
     ):
         assert await restarted.execution_ids() == ["a", "b", "z", "c"]
 

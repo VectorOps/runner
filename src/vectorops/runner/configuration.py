@@ -1,4 +1,4 @@
-"""Component override contracts and workspace-owned atomic persistence."""
+"""Component override contracts and workspace-owned transactional persistence."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ from copy import deepcopy
 import hashlib
 import json
 import math
-from pathlib import Path
+import sqlite3
 import typing
 
 import pydantic
 
-from vectorops.runner import global_config
+from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 
 class Model(pydantic.BaseModel):
@@ -120,32 +120,41 @@ def effective(
 
 
 class Store:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock_path = path.with_suffix(".lock")
+    def __init__(self, database: WorkspaceDatabase) -> None:
+        self.database = database
 
     def load(self, defaults: dict[str, pydantic.JsonValue]) -> dict[str, Override]:
-        with global_config.file_lock(self.lock_path):
-            try:
-                items = Manifest.model_validate_json(self.path.read_bytes()).overrides
-            except FileNotFoundError:
-                return {}
-            valid = {
-                name: item
-                for name, item in items.items()
-                if item.baseline == fingerprint(defaults, name)
-            }
-            if valid != items:
-                self._write(valid)
-            return valid
-
-    def save(self, overrides: dict[str, Override]) -> None:
-        with global_config.file_lock(self.lock_path):
-            self._write(
-                {name: item for name, item in overrides.items() if item.permanent}
+        def read(connection: sqlite3.Connection) -> dict[str, Override]:
+            self.database.document(
+                connection, "configuration", lambda: Manifest().model_dump_json()
             )
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload FROM documents WHERE name = 'configuration'"
+                ).fetchone()
+                items = Manifest.model_validate_json(row[0]).overrides
+                valid = {
+                    name: item
+                    for name, item in items.items()
+                    if item.baseline == fingerprint(defaults, name)
+                }
+                if valid != items:
+                    self.database.put_document(
+                        connection,
+                        "configuration",
+                        Manifest(overrides=valid).model_dump_json(),
+                    )
+                return valid
 
-    def _write(self, overrides: dict[str, Override]) -> None:
-        global_config.atomic_write(
-            self.path, Manifest(overrides=overrides).model_dump_json().encode()
+        return self.database.run_sync(read)
+
+    async def save(self, overrides: dict[str, Override]) -> None:
+        await self.database.save_document(
+            "configuration",
+            Manifest(
+                overrides={
+                    name: item for name, item in overrides.items() if item.permanent
+                }
+            ).model_dump_json(),
         )

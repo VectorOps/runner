@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from vectorops.runner import models
-from vectorops.runner.runner.execution_index import ExecutionIndex, IndexState
+from vectorops.runner.runner.execution_index import ExecutionIndex
 from vectorops.runner.runner.execution_state import ExecutionRecord
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -37,10 +37,8 @@ async def test_cache_is_persisted_reused_and_refreshed_after_30_seconds(
     index = await runner.execution_index()
     with patch("vectorops.runner.runner.execution_index.time", return_value=100):
         assert await runner.execution_ids() == ["new", "old"]
-    payload = index.path.read_bytes()
-    snapshot = IndexState.model_validate_json(payload)
-    assert snapshot.refreshed_at == 100
-    assert snapshot.executions[0].updated_at == "2025-01-02T00:00:00+00:00"
+    snapshot = await index.database.index_status()
+    assert snapshot[1] == 100
     await seed(project.data_path, "old", 3)
     await seed(project.data_path, "latest", 4)
     restarted = WorkflowRunner(tmp_path)
@@ -55,10 +53,10 @@ async def test_cache_is_persisted_reused_and_refreshed_after_30_seconds(
     ):
         assert await runner.execution_ids() == ["new", "old"]
         assert await restarted.execution_ids() == ["new", "old"]
-        assert index.path.read_bytes() == payload
+        assert await index.database.index_status() == snapshot
     with patch("vectorops.runner.runner.execution_index.time", return_value=130):
         assert await restarted.execution_ids() == ["latest", "old", "new"]
-    assert IndexState.model_validate_json(index.path.read_bytes()).refreshed_at == 130
+    assert (await index.database.index_status())[1] == 130
 
 
 @pytest.mark.parametrize("payload", ["not json", '{"schema_version": 2}', ""])
@@ -66,9 +64,9 @@ async def test_corrupt_cache_is_rebuilt(tmp_path: Path, payload: str) -> None:
     runner = WorkflowRunner(tmp_path)
     index = await runner.execution_index()
     await seed(index.data_path, "execution", 1)
-    index.path.write_text(payload)
+    (index.data_path / "execution-index.json").write_text(payload)
     assert await runner.execution_ids() == ["execution"]
-    assert IndexState.model_validate_json(index.path.read_bytes()).executions
+    assert await index.database.index_page(None, 100) == ["execution"]
 
 
 async def test_concurrent_requests_share_refresh(tmp_path: Path) -> None:

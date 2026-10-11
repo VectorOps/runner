@@ -1,0 +1,168 @@
+import asyncio
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import threading
+
+import pytest
+
+from vectorops.runner.control import protocol
+from vectorops.runner.control.request_store import RequestStore
+from vectorops.runner.runner import state
+from vectorops.runner.runner.state_store import RunnerStateStore
+from vectorops.runner.runner.workspace_database import WorkspaceDatabase
+
+
+async def test_workspace_preserves_receipts_and_pointer(tmp_path: Path) -> None:
+    accepted = protocol.Accepted(execution_id="execution")
+    async with RunnerStateStore(tmp_path) as store:
+        await store.activate("execution")
+        requests = RequestStore(store.database)
+        await requests.save("request", "fingerprint", accepted)
+        assert await requests.lookup("request", "fingerprint") == accepted
+        with pytest.raises(protocol.RemoteError, match="different arguments"):
+            await requests.lookup("request", "other")
+    assert (await RunnerStateStore(tmp_path).load()).last_execution_id == "execution"
+    assert (
+        await RequestStore(WorkspaceDatabase(tmp_path)).lookup("request", "fingerprint")
+        == accepted
+    )
+
+
+async def test_shared_writer_is_serialized_and_off_event_loop(tmp_path: Path) -> None:
+    threads: set[int] = set()
+    connections: set[int] = set()
+    main = threading.get_ident()
+
+    def inspect(connection: sqlite3.Connection) -> None:
+        threads.add(threading.get_ident())
+        connections.add(id(connection))
+
+    async with WorkspaceDatabase(tmp_path) as database:
+        await asyncio.gather(*(database.run(inspect) for _ in range(100)))
+        await database.save_document("counter", "0")
+        await asyncio.gather(
+            *(
+                database.update_document(
+                    "counter", lambda: "0", lambda value: str(int(value) + 1)
+                )
+                for _ in range(100)
+            )
+        )
+        assert await database.load_document("counter", lambda: "") == "100"
+    assert len(threads) == len(connections) == 1
+    assert main not in threads
+
+
+async def test_independent_connections_update_atomically(tmp_path: Path) -> None:
+    first, second = WorkspaceDatabase(tmp_path), WorkspaceDatabase(tmp_path)
+    async with first, second:
+        await first.save_document("counter", "0")
+        await asyncio.gather(
+            *(
+                database.update_document(
+                    "counter", lambda: "0", lambda value: str(int(value) + 1)
+                )
+                for _ in range(30)
+                for database in (first, second)
+            )
+        )
+        assert await second.load_document("counter", lambda: "") == "60"
+
+
+async def test_cancelled_write_settles_before_close(tmp_path: Path) -> None:
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+
+    def write(connection: sqlite3.Connection) -> None:
+        with connection:
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(5):
+                raise TimeoutError("worker not released")
+            WorkspaceDatabase.put_document(connection, "value", "committed")
+
+    async with WorkspaceDatabase(tmp_path) as database:
+        task = asyncio.create_task(database.run(write))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert (
+        await WorkspaceDatabase(tmp_path).load_document("value", lambda: "")
+        == "committed"
+    )
+
+
+async def test_failed_update_rolls_back_and_writer_remains_usable(
+    tmp_path: Path,
+) -> None:
+    def fail(value: str) -> str:
+        raise ValueError("failed")
+
+    async with WorkspaceDatabase(tmp_path) as database:
+        await database.save_document("value", "old")
+        with pytest.raises(ValueError, match="failed"):
+            await database.update_document("value", lambda: "", fail)
+        assert await database.load_document("value", lambda: "") == "old"
+        await database.save_document("value", "new")
+        assert await database.load_document("value", lambda: "") == "new"
+
+
+async def test_index_generation_and_sql_pagination(tmp_path: Path) -> None:
+    async with WorkspaceDatabase(tmp_path) as database:
+        generation, refreshed = await database.index_status()
+        assert refreshed is None
+        await database.invalidate_index()
+        assert not await database.replace_index(generation, 100, [("stale", "1")])
+        generation, _ = await database.index_status()
+        assert await database.replace_index(
+            generation, 101, [("b", "2"), ("a", "2"), ("c", "1")]
+        )
+        assert await database.index_page(None, 1) == ["a"]
+        assert await database.index_page("a", 1) == ["b"]
+        assert await database.index_page("b", None) == ["c"]
+        with pytest.raises(ValueError, match="cursor"):
+            await database.index_page("missing", 1)
+
+
+async def test_unknown_workspace_schema_is_rejected(tmp_path: Path) -> None:
+    with closing(sqlite3.connect(tmp_path / "workspace.sqlite3")) as connection:
+        connection.execute("PRAGMA user_version = 99")
+    with pytest.raises(ValueError, match="schema version"):
+        await WorkspaceDatabase(tmp_path).index_status()
+
+
+async def test_concurrent_first_open(tmp_path: Path) -> None:
+    databases = [WorkspaceDatabase(tmp_path) for _ in range(8)]
+    assert (
+        await asyncio.gather(*(database.index_status() for database in databases))
+        == [(0, None)] * 8
+    )
+
+
+async def test_old_workspace_files_are_ignored(tmp_path: Path) -> None:
+    for name in ("runner-state.json", "control.sqlite3"):
+        (tmp_path / name).write_text("not valid state")
+    assert await RunnerStateStore(tmp_path).load() == state.RunnerState()
+    assert (
+        await RequestStore(WorkspaceDatabase(tmp_path)).lookup("request", "fingerprint")
+        is None
+    )
+
+
+async def test_no_small_state_files_created(tmp_path: Path) -> None:
+    async with RunnerStateStore(tmp_path) as store:
+        await store.activate("execution")
+        await RequestStore(store.database).save(
+            "key", "fingerprint", protocol.Accepted(execution_id="execution")
+        )
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "runner.lock",
+        "workspace.sqlite3",
+    }

@@ -5,12 +5,12 @@ from unittest.mock import patch
 import pytest
 import pydantic
 
-from vectorops.runner import global_config
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 
 @pytest.mark.parametrize("data_directory", ["data", "custom/state"])
@@ -22,9 +22,10 @@ async def test_override_files_follow_data_directory(
     path.write_text(text)
     project = await RunnerProject.open(tmp_path)
     data = tmp_path / data_directory
-    assert (data / "config-overrides.lock").is_file()
+    assert (data / "workspace.sqlite3").is_file()
     await project.configuration.set("llm.model", "override", permanent=True)
-    assert (data / "config-overrides.json").is_file()
+    assert not (data / "config-overrides.json").exists()
+    assert not (data / "config-overrides.lock").exists()
     assert not (tmp_path / "config-overrides.json").exists()
     assert not (tmp_path / "config-overrides.lock").exists()
     assert path.read_text() == text
@@ -136,7 +137,7 @@ async def test_failed_write_keeps_previous_state(tmp_path: Path) -> None:
     config = (await RunnerProject.open(tmp_path)).configuration
     await config.set("llm.model", "old", permanent=True)
     with patch.object(
-        global_config, "atomic_write", side_effect=OSError("write failed")
+        WorkspaceDatabase, "save_document", side_effect=OSError("write failed")
     ):
         with pytest.raises(OSError):
             await config.set("llm.model", "temporary")
@@ -191,10 +192,21 @@ async def test_override_read_replay_and_fresh_workflow(
 
 async def test_corrupt_persistence_is_not_silently_discarded(tmp_path: Path) -> None:
     project = await RunnerProject.open(tmp_path)
-    path = project.data_path / "config-overrides.json"
-    path.write_text("not json")
+    await project.database.save_document("configuration", "not json")
     with pytest.raises(pydantic.ValidationError):
         await RunnerProject.open(tmp_path)
+    assert (
+        await project.database.load_document("configuration", lambda: "") == "not json"
+    )
+
+
+async def test_old_data_override_file_is_ignored(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    path = data / "config-overrides.json"
+    path.write_text("not json")
+    project = await RunnerProject.open(tmp_path)
+    assert project.configuration.get("value") is None
     assert path.read_text() == "not json"
 
 

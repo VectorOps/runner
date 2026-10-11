@@ -33,7 +33,7 @@ async def test_default_layout_keeps_project_files_untouched(tmp_path: Path) -> N
     assert project.workflows_path.is_dir()
     assert project.data_path.is_dir()
     await project.configuration.set("test.value", 1, permanent=True)
-    assert (project.data_path / "config-overrides.json").is_file()
+    assert (project.data_path / "workspace.sqlite3").is_file()
     assert not (tmp_path / "data").exists()
     assert not (tmp_path / "workflows").exists()
     assert config.read_text() == "not runner configuration"
@@ -147,7 +147,7 @@ def test_cli_workspace_selection(
     assert json.loads(capsys.readouterr().out)["result"] == 42
     assert cli.main(prefix + ["resume"]) == 0
     assert json.loads(capsys.readouterr().out)["result"] == 42
-    assert (tmp_path / selected / "data/runner-state.json").is_file()
+    assert (tmp_path / selected / "data/workspace.sqlite3").is_file()
 
 
 @pytest.mark.parametrize("directory", [None, "custom", ""])
@@ -178,7 +178,7 @@ async def test_daemon_workspace_selection(
             await process.wait()
         assert process.returncode == 0
         selected = ".voc" if directory is None else directory
-        assert (tmp_path / selected / "data/config-overrides.json").is_file()
+        assert (tmp_path / selected / "data/workspace.sqlite3").is_file()
     finally:
         if process.returncode is None:
             process.kill()

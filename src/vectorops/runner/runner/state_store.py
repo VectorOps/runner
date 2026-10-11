@@ -1,23 +1,28 @@
-"""Atomic JSON manifest persistence and exclusive project writer ownership."""
+"""Transactional workspace state and exclusive project writer ownership."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-import os
-import tempfile
 import typing
 
 from vectorops.runner.runner import state
 from vectorops.runner.runner.locking import FileLease
+from vectorops.runner.runner.resources import finish_cleanup
+from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 
 class RunnerStateStore:
-    def __init__(self, data_path: Path) -> None:
+    def __init__(
+        self, data_path: Path, database: typing.Optional[WorkspaceDatabase] = None
+    ) -> None:
         self.data_path = data_path
-        self.path = data_path / "runner-state.json"
+        self.database = (
+            database if database is not None else WorkspaceDatabase(data_path)
+        )
+        self.path = self.database.path
         self._descriptor: typing.Optional[int] = None
         self._lease = FileLease(data_path / "runner.lock")
         self.coordination = asyncio.Lock()
@@ -37,19 +42,19 @@ class RunnerStateStore:
 
     async def activate(self, execution_id: str) -> None:
         async with self.coordination:
-            current = await self.load()
-            identifiers = sorted(set(current.active_execution_ids) | {execution_id})
-            await self.save(
-                state.RunnerState(
-                    last_execution_id=execution_id, active_execution_ids=identifiers
+            await self._update(
+                lambda current: state.RunnerState(
+                    last_execution_id=execution_id,
+                    active_execution_ids=sorted(
+                        set(current.active_execution_ids) | {execution_id}
+                    ),
                 )
             )
 
     async def reconcile(self, execution_ids: list[str]) -> None:
         async with self.coordination:
-            current = await self.load()
-            await self.save(
-                state.RunnerState(
+            await self._update(
+                lambda current: state.RunnerState(
                     last_execution_id=current.last_execution_id,
                     active_execution_ids=sorted(execution_ids),
                 )
@@ -57,9 +62,8 @@ class RunnerStateStore:
 
     async def deactivate(self, execution_id: str) -> None:
         async with self.coordination:
-            current = await self.load()
-            await self.save(
-                current.model_copy(
+            await self._update(
+                lambda current: current.model_copy(
                     update={
                         "active_execution_ids": [
                             identifier
@@ -71,44 +75,29 @@ class RunnerStateStore:
             )
 
     async def load(self) -> state.RunnerState:
-        def read() -> state.RunnerState:
-            if not self.path.exists():
-                return state.RunnerState()
-            return state.RunnerState.model_validate_json(self.path.read_bytes())
-
-        return await asyncio.to_thread(read)
+        return state.RunnerState.model_validate_json(
+            await self.database.load_document(
+                "runner", lambda: state.RunnerState().model_dump_json()
+            )
+        )
 
     async def save(self, manifest: state.RunnerState) -> None:
         if self._descriptor is None:
             raise RuntimeError("project writer ownership is required")
-        payload = manifest.model_dump_json(indent=2)
+        await self.database.save_document("runner", manifest.model_dump_json())
 
-        def write() -> None:
-            descriptor, name = tempfile.mkstemp(
-                prefix=".runner-state-", dir=self.data_path
-            )
-            try:
-                with os.fdopen(descriptor, "w") as stream:
-                    stream.write(payload)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(name, self.path)
-                if os.name != "nt":
-                    directory = os.open(self.data_path, os.O_RDONLY)
-                    try:
-                        os.fsync(directory)
-                    finally:
-                        os.close(directory)
-            finally:
-                if os.path.exists(name):
-                    os.unlink(name)
-
-        task = asyncio.create_task(asyncio.to_thread(write))
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+    async def _update(
+        self, update: Callable[[state.RunnerState], state.RunnerState]
+    ) -> None:
+        if self._descriptor is None:
+            raise RuntimeError("project writer ownership is required")
+        await self.database.update_document(
+            "runner",
+            lambda: state.RunnerState().model_dump_json(),
+            lambda payload: update(
+                state.RunnerState.model_validate_json(payload)
+            ).model_dump_json(),
+        )
 
     async def __aenter__(self) -> typing.Self:
         def acquire() -> None:
@@ -123,9 +112,22 @@ class RunnerStateStore:
             await task
             await self.__aexit__()
             raise
+        try:
+            await self.database.__aenter__()
+        except BaseException:
+            self._descriptor = None
+            await asyncio.to_thread(self._lease.release)
+            raise
         return self
 
     async def __aexit__(self, *args: object) -> None:
         if self._descriptor is not None:
-            self._descriptor = None
-            await asyncio.to_thread(self._lease.release)
+
+            async def close() -> None:
+                try:
+                    await self.database.__aexit__()
+                finally:
+                    self._descriptor = None
+                    await asyncio.to_thread(self._lease.release)
+
+            await finish_cleanup(asyncio.create_task(close()))

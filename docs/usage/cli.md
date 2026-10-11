@@ -43,11 +43,26 @@ project/
     config.toml
     workflows/
     data/
-      config-overrides.json
-      config-overrides.lock
+      workspace.sqlite3
+      runner.lock
       executions/
       logs/
 ```
+
+`workspace.sqlite3` stores the last-execution pointer, active execution IDs,
+permanent component overrides, launch-request idempotency receipts, and the
+30-second execution index cache. A shared bounded SQLite worker serializes runtime
+access off the event loop; transactions protect updates, and indexed queries page
+execution IDs without loading the entire cache. SQLite can create `-wal` and `-shm`
+sidecars while the database is open. `runner.lock` remains an OS-level ownership
+lease, not a state file. Execution histories stay in
+`executions/<execution-id>/history.sqlite3`; logs and global credentials are unchanged.
+
+Workspace state is SQLite-only. Old `runner-state.json`, `config-overrides.json`,
+`control.sqlite3`, and `execution-index.json` files are ignored; no migration is
+performed. A new workspace database starts with empty state and rebuilds its
+execution index from existing execution histories. Invalid state in the workspace
+database fails rather than being silently reset.
 
 Use `--workspace-directory` before the command to choose a different relative
 subdirectory. Pass an empty string to use the project directory directly:

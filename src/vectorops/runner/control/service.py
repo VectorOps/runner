@@ -66,7 +66,7 @@ class RunnerService:
         )
         self.path = project.root
         self._mcp = mcp_management.Management(project.configuration, self.mcp_pool)
-        self._store = RunnerStateStore(project.data_path)
+        self._store = RunnerStateStore(project.data_path, project.database)
         await self._store.__aenter__()
         self._logs = diagnostics.DiagnosticLog(
             project.data_path, project.config.logging
@@ -77,7 +77,7 @@ class RunnerService:
             await self._store.__aexit__()
             raise
         self._logs.emit("runner.started")
-        self._requests = RequestStore(project.data_path / "control.sqlite3")
+        self._requests = RequestStore(project.database)
         self._runner = WorkflowRunner(
             project.root,
             workspace_directory=self.workspace_directory,

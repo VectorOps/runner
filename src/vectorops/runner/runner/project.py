@@ -20,6 +20,7 @@ from vectorops.runner.environment.configuration import (
     LocalEnvironmentConfig,
 )
 from vectorops.runner.tool_policy import ToolPolicy
+from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 if typing.TYPE_CHECKING:
     from vectorops.runner.runner.resolver import WorkflowResolver
@@ -107,12 +108,21 @@ class Configuration:
     Runner-level settings remain fixed for the lifetime of the project.
     """
 
-    def __init__(self, path: Path, config: RunnerConfig, *, data_path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        config: RunnerConfig,
+        *,
+        data_path: Path,
+        database: typing.Optional[WorkspaceDatabase] = None,
+    ) -> None:
         self.path = path
         self._defaults = deepcopy(config.components)
         self._overrides: dict[str, overrides.Override] = {}
         self._values = deepcopy(self._defaults)
-        self._store = overrides.Store(data_path / "config-overrides.json")
+        self._store = overrides.Store(
+            database if database is not None else WorkspaceDatabase(data_path)
+        )
         self._lock = asyncio.Lock()
 
     def initialize(self) -> None:
@@ -178,7 +188,7 @@ class Configuration:
             }
             permanent = {key: item for key, item in items.items() if item.permanent}
             if previous != permanent:
-                await asyncio.to_thread(self._store.save, items)
+                await self._store.save(items)
             self._overrides = items
             self._values = overrides.effective(self._defaults, items)
 
@@ -232,7 +242,16 @@ class RunnerProject:
 
     @cached_property
     def configuration(self) -> Configuration:
-        return Configuration(self.config_path, self.config, data_path=self.data_path)
+        return Configuration(
+            self.config_path,
+            self.config,
+            data_path=self.data_path,
+            database=self.database,
+        )
+
+    @cached_property
+    def database(self) -> WorkspaceDatabase:
+        return WorkspaceDatabase(self.data_path)
 
     @cached_property
     def resolver(self) -> WorkflowResolver:

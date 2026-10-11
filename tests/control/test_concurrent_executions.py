@@ -264,7 +264,8 @@ async def test_crash_recovers_multiple_executions_without_manifest(
         if process.returncode is None:
             process.kill()
         await process.communicate()
-    (tmp_path / "data/runner-state.json").unlink()
+    async with RunnerStateStore(tmp_path / "data") as store:
+        await store.save(state.RunnerState())
     async with client.embedded(tmp_path) as connection:
         assert {
             item.execution_id for item in (await connection.active()).executions
@@ -312,9 +313,8 @@ async def test_immediate_stop_and_failure_do_not_affect_other_execution(
         await settled(connection, survivor.execution_id)
 
 
-async def test_state_updates_are_atomic_and_legacy_state_loads(tmp_path: Path) -> None:
+async def test_state_updates_are_atomic(tmp_path: Path) -> None:
     async with RunnerStateStore(tmp_path) as store:
-        store.path.write_text('{"schema_version": 1, "last_execution_id": "legacy"}')
         assert (await store.load()).active_execution_ids == []
         await asyncio.gather(*(store.activate(str(i)) for i in range(20)))
         assert set((await store.load()).active_execution_ids) == {

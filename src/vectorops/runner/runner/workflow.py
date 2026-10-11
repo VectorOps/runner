@@ -86,7 +86,7 @@ class WorkflowRunner:
         project = await self.project()
         if self._execution_index is None:
             self._execution_index = ExecutionIndex(
-                project.data_path, self.execution_state
+                project.data_path, self.execution_state, database=project.database
             )
         return self._execution_index
 
@@ -147,7 +147,7 @@ class WorkflowRunner:
                 with self._diagnostic_log.activate():
                     yield self._state_store
         else:
-            async with RunnerStateStore(project.data_path) as store:
+            async with RunnerStateStore(project.data_path, project.database) as store:
                 async with diagnostics.DiagnosticLog(
                     project.data_path, project.config.logging
                 ) as logs:
@@ -309,7 +309,6 @@ class WorkflowRunner:
                         )
                     workflow_id = record.root_workflow_id
                     configuration = None
-                self.last_execution_id = execution_id
                 history_path = (
                     project.data_path / "executions" / execution_id / "history.sqlite3"
                 )
@@ -377,6 +376,7 @@ class WorkflowRunner:
                     )
                     checkpointer = ExecutionCheckpointer(database, history, record)
                     await database.save_execution(record, replace_heads=True)
+                    self.last_execution_id = execution_id
                     await checkpointer.persist()
                     if is_new:
                         await (await self.execution_index()).invalidate()
@@ -523,7 +523,7 @@ class WorkflowRunner:
 
     async def project_state(self) -> state.RunnerState:
         project = await self.project()
-        return await RunnerStateStore(project.data_path).load()
+        return await RunnerStateStore(project.data_path, project.database).load()
 
     async def _database(
         self, project: RunnerProject, execution_id: str
@@ -548,9 +548,7 @@ class WorkflowRunner:
     ) -> SQLiteHistory:
         project = await self.project()
         if execution_id is None:
-            execution_id = (
-                await RunnerStateStore(project.data_path).load()
-            ).last_execution_id
+            execution_id = (await self.project_state()).last_execution_id
         if execution_id is None:
             raise ValueError("no last execution is recorded")
         return await self._database(project, execution_id)
@@ -624,7 +622,7 @@ class WorkflowRunner:
 
     async def remove_execution(self, execution_id: str) -> None:
         project = await self.project()
-        async with RunnerStateStore(project.data_path) as store:
+        async with RunnerStateStore(project.data_path, project.database) as store:
             database = await self._database(project, execution_id)
             record = await database.get_execution()
             if record.status in ("running", "paused"):

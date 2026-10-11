@@ -1,6 +1,5 @@
 import asyncio
 from pathlib import Path
-import json
 import sys
 
 import pydantic
@@ -56,7 +55,7 @@ async def test_atomic_pointer_save_and_project_ownership(tmp_path: Path) -> None
         await store.save(state.RunnerState())
     async with store:
         await store.save(state.RunnerState(last_execution_id="execution"))
-        assert json.loads(store.path.read_text()) == {
+        assert (await store.load()).model_dump() == {
             "schema_version": 1,
             "last_execution_id": "execution",
             "active_execution_ids": [],
@@ -70,9 +69,10 @@ async def test_atomic_pointer_save_and_project_ownership(tmp_path: Path) -> None
 
 
 async def test_corrupt_pointer_is_not_silently_reset(tmp_path: Path) -> None:
-    (tmp_path / "runner-state.json").write_text("not json")
+    store = RunnerStateStore(tmp_path)
+    await store.database.save_document("runner", "not json")
     with pytest.raises(pydantic.ValidationError):
-        await RunnerStateStore(tmp_path).load()
+        await store.load()
 
 
 async def test_executions_are_isolated_and_old_history_survives(
@@ -101,7 +101,7 @@ async def test_history_resumes_without_global_state(
     runner = WorkflowRunner(workspace)
     assert await runner.run("children:deep_parent", workflow_id="root") == 4
     execution_id = str(runner.last_execution_id)
-    (workspace / "data/runner-state.json").unlink()
+    (workspace / "data/workspace.sqlite3").unlink()
     reopened = WorkflowRunner(workspace)
     assert (await reopened.project_state()).last_execution_id is None
     assert await reopened.resume(execution_id) == 4
@@ -201,7 +201,7 @@ async def test_failed_execution_status_lives_only_in_database(
     assert execution.status == "failed"
     assert execution.completion_step_id is not None
     assert await runner.recovery_candidates() == []
-    assert set(json.loads((workspace / "data/runner-state.json").read_text())) == {
+    assert set((await runner.project_state()).model_dump()) == {
         "schema_version",
         "last_execution_id",
         "active_execution_ids",
