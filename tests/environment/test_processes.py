@@ -57,6 +57,30 @@ async def finish(
     return result, data
 
 
+def test_exec_timeout_defaults_and_schema() -> None:
+    request = m.ExecRequest(command=command("noop"))
+    assert request.yield_timeout_ms == 60000
+    assert request.execution_timeout_ms is None
+    schema = m.ExecRequest.model_json_schema()["properties"]["yield_timeout_ms"]
+    assert schema["default"] == 60000
+    assert schema["minimum"] == 0
+    assert schema["maximum"] == 600000
+
+
+@pytest.mark.parametrize("timeout", [0, 1000, 30000, 60000, 600000])
+def test_exec_yield_timeout_override(timeout: int) -> None:
+    request = m.ExecRequest(command=command("noop"), yield_timeout_ms=timeout)
+    assert request.yield_timeout_ms == timeout
+
+
+@pytest.mark.parametrize("timeout", [-1, 600001, 1.5, True, "60000"])
+def test_invalid_exec_yield_timeout(timeout: object) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        m.ExecRequest.model_validate(
+            {"command": command("noop"), "yield_timeout_ms": timeout}
+        )
+
+
 async def test_quick_command_is_forgotten(environment: LocalEnvironment) -> None:
     result = await environment.exec(
         m.ExecRequest(

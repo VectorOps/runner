@@ -73,7 +73,7 @@ class ExecRequest(Model):
     stdin: bytes = b""
     keep_stdin_open: bool = False
     kill_tree: bool = True
-    yield_timeout_ms: int = pydantic.Field(default=1000, ge=0, le=30000, strict=True)
+    yield_timeout_ms: int = pydantic.Field(default=60000, ge=0, le=600000, strict=True)
     execution_timeout_ms: typing.Optional[int] = pydantic.Field(
         default=None, gt=0, strict=True
     )
