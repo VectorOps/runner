@@ -65,6 +65,59 @@ class Login(Model):
     profile: Optional[ProfileName] = None
 
 
+class CredentialQuery(Model):
+    provider: str = pydantic.Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    profile: Optional[ProfileName] = None
+
+
+class CredentialListQuery(Model):
+    profile: Optional[ProfileName] = None
+    after: Optional[str] = pydantic.Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
+    limit: int = pydantic.Field(default=100, ge=1, le=500, strict=True)
+
+
+class CredentialStatus(Profile):
+    """Local metadata only; no assertion of provider acceptance or refresh success."""
+
+    status: Literal[
+        "missing", "unreadable", "present", "expired", "expiring", "unknown_expiry"
+    ]
+    kind: Optional[Literal["api_key", "oauth2"]] = None
+    expires_at: Optional[float] = None
+    has_refresh_token: bool = False
+
+    @classmethod
+    def from_credential(cls, value: Credential, now: float) -> "CredentialStatus":
+        status: Literal["present", "expired", "expiring", "unknown_expiry"] = "present"
+        if value.expires_at is not None and value.expires_at <= now:
+            status = "expired"
+        elif value.kind == "oauth2":
+            if value.expires_at is None:
+                status = "unknown_expiry"
+            elif not value.reusable(now):
+                status = "expiring"
+        return cls(
+            provider=value.provider,
+            profile=value.profile,
+            status=status,
+            kind=value.kind,
+            expires_at=value.expires_at,
+            has_refresh_token=bool(value.refresh_token),
+        )
+
+
+class CredentialPage(Model):
+    profile: ProfileName
+    credentials: list[CredentialStatus] = pydantic.Field(default_factory=list)
+    next_after: Optional[str] = None
+
+
+class CredentialDeleted(Profile):
+    deleted: bool
+
+
 class Requirement(Profile):
     id: str
     status: Literal["waiting", "claimed"] = "waiting"

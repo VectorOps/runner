@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 import secrets
+import time
 from typing import AsyncIterator, Optional
 
 import pydantic
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from vectorops.runner import global_config as g
 from vectorops.runner.authentication import models as m
 from vectorops.runner.authentication.profiles import ProfileStore
+from vectorops.runner.runner.resources import finish_cleanup
 
 
 class CredentialStore:
@@ -128,9 +130,73 @@ class CredentialStore:
                     "cannot persist credential bindings"
                 ) from None
 
-    async def delete(self, profile: m.Profile) -> None:
-        """Remove a local credential under its profile lock, without remote revocation."""
+    async def check(self, profile: m.Profile) -> m.CredentialStatus:
+        """Inspect one stored credential without refreshing or contacting its provider."""
         async with self.locked(profile):
-            await asyncio.to_thread(
-                (self.path / (profile.key + ".encrypted")).unlink, missing_ok=True
+            try:
+                value = await self.load(profile)
+            except m.CredentialStorageError:
+                return m.CredentialStatus(
+                    provider=profile.provider,
+                    profile=profile.profile,
+                    status="unreadable",
+                )
+            if value is None:
+                return m.CredentialStatus(
+                    provider=profile.provider, profile=profile.profile, status="missing"
+                )
+            return m.CredentialStatus.from_credential(value, time.time())
+
+    async def listing(
+        self, query: m.CredentialListQuery, profile: str
+    ) -> m.CredentialPage:
+        """Page stored identities, decrypting only the selected page for safe metadata."""
+
+        def scan() -> list[m.Profile]:
+            references = []
+            try:
+                for path in self.path.glob(f"*.{profile}.encrypted"):
+                    provider, _, name = path.stem.partition(".")
+                    try:
+                        reference = m.Profile(provider=provider, profile=name)
+                    except pydantic.ValidationError:
+                        continue
+                    if reference.profile == profile and (
+                        query.after is None or reference.provider > query.after
+                    ):
+                        references.append(reference)
+            except OSError:
+                raise m.CredentialStorageError("cannot list credential store") from None
+            return sorted(references, key=lambda item: item.provider)[: query.limit + 1]
+
+        async with self.profiles.locked(profile):
+            references = await asyncio.to_thread(scan)
+            credentials = [
+                await self.check(reference) for reference in references[: query.limit]
+            ]
+            return m.CredentialPage(
+                profile=profile,
+                credentials=credentials,
+                next_after=(
+                    references[query.limit - 1].provider
+                    if len(references) > query.limit
+                    else None
+                ),
             )
+
+    async def delete(self, profile: m.Profile) -> bool:
+        """Remove a local credential under its profile lock, without remote revocation."""
+
+        def remove() -> bool:
+            try:
+                (self.path / (profile.key + ".encrypted")).unlink()
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError:
+                raise m.CredentialStorageError(
+                    "cannot delete credential store entry"
+                ) from None
+
+        async with self.locked(profile):
+            return await finish_cleanup(asyncio.create_task(asyncio.to_thread(remove)))

@@ -424,6 +424,24 @@ class RunnerService:
             if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
             try:
+                if method == "auth.credentials.list":
+                    return (
+                        await self.authentication.credentials(
+                            am.CredentialListQuery.model_validate(params)
+                        )
+                    ).model_dump(mode="json")
+                if method == "auth.credentials.check":
+                    return (
+                        await self.authentication.check_credential(
+                            am.CredentialQuery.model_validate(params)
+                        )
+                    ).model_dump(mode="json")
+                if method == "auth.credentials.delete":
+                    return (
+                        await self.authentication.delete_credential(
+                            am.CredentialQuery.model_validate(params)
+                        )
+                    ).model_dump(mode="json")
                 if method == "auth.login":
                     login = am.Login.model_validate(params)
                     return (
@@ -488,6 +506,10 @@ class RunnerService:
                 ) from None
             except am.AuthenticationError as exc:
                 raise p.RemoteError("authentication_error", str(exc)) from None
+            except am.CredentialStorageError:
+                raise p.RemoteError(
+                    "credential_storage_error", "cannot access credential store"
+                ) from None
         if method == "workflows.describe":
             description_query = p.DescribeWorkflow.model_validate(params)
             return p.json_value(

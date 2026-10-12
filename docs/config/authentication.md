@@ -141,6 +141,9 @@ All methods require control authentication. Parameters and results are not store
 | `auth.release` | `id`, `attempt` | Null; release the claim without canceling login |
 | `auth.cancel` | `id` | Null; cancel standalone login |
 | `auth.provision` | Credential object | Null after durable storage |
+| `auth.credentials.list` | Optional `profile` (active when omitted), `after` provider, `limit` (1-500, default 100) | `profile`, secret-free `credentials`, `next_after` |
+| `auth.credentials.check` | `provider`, optional `profile` (active when omitted) | Local credential status, without provider requests |
+| `auth.credentials.delete` | `provider`, optional `profile` (active when omitted) | `provider`, `profile`, `deleted` (false when already absent) |
 | `auth.profile.list` | None | `active_profile`, ordered `profiles` (default first) |
 | `auth.profile.add` | `name` | `changed`, `active_profile`, `profiles` |
 | `auth.profile.switch` | `name` | `changed`, `active_profile`, `profiles` |
@@ -150,6 +153,53 @@ Typed clients expose `authentication_profiles`, `add_authentication_profile`,
 `switch_authentication_profile`, and `delete_authentication_profile`. All profile
 operations are local to the runner's global credential store and perform no provider
 network requests.
+
+### Manage stored credentials
+
+Each provider/profile pair stores one credential. List or check metadata, replace
+the complete credential through `auth.provision`, or delete that individual record:
+
+```python
+from vectorops.runner.authentication.models import Credential
+
+page = await host.credentials(profile="work", limit=100)
+status = await host.check_credential("openai", profile="work")
+await host.provision_credentials(Credential(
+    provider="openai", profile="work", kind="api_key", secret=new_api_key,
+))
+result = await host.delete_credential("openai", profile="work")
+```
+
+Listing is ordered by provider and includes API keys, OAuth records, and stored
+MCP token-cache identities. Pass `next_after` as `after` to fetch another page.
+Profiles must exist; omitted profiles resolve to the active selection once per
+request. Concurrent mutations can change later pages; this is not a frozen snapshot.
+
+Metadata contains only `provider`, `profile`, `status`, nullable `kind`, nullable
+`expires_at` (Unix seconds), and `has_refresh_token`. No secret values, token
+fragments, account IDs, or storage paths are returned. Listing and checking never
+refresh tokens, initiate login, or contact a provider. Local status means:
+
+| Status | Meaning |
+| --- | --- |
+| `missing` | No credential is stored for this provider/profile |
+| `unreadable` | The entry could not be read, decrypted, or validated; replace or delete it |
+| `present` | The credential is readable and not locally expired; an API key with no expiry also has this status |
+| `expired` | The recorded expiration time has passed |
+| `expiring` | An OAuth token expires within 60 seconds and would need refresh before use |
+| `unknown_expiry` | An OAuth record has no known expiration time |
+
+`present` does not prove that a provider accepts the key. `has_refresh_token` reports
+presence only, not whether refresh will succeed. Global configuration failures are
+errors rather than missing credentials. Storage-operation failures return a sanitized
+`credential_storage_error` without filesystem details.
+
+Provisioning replaces the entire credential, not selected fields, and returns no
+secrets. Individual deletion removes only the selected provider/profile record;
+profile deletion removes all locally stored credentials for that profile. Neither
+operation revokes tokens remotely, clears already loaded transports, or cancels
+independent login requests. Cancel pending login before deleting if it must not
+publish a new credential later. Deletion is serialized with credential publication.
 
 `auth.required`, `auth.completed`, and `auth.cancelled` events contain only ID, provider, and profile. Subscribe without an execution filter and reconcile with `auth.list`; events are advisory. Authentication conflicts return `authentication_error`. Malformed secret-bearing input returns a generic `invalid_argument`, without input values. Completion is not durably idempotent: after a lost response, query current requirements rather than replaying an old code.
 

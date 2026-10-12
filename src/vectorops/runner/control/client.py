@@ -452,6 +452,38 @@ class RunnerClient:
             "auth.provision", credential.model_dump(mode="json", exclude_unset=True)
         )
 
+    async def credentials(
+        self,
+        profile: typing.Optional[str] = None,
+        *,
+        after: typing.Optional[str] = None,
+        limit: int = 100,
+    ) -> am.CredentialPage:
+        query = am.CredentialListQuery(profile=profile, after=after, limit=limit)
+        return am.CredentialPage.model_validate(
+            await self.request("auth.credentials.list", query.model_dump(mode="json"))
+        )
+
+    async def check_credential(
+        self,
+        provider: str,
+        profile: typing.Optional[str] = None,
+    ) -> am.CredentialStatus:
+        query = am.CredentialQuery(provider=provider, profile=profile)
+        return am.CredentialStatus.model_validate(
+            await self.request("auth.credentials.check", query.model_dump(mode="json"))
+        )
+
+    async def delete_credential(
+        self,
+        provider: str,
+        profile: typing.Optional[str] = None,
+    ) -> am.CredentialDeleted:
+        query = am.CredentialQuery(provider=provider, profile=profile)
+        return am.CredentialDeleted.model_validate(
+            await self.request("auth.credentials.delete", query.model_dump(mode="json"))
+        )
+
     async def aclose(self) -> None:
         self._reader.cancel()
         await asyncio.gather(self._reader, return_exceptions=True)

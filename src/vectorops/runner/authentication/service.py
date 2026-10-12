@@ -233,6 +233,26 @@ class AuthenticationService:
             )
         await self.store.provision(value)
 
+    async def credentials(self, query: m.CredentialListQuery) -> m.CredentialPage:
+        profile = await self.profiles.resolve(query.profile)
+        return await self.store.listing(query, profile)
+
+    async def check_credential(self, query: m.CredentialQuery) -> m.CredentialStatus:
+        profile = m.Profile(
+            provider=query.provider, profile=await self.profiles.resolve(query.profile)
+        )
+        return await self.store.check(profile)
+
+    async def delete_credential(self, query: m.CredentialQuery) -> m.CredentialDeleted:
+        profile = m.Profile(
+            provider=query.provider, profile=await self.profiles.resolve(query.profile)
+        )
+        return m.CredentialDeleted(
+            provider=profile.provider,
+            profile=profile.profile,
+            deleted=await self.store.delete(profile),
+        )
+
     async def acquire(
         self,
         profile: m.Profile,
