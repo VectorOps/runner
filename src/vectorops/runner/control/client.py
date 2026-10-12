@@ -321,6 +321,11 @@ class RunnerClient:
             )
         )
 
+    async def authentication_providers(self) -> am.AuthenticationProviders:
+        return am.AuthenticationProviders.model_validate(
+            await self.request("auth.providers")
+        )
+
     async def authentication_profiles(self) -> am.ProfileListing:
         return am.ProfileListing.model_validate(await self.request("auth.profile.list"))
 

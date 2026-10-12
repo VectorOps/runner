@@ -133,6 +133,7 @@ All methods require control authentication. Parameters and results are not store
 
 | Method | Parameters | Result |
 | --- | --- | --- |
+| `auth.providers` | None | Known authentication providers and supported credential methods; no stored credentials |
 | `auth.login` | `provider`, optional `profile` (active when omitted) | Standalone login requirement |
 | `auth.list` | None | `requests`: ID, provider, profile, waiting/claimed status; `execution_ids` is always empty |
 | `auth.claim` | `id` | `id`, `attempt`, `state`, `redirect_uri`, `expires_at` |
@@ -153,6 +154,35 @@ Typed clients expose `authentication_profiles`, `add_authentication_profile`,
 `switch_authentication_profile`, and `delete_authentication_profile`. All profile
 operations are local to the runner's global credential store and perform no provider
 network requests.
+
+### Discover authentication providers
+
+Call `RunnerClient.authentication_providers()` or `auth.providers` with empty
+parameters to populate a frontend provider picker. The result is independent of
+the selected profile and existing credentials, and requires no provider or store I/O.
+
+```json
+{
+  "providers": [
+    {"provider": "openai", "display_name": "OpenAI", "credential_kinds": ["api_key"], "oauth_login": false},
+    {"provider": "chatgpt", "display_name": "ChatGPT", "credential_kinds": ["api_key", "oauth2"], "oauth_login": true}
+  ],
+  "custom_api_key_providers": true
+}
+```
+
+The example shows two entries; results are sorted by provider ID. Built-in entries
+include Anthropic, ChatGPT, Google Gemini, MCP, OpenAI, and OpenRouter. OAuth
+capabilities reflect the running service's registered adapters. Use `oauth_login`
+to offer browser login through `auth.login`, and `credential_kinds` to offer
+provisioning through `auth.provision`. These describe accepted credential methods,
+not proof that a provider will accept a credential or that a model is available.
+`custom_api_key_providers` allows a manually entered provider ID for generic
+API-key provisioning; the list is not a validation allowlist.
+
+MCP's entry supports provisioning shared API-key references. Resource-bound MCP
+OAuth adapter IDs are not picker entries: discover configured servers with
+`mcp.list` and initiate server-specific login through `mcp.login` instead.
 
 ### Manage stored credentials
 

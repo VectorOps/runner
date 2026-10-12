@@ -1,10 +1,46 @@
 """Provider selection and connect transport authentication integration."""
 
-from typing import Optional
+from collections.abc import Mapping
+from typing import Final, Optional
 
 import connect
 
 from . import contracts, models, oauth
+
+_PROVIDER_NAMES: Final[dict[str, str]] = {
+    "anthropic": "Anthropic",
+    "gemini": "Google Gemini",
+    "mcp": "MCP",
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+}
+
+
+def available(
+    adapters: Mapping[str, oauth.OAuthAdapter],
+) -> models.AuthenticationProviders:
+    """Describe credential capabilities, not model availability or stored authorization."""
+    names = dict(_PROVIDER_NAMES)
+    names.update(
+        {
+            name: "ChatGPT" if name == "chatgpt" else name
+            for name in adapters
+            if not name.startswith("mcp-")
+        }
+    )
+    return models.AuthenticationProviders(
+        providers=[
+            models.AuthenticationProvider(
+                provider=name,
+                display_name=names[name],
+                credential_kinds=(
+                    ["api_key", "oauth2"] if name in adapters else ["api_key"]
+                ),
+                oauth_login=name in adapters,
+            )
+            for name in sorted(names)
+        ]
+    )
 
 
 def adapters() -> dict[str, oauth.OAuthAdapter]:

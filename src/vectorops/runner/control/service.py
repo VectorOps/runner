@@ -424,6 +424,9 @@ class RunnerService:
             if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
             try:
+                if method == "auth.providers":
+                    p.Empty.model_validate(params)
+                    return self.authentication.providers().model_dump(mode="json")
                 if method == "auth.credentials.list":
                     return (
                         await self.authentication.credentials(

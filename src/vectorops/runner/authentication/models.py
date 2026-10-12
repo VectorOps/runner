@@ -33,6 +33,18 @@ class ProfileResult(ProfileListing):
     changed: bool
 
 
+class AuthenticationProvider(Model):
+    provider: str = pydantic.Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    display_name: str
+    credential_kinds: list[Literal["api_key", "oauth2"]]
+    oauth_login: bool
+
+
+class AuthenticationProviders(Model):
+    providers: list[AuthenticationProvider] = pydantic.Field(default_factory=list)
+    custom_api_key_providers: bool = True
+
+
 class Profile(Model):
     provider: str = pydantic.Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     profile: ProfileName = "default"

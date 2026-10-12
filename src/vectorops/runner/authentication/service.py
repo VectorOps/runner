@@ -54,6 +54,9 @@ class AuthenticationService:
     def register(self, provider: str, adapter: oauth.OAuthAdapter) -> None:
         self.adapters[provider] = adapter
 
+    def providers(self) -> m.AuthenticationProviders:
+        return provider_auth.available(self.adapters)
+
     async def login(
         self, provider: str, profile: Optional[str] = None
     ) -> m.Requirement:
