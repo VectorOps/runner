@@ -6,6 +6,7 @@ import pytest
 
 from tests.fixtures import resource_workflows as workflows
 from tests.fixtures.history import MemoryHistory
+from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.resources import ExecutionResources
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -83,21 +84,25 @@ def configured_workspace(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="local environment requires POSIX")
-@pytest.mark.parametrize("mode", ["success", "failure", "child", "wait"])
+@pytest.mark.parametrize("mode", ["success", "failure", "child", "wait", "cancel"])
 async def test_root_owns_environment_until_shutdown(
     configured_workspace: Path, mode: str
 ) -> None:
     runner = WorkflowRunner(configured_workspace, MemoryHistory())
     task = asyncio.create_task(
         runner.run(
-            "python:tests.fixtures.resource_workflows:workflow", input={"mode": mode}
+            "python:tests.fixtures.resource_workflows:workflow",
+            input={"mode": "wait" if mode == "cancel" else mode},
         )
     )
     pid = await asyncio.wait_for(workflows.probe.started.get(), 5)
-    if mode == "wait":
+    if mode in ("wait", "cancel"):
         await asyncio.wait_for(workflows.probe.waiting.wait(), 5)
-        runner.stop()
-        runner.stop()
+        if mode == "cancel":
+            task.cancel()
+        else:
+            runner.stop()
+            runner.stop()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 5)
         assert workflows.probe.events == ["workflow.stopped", "resource.closed"]
@@ -112,6 +117,44 @@ async def test_root_owns_environment_until_shutdown(
     environment = workflows.probe.contexts[0].environment
     assert environment is not None
     assert await environment.list_processes() == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="local environment requires POSIX")
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_service_stop_closes_processes_before_terminal_event(
+    configured_workspace: Path, tmp_path: Path, shutdown: bool
+) -> None:
+    async with RunnerService(
+        configured_workspace, config_dir=tmp_path / "global"
+    ) as service:
+        stopped = asyncio.Event()
+        service.listen(
+            lambda event: (
+                stopped.set() if event.get("kind") == "execution.cancelled" else None
+            )
+        )
+        await service.dispatch(
+            "executions.start",
+            {
+                "reference": "python:tests.fixtures.resource_workflows:workflow",
+                "input": {"mode": "wait"},
+                "idempotency_key": "process-cleanup",
+            },
+        )
+        pid = await asyncio.wait_for(workflows.probe.started.get(), 5)
+        await asyncio.wait_for(workflows.probe.waiting.wait(), 5)
+        identifier = service.runner.last_execution_id
+        assert identifier is not None
+        if shutdown:
+            await asyncio.wait_for(service.aclose(), 5)
+        else:
+            await service.dispatch("executions.stop", {"execution_id": identifier})
+        await asyncio.wait_for(stopped.wait(), 5)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        environment = workflows.probe.contexts[0].environment
+        assert environment is not None
+        assert await environment.list_processes() == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="local environment requires POSIX")

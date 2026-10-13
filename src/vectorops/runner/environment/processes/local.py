@@ -99,12 +99,22 @@ class LocalProcessDriver:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            handle = await task
-            try:
-                await handle.terminate(force=True)
-                await handle.wait()
-            finally:
-                await handle.close()
+
+            async def cleanup() -> None:
+                handle = await task
+                try:
+                    await handle.terminate(force=True)
+                    await handle.wait()
+                finally:
+                    await handle.close()
+
+            closing = asyncio.create_task(cleanup())
+            while not closing.done():
+                try:
+                    await asyncio.shield(closing)
+                except asyncio.CancelledError:
+                    pass
+            closing.result()
             raise
 
     async def _spawn(self, request: m.ExecRequest) -> ProcessHandle:

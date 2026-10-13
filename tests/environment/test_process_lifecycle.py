@@ -8,6 +8,7 @@ import pytest
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.processes import models as m
+from vectorops.runner.environment.processes.local import LocalProcessDriver
 from vectorops.runner.environment.processes.manager import ProcessManager
 from tests.environment import test_processes as helpers
 
@@ -122,6 +123,55 @@ async def test_cancelled_close_continues_cleanup() -> None:
         await close
     reports = await manager.close()
     assert reports[0].termination_confirmed and driver.handle.closed
+
+
+@pytest.mark.parametrize("phase", ["spawn", "terminate"])
+async def test_spawn_cleanup_survives_repeated_cancellation(
+    tmp_path: Path, phase: str
+) -> None:
+    started = asyncio.Event()
+    terminating = asyncio.Event()
+    spawned = asyncio.Event()
+    release = asyncio.Event()
+
+    class Handle(helpers.FakeHandle):
+        async def terminate(self, *, force: bool) -> None:
+            terminating.set()
+            await release.wait()
+            await super().terminate(force=force)
+
+    handle = Handle()
+
+    class Driver(LocalProcessDriver):
+        async def _spawn(self, request: m.ExecRequest) -> Handle:
+            started.set()
+            await spawned.wait()
+            return handle
+
+    driver = Driver(lambda cwd: tmp_path, m.EnvPolicy())
+    task = asyncio.create_task(
+        driver.spawn(m.ExecRequest(command=m.ArgvCommand(argv=["fake"])))
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        if phase == "terminate":
+            spawned.set()
+            await asyncio.wait_for(terminating.wait(), 5)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        spawned.set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert handle.exited.is_set()
+        assert handle.closed
+    finally:
+        spawned.set()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def test_exit_status_validation() -> None:
