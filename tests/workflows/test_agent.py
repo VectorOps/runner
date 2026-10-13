@@ -262,6 +262,32 @@ async def test_agent_without_config_reaches_user_input(tmp_path: Path) -> None:
     assert not (tmp_path / ".voc/config.toml").exists()
 
 
+@pytest.mark.parametrize("tier", list(settings.ModelTier))
+async def test_agent_with_shared_model_handles_input(
+    tmp_path: Path, tier: settings.ModelTier
+) -> None:
+    (tmp_path / "config.toml").write_text('[components.llm]\nmodel = "shared"\n')
+    backend = FakeProvider([answer("done")])
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        async with client.embedded(tmp_path) as connection:
+            accepted = await connection.start(
+                protocol.Start(
+                    reference="builtin:agent",
+                    input={"model_tier": tier.value},
+                    idempotency_key="start",
+                )
+            )
+            request = await pending(connection, accepted.execution_id)
+            await reply(connection, request, "hello")
+            next_request = await pending(connection, accepted.execution_id)
+            assert next_request.request_id != request.request_id
+            assert next_request.channel == "user.message"
+            assert len(backend.requests) == 1
+            assert backend.settings[0].model == "shared"
+            await connection.stop(accepted.execution_id)
+            await settled(connection, accepted.execution_id)
+
+
 async def test_helper_uses_default_project_context(tmp_path: Path) -> None:
     workspace = tmp_path / ".voc"
     workspace.mkdir()

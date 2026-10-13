@@ -9,6 +9,7 @@ from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import models
 
+_BUILTIN_PROFILES: typing.Final = frozenset({"strong", "medium", "weak"})
 _PROFILE_CATALOG_ADAPTER: typing.Final = pydantic.TypeAdapter(
     dict[str, dict[str, pydantic.JsonValue]]
 )
@@ -67,9 +68,9 @@ async def resolve_configuration(
     defaults = dict(values)
     profiles = _PROFILE_CATALOG_ADAPTER.validate_python(defaults.pop("profiles", {}))
     if profile is not None:
-        if profile not in profiles:
+        if profile not in profiles and profile not in _BUILTIN_PROFILES:
             raise ValueError(f"unknown LLM profile: {profile!r}")
-        defaults = _merge(defaults, profiles[profile])
+        defaults = _merge(defaults, profiles.get(profile, {}))
     return models.Configuration.model_validate(_merge(defaults, supplied))
 
 

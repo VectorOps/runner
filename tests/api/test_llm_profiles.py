@@ -140,6 +140,54 @@ async def test_invalid_profiles(
     assert result.outcome.kind == "completed", result.outcome
 
 
+@pytest.mark.parametrize("profile", ["strong", "medium", "weak"])
+@pytest.mark.parametrize(
+    "catalog", ["", '[components.llm.profiles.custom]\nmodel = "custom"\n']
+)
+async def test_builtin_profiles_inherit_shared_settings_and_replay(
+    history: MemoryHistory, tmp_path: Path, profile: str, catalog: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[components.llm]\nmodel = "default"\nprovider = "openai"\n'
+        'reasoning = {effort = "high"}\nmax_rounds = 7\n'
+        "retry = {max_retries = 0}\ncompaction = {context_window = 1000}\n" + catalog
+    )
+    backend = FakeProvider([answer("done")])
+
+    async def workflow() -> pydantic.JsonValue:
+        shared = await configuration.resolve_configuration({})
+        assert await configuration.resolve_configuration({}, profile=profile) == shared
+        explicit = await llm.resolve_settings(profile=profile, model="explicit")
+        assert explicit.model == "explicit"
+        agent = llm.LLM("inherited", profile=profile, backend=backend)
+        agent.add_user_message("hello")
+        await agent.generate()
+        assert agent.settings == shared.generation_settings()
+        return agent.settings.model
+
+    first = await replay.run(history, workflow, workspace=tmp_path)
+    assert first.outcome.kind == "completed", first.outcome
+    path.write_text(f'[components.llm.profiles.{profile}]\nmodel = "changed"\n')
+    assert (
+        await replay.run(history, workflow, first.id, workspace=tmp_path)
+    ).outcome == first.outcome
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.parametrize("profile", ["strong", "medium", "weak"])
+async def test_builtin_profiles_still_require_a_model(
+    history: MemoryHistory, tmp_path: Path, profile: str
+) -> None:
+    async def workflow() -> pydantic.JsonValue:
+        with pytest.raises(pydantic.ValidationError, match="model"):
+            await llm.resolve_settings(profile=profile)
+        return None
+
+    result = await replay.run(history, workflow, workspace=tmp_path)
+    assert result.outcome.kind == "completed", result.outcome
+
+
 async def test_missing_profile_and_empty_profile(
     history: MemoryHistory, tmp_path: Path
 ) -> None:

@@ -14,11 +14,11 @@ file once at startup. There is no central component schema or global digest.
 [components.llm]
 model = "gpt-4.1"
 provider = "openai"
-max_output_tokens = 4096
-first_token_timeout = 180
-stream_stall_timeout = 120
-max_rounds = 20
 ```
+
+This is enough for the built-in coding agent. Its `strong`, `medium`, and `weak`
+profiles inherit these shared settings unless explicitly overridden; no profile
+tables are required. Other LLM options use their built-in defaults.
 
 ```python
 from vectorops.runner.api import llm
@@ -318,8 +318,6 @@ reasoning = {effort = "high"}
 [components.llm.profiles.strong]
 model = "o3"
 
-[components.llm.profiles.medium]
-
 [components.llm.profiles.weak]
 model = "gpt-4.1-mini"
 reasoning = {effort = "low"}
@@ -327,7 +325,10 @@ reasoning = {effort = "low"}
 
 Each profile can override generation settings, `compaction`, `retry`, and
 `max_rounds`. Nested mappings merge recursively before the resolved configuration
-is validated. An empty profile inherits all shared settings. Unknown profile names,
+is validated. The built-in `strong`, `medium`, and `weak` profiles inherit all shared
+settings when omitted, just like an empty profile. Define only the profiles you
+want to override; `medium` in the example uses the shared model and reasoning.
+Unknown custom profile names,
 non-mapping catalogs or profile entries, and invalid resolved settings fail before
 generation. Profiles cannot contain another profile catalog or select a parent
 profile. Without `profile=`, the LLM uses only shared settings and explicit options.
@@ -343,8 +344,9 @@ replayed or interrupted generations use their recorded snapshot.
 ### Migrate the coding agent
 
 The coding agent selects `profile=model_tier.value`; its default tier is `strong`.
-Define each tier profile you use, even if it is empty and inherits the shared model.
-Move `workflows.defaults.strong_model`, `medium_model`, and `weak_model` to the
+Configure only `components.llm.model` and, if needed, `provider` to use one shared
+model for every tier. No profile tables are required. To retain distinct tier models,
+move `workflows.defaults.strong_model`, `medium_model`, and `weak_model` to the
 corresponding `llm.profiles.<tier>.model` fields for the coding agent. Move its shared
 `thinking_level` to `llm.reasoning.effort`, or set reasoning in individual profiles.
 Update stored overrides to target the new keys as well. Chat and helper workflows
