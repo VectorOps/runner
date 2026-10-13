@@ -251,6 +251,11 @@ class RunnerClient:
             await self.request("executions.resume", params.model_dump(mode="json"))
         )
 
+    async def branch(self, params: p.Branch) -> p.BranchAccepted:
+        return p.BranchAccepted.model_validate(
+            await self.request("executions.branch", params.model_dump(mode="json"))
+        )
+
     async def current(
         self, execution_id: typing.Optional[str] = None
     ) -> typing.Optional[p.Active]:

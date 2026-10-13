@@ -20,6 +20,7 @@ from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
 from vectorops.runner.runner import inspection
+from vectorops.runner.runner import branching
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.resources import finish_cleanup
 from vectorops.runner.runner.state_store import RunnerStateStore
@@ -49,6 +50,7 @@ class RunnerService:
         self._requests: typing.Optional[RequestStore] = None
         self._runner: typing.Optional[WorkflowRunner] = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._branches: dict[str, asyncio.Task[None]] = {}
         self._active: dict[str, p.Active] = {}
         self._references: dict[str, str] = {}
         self._lock = asyncio.Lock()
@@ -125,6 +127,7 @@ class RunnerService:
                     if active.status != "starting":
                         self._tasks[identifier].cancel()
         try:
+            await asyncio.gather(*self._branches.values())
             await asyncio.gather(*self._tasks.values())
         finally:
             try:
@@ -266,7 +269,8 @@ class RunnerService:
                 )
         finally:
             assert self._store is not None
-            self._store.scheduled.discard(accepted.execution_id)
+            if accepted.execution_id not in self._branches:
+                self._store.scheduled.discard(accepted.execution_id)
             self._active.pop(accepted.execution_id, None)
             self._references.pop(accepted.execution_id, None)
             self._tasks.pop(accepted.execution_id, None)
@@ -302,7 +306,10 @@ class RunnerService:
                 start = params
                 execution_id = uuid4().hex
             else:
-                if params.execution_id in self._active:
+                if (
+                    params.execution_id in self._active
+                    or params.execution_id in self._branches
+                ):
                     raise p.RemoteError(
                         "execution_conflict", "execution is already active"
                     )
@@ -318,6 +325,60 @@ class RunnerService:
                 raise
             self._schedule(accepted, start, reference)
             return accepted
+
+    async def _branch(self, request: p.Branch) -> p.BranchAccepted:
+        async with self._lock:
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            assert self._store is not None
+            async with self._store.coordination:
+                await self.runner.execution_state(request.execution_id)
+                protected = request.execution_id in self._store.scheduled
+                self._store.scheduled.add(request.execution_id)
+            try:
+                operation = await self.runner.accept_branch(request)
+            except input_schema.InputValidationError as exc:
+                raise p.RemoteError(
+                    "input_validation", str(exc), exc.details()
+                ) from exc
+            except branching.BranchConflict as exc:
+                raise p.RemoteError("branch_conflict", str(exc)) from exc
+            finally:
+                if not protected:
+                    self._store.scheduled.discard(request.execution_id)
+            if (
+                operation.status == "accepted"
+                and request.execution_id not in self._branches
+            ):
+                assert self._store is not None
+                self._store.scheduled.add(request.execution_id)
+                previous = self._tasks.get(request.execution_id)
+                self._stop(request.execution_id)
+                self._branches[request.execution_id] = asyncio.create_task(
+                    self._switch_branch(operation, previous)
+                )
+            return operation.accepted()
+
+    async def _switch_branch(
+        self,
+        operation: branching.Operation,
+        previous: typing.Optional[asyncio.Task[None]],
+    ) -> None:
+        """Await the old writer without holding the service-wide acceptance lock."""
+        identifier = operation.request.execution_id
+        try:
+            if previous is not None:
+                await finish_cleanup(previous)
+            async with self._lock:
+                assert self._store is not None
+                if not self.shutdown_requested.is_set():
+                    self._store.scheduled.add(identifier)
+                    self._schedule(p.Accepted(execution_id=identifier), None, None)
+        finally:
+            self._branches.pop(identifier, None)
+            if identifier not in self._tasks:
+                assert self._store is not None
+                self._store.scheduled.discard(identifier)
 
     async def _summary(self, identifier: str) -> inspection.ExecutionSummary:
         active = self._active.get(identifier)
@@ -629,9 +690,15 @@ class RunnerService:
             return p.json_value(await self._launch(p.Start.model_validate(params)))
         if method == "executions.resume":
             return p.json_value(await self._launch(p.Resume.model_validate(params)))
+        if method == "executions.branch":
+            return p.json_value(await self._branch(p.Branch.model_validate(params)))
         if method == "executions.stop":
             selected = p.Execution.model_validate(params)
             async with self._lock:
+                if selected.execution_id in self._branches:
+                    raise p.RemoteError(
+                        "execution_conflict", "branch transition is in progress"
+                    )
                 if selected.execution_id not in self._active:
                     try:
                         await self.runner.stop_unloaded(selected.execution_id)
@@ -685,6 +752,10 @@ class RunnerService:
         if method == "mailbox.respond":
             answer = mailbox.Answer.model_validate(params)
             async with self._lock:
+                if answer.execution_id in self._branches:
+                    raise p.RemoteError(
+                        "execution_conflict", "branch transition is in progress"
+                    )
                 if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
                     raise p.RemoteError("runner_stopping", "runner is shutting down")
                 try:

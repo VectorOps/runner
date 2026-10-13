@@ -8,12 +8,14 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 import typing
+from uuid import uuid4
 
 from vectorops.runner import models, tool_policy
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner import branching
 from vectorops.runner.runner.sqlite_writer import SQLiteWriter
 
 T = typing.TypeVar("T")
@@ -119,6 +121,11 @@ class SQLiteHistory:
                     tool_name TEXT NOT NULL,
                     request_id TEXT NOT NULL REFERENCES input_requests(request_id),
                     PRIMARY KEY (workflow_id, tool_name)
+                );
+                CREATE TABLE IF NOT EXISTS branch_operations (
+                    id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    payload TEXT NOT NULL
                 );
                 PRAGMA user_version = 1;
                 COMMIT;
@@ -274,6 +281,132 @@ class SQLiteHistory:
                 self._set_status(connection, "cancelled")
 
         await self._run(stop)
+
+    def _branch_plan(
+        self, connection: sqlite3.Connection, operation: branching.Operation
+    ) -> branching.Plan:
+        return branching.plan(
+            operation,
+            self._execution(connection),
+            lambda identifier: self._step(connection, identifier),
+            lambda identifier: self._input(connection, identifier),
+        )
+
+    async def accept_branch(self, request: branching.Branch) -> branching.Operation:
+        """Validate before interruption and durably accept an execution-scoped key."""
+
+        def accept(connection: sqlite3.Connection) -> branching.Operation:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload FROM branch_operations WHERE idempotency_key = ?",
+                    (request.idempotency_key,),
+                ).fetchone()
+                if row is not None:
+                    previous = branching.Operation.model_validate_json(row[0])
+                    if previous.request != request:
+                        raise branching.BranchConflict(
+                            "idempotency key already used for different arguments"
+                        )
+                    return previous
+                if connection.execute(
+                    "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                ).fetchone():
+                    raise branching.BranchConflict("another branch is being prepared")
+                operation = branching.Operation(
+                    request=request,
+                    input_step_id=(
+                        uuid4().hex
+                        if isinstance(request.action, branching.InsertInput)
+                        else None
+                    ),
+                )
+                self._branch_plan(connection, operation)
+                connection.execute(
+                    "INSERT INTO branch_operations VALUES (?, ?, ?)",
+                    (
+                        operation.id,
+                        request.idempotency_key,
+                        operation.model_dump_json(),
+                    ),
+                )
+                return operation
+
+        return await self._run(accept)
+
+    async def pending_branch(self) -> bool:
+        return await self._run(
+            lambda connection: connection.execute(
+                "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+            ).fetchone()
+            is not None
+        )
+
+    async def apply_branch(self) -> typing.Optional[branching.Operation]:
+        """Commit path selection and synthetic input atomically after writer cleanup."""
+
+        def apply(
+            connection: sqlite3.Connection,
+        ) -> typing.Optional[branching.Operation]:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                ).fetchone()
+                if row is None:
+                    return None
+                operation = branching.Operation.model_validate_json(row[0])
+                try:
+                    plan = self._branch_plan(connection, operation)
+                except (ValueError, KeyError) as exc:
+                    operation = operation.model_copy(
+                        update={"status": "failed", "error": str(exc)}
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
+                        "WHERE json_extract(payload, '$.status') = 'pending'"
+                    )
+                    step = plan.input_step
+                    if step is not None:
+                        connection.execute(
+                            "INSERT INTO steps VALUES (?, ?, ?, ?)",
+                            (
+                                step.id,
+                                step.workflow_id,
+                                step.previous_step_id,
+                                step.model_dump_json(),
+                            ),
+                        )
+                        assert plan.input_request is not None
+                        connection.execute(
+                            "INSERT INTO input_requests VALUES (?, ?)",
+                            (step.id, plan.input_request.model_dump_json()),
+                        )
+                    connection.execute("DELETE FROM workflow_heads")
+                    connection.executemany(
+                        "INSERT INTO workflow_heads VALUES (?, ?)", plan.heads.items()
+                    )
+                    grants = connection.execute(
+                        "SELECT request_id FROM tool_approval_grants"
+                    ).fetchall()
+                    connection.executemany(
+                        "DELETE FROM tool_approval_grants WHERE request_id = ?",
+                        [
+                            (row[0],)
+                            for row in grants
+                            if row[0] not in plan.retained_step_ids
+                        ],
+                    )
+                    self._set_status(connection, "running")
+                    operation = operation.model_copy(update={"status": "applied"})
+                connection.execute(
+                    "UPDATE branch_operations SET payload = ? WHERE id = ?",
+                    (operation.model_dump_json(), operation.id),
+                )
+                return operation
+
+        return await self._run(apply)
 
     async def get_execution(self) -> state.ExecutionRecord:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -613,6 +746,10 @@ class SQLiteHistory:
                 request = self._input(connection, answer.request_id)
                 if request.execution_id != answer.execution_id:
                     raise mailbox.MailboxConflict("execution identity mismatch")
+                if connection.execute(
+                    "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                ).fetchone():
+                    raise mailbox.MailboxConflict("branch transition is in progress")
                 if request.status == "answered":
                     if (
                         request.idempotency_key == answer.idempotency_key

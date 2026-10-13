@@ -7,6 +7,10 @@ import pydantic
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.runner import catalog, inspection
+from vectorops.runner.runner.branching import (
+    Branch as Branch,
+    Accepted as BranchAccepted,
+)
 
 VERSION: typing.Final = 2
 MAX_FRAME: typing.Final = 8 * 1024 * 1024

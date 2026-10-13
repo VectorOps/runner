@@ -36,6 +36,7 @@ from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner import branching
 from vectorops.runner.runner.pause import ExecutionPause
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.resources import ExecutionResources, finish_cleanup
@@ -238,6 +239,12 @@ class WorkflowRunner:
             database = await self._database(project, answer.execution_id)
             return await mailbox.Mailbox(database, self.mailbox_sink).answer(answer)
 
+    async def accept_branch(self, request: branching.Branch) -> branching.Operation:
+        project = await self.project()
+        async with self._writer(project):
+            database = await self._database(project, request.execution_id)
+            return await database.accept_branch(request)
+
     async def stop_unloaded(self, execution_id: str) -> None:
         project = await self.project()
         async with self._writer(project) as store:
@@ -298,6 +305,22 @@ class WorkflowRunner:
                     ).configure(configuration)
                 else:
                     database = await self._database(project, execution_id)
+                    branch = await database.apply_branch()
+                    if branch is not None:
+                        if self.mailbox_sink is not None:
+                            self.mailbox_sink(
+                                {
+                                    "kind": "execution.branch_" + branch.status,
+                                    "execution_id": execution_id,
+                                    "operation_id": branch.id,
+                                    "input_step_id": branch.input_step_id,
+                                    "error": branch.error,
+                                }
+                            )
+                        if branch.status == "failed":
+                            raise branching.BranchConflict(
+                                branch.error or "branch preparation failed"
+                            )
                     record = await database.get_execution()
                     if (
                         workflow_id is not None
@@ -602,7 +625,12 @@ class WorkflowRunner:
                     or identifier == pointer.last_execution_id
                 ):
                     raise
-        return [record for record in records if record.status == "running"]
+        candidates = []
+        for record in records:
+            database = await self._database(await self.project(), record.id)
+            if record.status == "running" or await database.pending_branch():
+                candidates.append(record)
+        return candidates
 
     async def resume(
         self,
