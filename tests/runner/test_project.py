@@ -40,6 +40,44 @@ async def test_default_target_is_project_not_runner_directory(
         assert not config.exists()
 
 
+@pytest.mark.parametrize("directory", [".voc", "custom/runner", ""])
+@pytest.mark.parametrize("explicit_path", [False, True])
+async def test_local_environment_path_defaults(
+    tmp_path: Path, directory: str, explicit_path: bool
+) -> None:
+    workspace = tmp_path / directory
+    workspace.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "separate-project" if explicit_path else tmp_path.resolve()
+    contents = '[environment]\nkind = "local"\n'
+    if explicit_path:
+        contents += f'base_project_path = "{target}"\n'
+    contents += "[environment.processes]\nallow_shell = true\n"
+    config = workspace / "config.toml"
+    config.write_text(contents)
+
+    project = await RunnerProject.open(tmp_path, workspace_directory=directory)
+
+    assert project.config.environment is not None
+    assert project.config.environment.base_project_path == str(target)
+    assert project.config.environment.processes.allow_shell
+    assert project.workspace_path == workspace
+    assert project.data_path == workspace / "data"
+    assert config.read_text() == contents
+
+
+@pytest.mark.parametrize("path", ["", "relative"])
+async def test_explicit_invalid_local_path_is_not_defaulted(
+    tmp_path: Path, path: str
+) -> None:
+    workspace = tmp_path / ".voc"
+    workspace.mkdir()
+    (workspace / "config.toml").write_text(
+        f'[environment]\nkind = "local"\nbase_project_path = "{path}"\n'
+    )
+    with pytest.raises(pydantic.ValidationError):
+        await RunnerProject.open(tmp_path, workspace_directory=".voc")
+
+
 def test_direct_projects_resolve_independent_defaults(tmp_path: Path) -> None:
     config = RunnerConfig()
     first = RunnerProject(tmp_path / "first", config)

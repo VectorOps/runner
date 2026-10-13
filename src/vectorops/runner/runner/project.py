@@ -217,12 +217,21 @@ class Configuration:
             raise ValueError("component configuration is invalid") from None
 
     @staticmethod
-    def read(path: Path) -> RunnerConfig:
+    def read(path: Path, *, root: typing.Optional[Path] = None) -> RunnerConfig:
         try:
             with path.open("rb") as stream:
-                return RunnerConfig.model_validate(tomllib.load(stream))
+                values = tomllib.load(stream)
         except FileNotFoundError:
             return RunnerConfig()
+        environment = values.get("environment")
+        if (
+            root is not None
+            and isinstance(environment, dict)
+            and environment.get("kind") == "local"
+            and "base_project_path" not in environment
+        ):
+            environment["base_project_path"] = str(root.expanduser().absolute())
+        return RunnerConfig.model_validate(values)
 
 
 @dataclass(frozen=True)
@@ -304,7 +313,7 @@ class RunnerProject:
             raise ValueError("workspace directory must remain inside the project root")
         workspace.mkdir(parents=True, exist_ok=True)
         config_path = workspace / "config.toml"
-        config = Configuration.read(config_path)
+        config = Configuration.read(config_path, root=root)
         project = cls(root=root, config=config, workspace_directory=selected)
         for directory in (project.workflows_path, project.data_path):
             if not directory.resolve().is_relative_to(workspace.resolve()):
