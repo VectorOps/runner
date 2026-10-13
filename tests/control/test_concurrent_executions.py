@@ -151,7 +151,7 @@ async def test_shutdown_recovers_all_waiters_but_not_stopped_or_completed(
     assert (await RunnerStateStore(tmp_path / "data").load()).active_execution_ids == []
 
 
-async def test_shutdown_waiter_does_not_suspend_unrelated_work(tmp_path: Path) -> None:
+async def test_shutdown_preserves_waiters_and_running_work(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/flow.py").write_text(
         WORKFLOW + "\n" + sources.read("mailbox_busy.py")
@@ -173,8 +173,8 @@ async def test_shutdown_waiter_does_not_suspend_unrelated_work(tmp_path: Path) -
             ):
                 await asyncio.sleep(0.01)
     async with client.embedded(tmp_path) as connection:
-        assert (await connection.execution(busy.execution_id)).status == "cancelled"
-        assert await connection.current(busy.execution_id) is None
+        assert (await connection.execution(busy.execution_id)).status == "running"
+        assert await connection.current(busy.execution_id) is not None
         assert (await pending(connection, waiter.execution_id))[0] == request
         await connection.answer_input(response(request))
         await settled(connection, waiter.execution_id)

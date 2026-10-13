@@ -61,11 +61,16 @@ async def test_resume_and_filters(tmp_path: Path) -> None:
         await connection.unsubscribe(subscription)
 
 
-async def test_shutdown_cancels_active_execution(tmp_path: Path) -> None:
+async def test_shutdown_preserves_active_execution(tmp_path: Path) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/wait.py").write_text(sources.read("wait.py"))
     async with asyncio.timeout(5):
         async with client.embedded(tmp_path) as connection:
-            await connection.start(
+            accepted = await connection.start(
                 p.Start(reference="wait:main", idempotency_key="start")
             )
+        async with client.embedded(tmp_path) as connection:
+            assert (
+                await connection.execution(accepted.execution_id)
+            ).status == "running"
+            assert await connection.current(accepted.execution_id) is not None

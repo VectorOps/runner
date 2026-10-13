@@ -115,11 +115,15 @@ class RunnerService:
             self.shutdown_requested.set()
             if self.shutdown_mode == "cancel":
                 for identifier, active in self._active.items():
-                    if active.status != "stopping" and self.runner.suspend_inputs(
-                        identifier
-                    ):
-                        self._suspending.add(identifier)
-                    self._stop(identifier)
+                    if active.status == "stopping":
+                        continue
+                    self.runner.request_suspend(identifier)
+                    self._suspending.add(identifier)
+                    self._active[identifier] = active.model_copy(
+                        update={"status": "stopping"}
+                    )
+                    if active.status != "starting":
+                        self._tasks[identifier].cancel()
         try:
             await asyncio.gather(*self._tasks.values())
         finally:

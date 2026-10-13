@@ -7,6 +7,7 @@ import pytest
 from tests.control.test_concurrent_executions import settled
 from tests.control.test_mailbox import pending, response, WORKFLOW
 from tests.fixtures import sources
+from tests.fixtures.probe import ExecutionProbe
 from vectorops.runner.control import client, daemon, protocol as p
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import mailbox
@@ -71,6 +72,107 @@ async def test_stop_before_task_starts_persists_cancellation_and_can_resume(
         )
 
 
+@pytest.mark.parametrize("stop", [False, True])
+async def test_shutdown_during_startup_preserves_only_unstopped_work(
+    tmp_path: Path, stop: bool
+) -> None:
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
+    async with RunnerService(tmp_path) as service:
+        runner = service.runner
+        accepted = p.Accepted.model_validate(
+            await service.dispatch(
+                "executions.start",
+                {"reference": "flow:workflow", "idempotency_key": "start"},
+            )
+        )
+        current = p.Active.model_validate(
+            await service.dispatch(
+                "executions.current", {"execution_id": accepted.execution_id}
+            )
+        )
+        assert current.status == "starting"
+        if stop:
+            await service.dispatch(
+                "executions.stop", {"execution_id": accepted.execution_id}
+            )
+        await asyncio.wait_for(service.aclose(), 5)
+    record = await runner.execution_state(accepted.execution_id)
+    assert record.status == ("cancelled" if stop else "running")
+    async with client.embedded(tmp_path) as connection:
+        if stop:
+            assert await connection.current(accepted.execution_id) is None
+        else:
+            request = (await pending(connection, accepted.execution_id))[0]
+            await connection.answer_input(response(request))
+            await settled(connection, accepted.execution_id)
+            assert (
+                await connection.execution(accepted.execution_id)
+            ).status == "completed"
+
+
+@pytest.mark.parametrize("cancel_host", [False, True])
+async def test_shutdown_recovers_concurrent_children_but_not_explicit_stop(
+    workspace: Path, execution_probe: ExecutionProbe, cancel_host: bool
+) -> None:
+    ready = asyncio.Event()
+    closing = asyncio.Event()
+    accepted: list[p.Accepted] = []
+    terminal: list[str] = []
+
+    async def host() -> None:
+        async with RunnerService(workspace) as service:
+            service.listen(lambda event: terminal.append(str(event["kind"])))
+            for index in range(3):
+                accepted.append(
+                    p.Accepted.model_validate(
+                        await service.dispatch(
+                            "executions.start",
+                            {
+                                "reference": "composed:parallel",
+                                "idempotency_key": str(index),
+                            },
+                        )
+                    )
+                )
+            for _ in range(6):
+                await execution_probe.started.get()
+            await service.dispatch(
+                "executions.stop", {"execution_id": accepted[-1].execution_id}
+            )
+            ready.set()
+            await closing.wait()
+
+    task = asyncio.create_task(host())
+    try:
+        await asyncio.wait_for(ready.wait(), 10)
+        if cancel_host:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 10)
+        else:
+            closing.set()
+            await asyncio.wait_for(task, 10)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert terminal.count("execution.suspended") == 2
+    assert terminal.count("execution.cancelled") == 1
+    assert execution_probe.active == 0
+    execution_probe.gate.set()
+    async with client.embedded(workspace) as connection:
+        for item in accepted[:2]:
+            await settled(connection, item.execution_id)
+            record = await connection.execution(item.execution_id)
+            assert record.status == "completed"
+            assert len(record.checkpoint.heads) == 3
+        assert (
+            await connection.execution(accepted[-1].execution_id)
+        ).status == "cancelled"
+        assert await connection.current(accepted[-1].execution_id) is None
+
+
 async def test_authentication_is_independent_of_execution_and_shutdown(
     tmp_path: Path,
 ) -> None:
@@ -99,7 +201,8 @@ async def test_authentication_is_independent_of_execution_and_shutdown(
             ):
                 await asyncio.sleep(0.01)
     async with client.embedded(tmp_path) as connection:
-        assert (await connection.execution(busy.execution_id)).status == "cancelled"
+        assert (await connection.execution(busy.execution_id)).status == "running"
+        assert await connection.current(busy.execution_id) is not None
         assert (await connection.execution(waiting.execution_id)).status == "failed"
         assert await connection.pending_authentication() == []
 

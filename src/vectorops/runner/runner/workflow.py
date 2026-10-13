@@ -193,24 +193,27 @@ class WorkflowRunner:
                     self._suspending.discard(execution_id)
                     self._stop_requests.discard(execution_id)
 
+    def request_suspend(self, execution_id: str) -> None:
+        """Preserve execution state when interrupting work for server shutdown."""
+        self._suspending.add(execution_id)
+        owner = self._mailboxes.get(execution_id)
+        if owner is not None:
+            owner.suspending = True
+            if owner.pause is not None:
+                owner.pause.frozen = True
+
     def suspend_inputs(self, execution_id: typing.Optional[str] = None) -> bool:
         """Preserve durable waits when shutting down, unlike an explicit stop."""
         if execution_id is not None:
             owner = self._mailboxes.get(execution_id)
             waiting = owner is not None and bool(owner.waiting)
-            if waiting and owner is not None:
-                owner.suspending = True
-                if owner.pause is not None:
-                    owner.pause.frozen = True
-                self._suspending.add(execution_id)
+            if waiting:
+                self.request_suspend(execution_id)
             return waiting
         waiting = any(owner.waiting for owner in self._mailboxes.values())
         if waiting:
-            for identifier, owner in self._mailboxes.items():
-                owner.suspending = True
-                if owner.pause is not None:
-                    owner.pause.frozen = True
-                self._suspending.add(identifier)
+            for identifier in self._mailboxes:
+                self.request_suspend(identifier)
             self.stop()
         return waiting
 
@@ -390,10 +393,15 @@ class WorkflowRunner:
                     pause = ExecutionPause(database, checkpointer.persist, changed)
                     owner = mailbox.Mailbox(database, self.mailbox_sink, pause)
                     self._mailboxes[execution_id] = owner
+                    if execution_id in self._suspending:
+                        self.request_suspend(execution_id)
                     try:
                         if on_started is not None:
                             on_started()
-                        if execution_id in self._stop_requests:
+                        if (
+                            execution_id in self._stop_requests
+                            or execution_id in self._suspending
+                        ):
                             raise asyncio.CancelledError
                         async with checkpointer.tracking():
                             result = await self._run(

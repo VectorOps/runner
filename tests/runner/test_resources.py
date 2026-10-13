@@ -128,10 +128,9 @@ async def test_service_stop_closes_processes_before_terminal_event(
         configured_workspace, config_dir=tmp_path / "global"
     ) as service:
         stopped = asyncio.Event()
+        terminal = "execution.suspended" if shutdown else "execution.cancelled"
         service.listen(
-            lambda event: (
-                stopped.set() if event.get("kind") == "execution.cancelled" else None
-            )
+            lambda event: (stopped.set() if event.get("kind") == terminal else None)
         )
         await service.dispatch(
             "executions.start",
