@@ -13,6 +13,7 @@ from vectorops.runner import models
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
+from vectorops.runner.runner import inbox
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.streaming import StreamItem
 
@@ -92,6 +93,7 @@ class WorkflowExecutionContext:
     project: RunnerProject
     workflow: models.Workflow
     submitter: OperationSubmitter
+    inboxes: typing.Optional[inbox.Registry] = None
 
     @property
     def data_path(self) -> Path:

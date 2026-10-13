@@ -31,6 +31,7 @@ class Workflow(_JsonModel):
     kind: str = pydantic.Field(default="workflow", min_length=1)
     version: int = pydantic.Field(default=1, ge=1, strict=True)
     tool_policy_version: typing.Optional[typing.Literal[1]] = None
+    inbox_version: typing.Optional[typing.Literal[1]] = None
     created_at: typing.Optional[str] = None
     name: typing.Optional[str] = pydantic.Field(
         default=None, min_length=1, max_length=120

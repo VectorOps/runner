@@ -12,6 +12,7 @@ import typing
 import pydantic
 
 from vectorops.runner import input_schema
+from vectorops.runner.runner import inbox as inbox_api
 from vectorops.runner.runner.execution_state import timestamp
 
 if typing.TYPE_CHECKING:
@@ -170,8 +171,11 @@ class Mailbox:
         store: MailboxStore,
         sink: typing.Optional[EventSink] = None,
         pause: typing.Optional[ExecutionPause] = None,
+        *,
+        inboxes: typing.Optional[inbox_api.Registry] = None,
     ) -> None:
         self.store = store
+        self.inboxes = inboxes
         self.sink = sink
         self.pause = pause
         self.suspending = False

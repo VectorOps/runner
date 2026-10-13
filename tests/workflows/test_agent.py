@@ -10,7 +10,7 @@ from jsonschema.exceptions import ValidationError
 from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
 from tests.fixtures import sources
-from tests.workflows.test_chat import reply
+from tests.fixtures.user_input import reply
 from vectorops.runner.api import tools
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol

@@ -21,6 +21,7 @@ from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import execution_state, history_query, mailbox
 from vectorops.runner.runner import inspection
+from vectorops.runner.runner import inbox
 
 
 class RunnerClient:
@@ -307,6 +308,46 @@ class RunnerClient:
 
     async def unsubscribe(self, subscription_id: str) -> None:
         await self.request("events.unsubscribe", {"subscription_id": subscription_id})
+
+    async def list_mailboxes(self, execution_id: str) -> inbox.Listing:
+        return inbox.Listing.model_validate(
+            await self.request("mailbox.inboxes.list", {"execution_id": execution_id})
+        )
+
+    async def inspect_mailbox(self, address: inbox.Address) -> inbox.Status:
+        return inbox.Status.model_validate(
+            await self.request(
+                "mailbox.inboxes.inspect", address.model_dump(mode="json")
+            )
+        )
+
+    async def send_message(self, request: inbox.Send) -> inbox.Message:
+        return inbox.Message.model_validate(
+            await self.request("mailbox.inboxes.send", request.model_dump(mode="json"))
+        )
+
+    async def list_messages(self, query: inbox.MessageQuery) -> inbox.MessagePage:
+        return inbox.MessagePage.model_validate(
+            await self.request(
+                "mailbox.inboxes.messages", query.model_dump(mode="json")
+            )
+        )
+
+    async def remove_message(
+        self, reference: inbox.MessageRef
+    ) -> typing.Optional[inbox.Message]:
+        result = await self.request(
+            "mailbox.inboxes.remove", reference.model_dump(mode="json")
+        )
+        return None if result is None else inbox.Message.model_validate(result)
+
+    async def pop_message(
+        self, address: inbox.Address
+    ) -> typing.Optional[inbox.Message]:
+        result = await self.request(
+            "mailbox.inboxes.pop", address.model_dump(mode="json")
+        )
+        return None if result is None else inbox.Message.model_validate(result)
 
     async def pending_authentication(self) -> list[am.Requirement]:
         result = await self.request("auth.list")

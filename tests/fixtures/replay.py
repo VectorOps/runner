@@ -9,6 +9,7 @@ from vectorops.runner import models, tool_policy
 from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.events import StepEventSink
+from vectorops.runner.runner import inbox
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.project import RunnerConfig, RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
@@ -25,6 +26,7 @@ async def run(
     policy: Optional[tool_policy.ToolPolicy] = None,
     event_sink: Optional[StepEventSink] = None,
     project: Optional[RunnerProject] = None,
+    inboxes: Optional[inbox.Registry] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -63,6 +65,7 @@ async def run(
         project,
         workflow,
         session,
+        inboxes=inboxes,
     )
     token = composition._CURRENT_CONTEXT.set(context)
     try:

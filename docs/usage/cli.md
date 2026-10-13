@@ -93,11 +93,11 @@ approval or enable shell execution.
 
 This foreground CLI owns the workspace writer lock. For concurrent independent executions in one workspace, run a [daemon](daemon.md) and use its [execution-oriented control API](../reference/control-protocol.md#concurrent-execution-lifecycle) instead of launching competing foreground writers.
 
-## Built-in chat
+## Built-in interactive workflow
 
-`builtin:chat` needs no workspace Python file. It requests a user message, runs
-the LLM, and repeats with the same conversation history until stopped. It exposes
-no tools or subagents. Text and images use the existing typed chat input contract.
+`builtin:agent` needs no workspace Python file. It requests a user message, runs
+the coding agent, and repeats with the same conversation history until stopped.
+Text and images use the existing typed chat input contract.
 
 Configure models in `<project>/.voc/config.toml` by default, using model IDs supported by your
 provider and [configured credentials](daemon.md):
@@ -114,8 +114,8 @@ These fields are optional. An unset tier inherits `components.llm.model`; an uns
 thinking level inherits `components.llm.reasoning`. At least the selected tier's
 model or the fallback model must be configured before generation. Thinking levels
 are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; provider/model support
-still applies. Chat and the coding agent read shared defaults through
-`get_config(ctx, ...)` after each user message, before generating that turn.
+still applies. The coding agent resolves its selected LLM profile before
+generating each turn.
 Runtime model and thinking-level overrides therefore apply to the next turn,
 without clearing conversation history. Completed reads replay their recorded
 values; new turns read current effective settings. TOML edits require runner restart.
@@ -126,11 +126,11 @@ Start a daemon in one terminal:
 uv run vops-runner --project /path/to/workspace daemon serve --port 8765
 ```
 
-From another terminal, discover and start chat:
+From another terminal, discover and start the coding agent:
 
 ```bash
-uv run vops-runner client --port 8765 workflow show builtin:chat
-uv run vops-runner client --port 8765 execution start builtin:chat
+uv run vops-runner client --port 8765 workflow show builtin:agent
+uv run vops-runner client --port 8765 execution start builtin:agent
 ```
 
 The workflow argument `model_tier` defaults to `strong`; pass
@@ -145,14 +145,14 @@ uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value
 Use `execution watch EXECUTION_ID` in a separate client before sending input to
 observe live response events. Each turn creates a new request ID. End the loop
 with `execution stop EXECUTION_ID`. The foreground command
-`uv run vops-runner --project /path/to/workspace start builtin:chat` also resolves
+`uv run vops-runner --project /path/to/workspace start builtin:agent` also resolves
 the workflow, but it does not provide a stdin chat interface; use the daemon/client
 flow for interactive conversations.
 
 Built-in references remain `builtin:name` in descriptors and execution history.
 Only explicitly registered names are accepted; unknown names do not fall back to
-files or arbitrary Python imports. Registered workflows are `builtin:chat`,
-`builtin:agent`, and `builtin:helper`.
+files or arbitrary Python imports. Registered workflows are `builtin:agent`
+and `builtin:helper`.
 
 ## Coding agent and helper
 
@@ -186,7 +186,7 @@ model does not support these options. Defaults and precedence are:
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| Agent input `model_tier` | `strong` | Selects a shared model tier, as in chat |
+| Agent input `model_tier` | `strong` | Selects the LLM profile for the parent |
 | `workflows.agent.agents` | `["builtin:helper"]` | Default child references; `[]` removes default `run_agent`; explicit collection configuration takes precedence |
 | `workflows.agent.tool_collection` | `agent` | Named tool collection for the parent |
 | `workflows.helper.tool_collection` | `helper` | Named tool collection for the helper |
@@ -207,7 +207,7 @@ Start the parent against a running daemon:
 uv run vops-runner client --port 8765 execution start builtin:agent
 ```
 
-Use the same `input list` and typed `input send --value` flow as chat. To start the
+Use the `input list` and typed `input send --value` flow above. To start the
 helper directly:
 
 ```bash
@@ -242,7 +242,6 @@ replaces its role instructions, so include any restrictions you want to retain.
 Neither setting changes tools or approval policy. Prompt settings are recorded at
 invocation and reused on resume; editing config does not rewrite an active
 conversation.
-These settings do not affect `builtin:chat`.
 
 The direct configuration-read sequence replaces the old settings-loader sequence.
 Start new built-in executions when upgrading from that implementation; old activity

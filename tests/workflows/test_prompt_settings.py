@@ -9,7 +9,7 @@ from tests.control.test_client_commands import pending, settled
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from tests.workflows.test_agent import configure
-from tests.workflows.test_chat import reply
+from tests.fixtures.user_input import reply
 from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import provider

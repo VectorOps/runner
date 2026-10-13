@@ -249,6 +249,95 @@ workflow-side tools record a gate activity before durable child operations.
 See [Tool approval configuration](../config/components.md#tool-approval) for
 workspace defaults, extension points, and history compatibility.
 
+## Conversation inboxes and LLM steering
+
+Conversation inboxes accept user messages without a pending input request. New
+root `builtin:agent` executions pass an addressed `steer` inbox
+to their user-facing LLM; children and helper LLMs do not inherit the root queue.
+Existing executions without the recorded `inbox_version: 1` configuration skip
+steering reads so historical activity positions remain replayable. Blocking user
+input remains unchanged and uses `llm.request_user_message()`.
+
+| Method | Parameters | Result |
+| --- | --- | --- |
+| `mailbox.inboxes.list` | `execution_id` | `mailboxes`, each with `address`, `status`, and `queued_messages` |
+| `mailbox.inboxes.inspect` | Inbox address | Inbox status and queue count |
+| `mailbox.inboxes.send` | Inbox address, `payload` | Enqueued message with `id`, `created_at`, and `payload` |
+| `mailbox.inboxes.messages` | Inbox address, optional `after`, `limit` | FIFO `messages` and nullable `next_after` |
+| `mailbox.inboxes.remove` | Inbox address, `message_id` | Removed message, or null if it is no longer queued |
+| `mailbox.inboxes.pop` | Inbox address | Oldest queued message, or null if empty |
+
+An inbox address contains required `execution_id`, `workflow_id`, and
+`conversation_id` fields. Discover the address with `list_mailboxes`; sending never
+creates an inbox. Unknown destinations, closed executions, and stopping
+executions return `mailbox_conflict`. Branch transitions return
+`execution_conflict`. Queue counts and listings are snapshots, not reservations.
+Listing defaults to 100 messages with a maximum of 500. `after` is a queued
+message ID; a removed or consumed cursor returns `mailbox_conflict`.
+
+```python
+from vectorops.runner.api.chat_input import UserMessageInput
+from vectorops.runner.runner.inbox import Send, MessageRef
+
+async def steer(host, execution_id):
+    listing = await host.list_mailboxes(execution_id)
+    address = listing.mailboxes[0].address
+    message = await host.send_message(Send(
+        **address.model_dump(),
+        payload=UserMessageInput.model_validate({
+            "content": [{"type": "text", "text": "Focus on the failing test first."}]
+        }),
+    ))
+    return await host.remove_message(MessageRef(
+        **address.model_dump(), message_id=message.id
+    ))
+```
+
+Payloads use the existing bounded user-only chat contract: text and inline image
+blocks, not assistant messages or tool approvals. Sending acknowledges enqueue,
+not LLM injection. Sends have no idempotency receipts; retrying sends another
+message. Queue state is in memory and is discarded on restart, stop, or branch
+switch. Messages consumed through a completed activity are reconstructed through
+normal history replay; replayed drains do not consume fresh messages, including
+when their recorded result is empty.
+
+The LLM drains its inbox before generation and between complete tool rounds. It
+also checks before returning a final response when another round is available;
+queued steering causes another generation without returning to the workflow.
+Steering never cancels running tools or an in-flight model request and never
+resets the round limit. Input remaining at the limit stays queued until a later
+LLM invocation. `LLM.generate` drains only before its single generation.
+Steering sent while the workflow waits for user input stays queued; it does not
+answer or wake that input request. Use `mailbox.respond` for idle user input.
+
+Host removal and LLM consumption use the same queue owner: whichever removes a
+message first wins. Host removal cannot retract input already injected into model
+context. `mailbox.enqueued` and `mailbox.removed` events carry `execution_id`,
+`address`, `message_id`, `reason`, and the resulting `queued_messages` count.
+Removal reasons are `llm_drain`, `workflow_receive`, and `host_remove`; enqueue
+reason is null. These advisory queue events omit payloads; consumed messages still
+appear in normal activity history and its step events.
+
+Custom workflows pass an addressed inbox to the LLM without changing their input
+loop:
+
+```python
+from vectorops.runner.api import inbox, llm
+
+conversation = llm.LLM(
+    "agent",
+    inbox=inbox.Inbox("steer", workflow_id=ctx.workflow.id),
+)
+```
+
+`workflow_id` defaults to the current workflow ID. Handles targeting the same
+queue share it; construction is not exclusive consumer registration.
+`messages.drain()` returns currently queued user payloads without waiting.
+An absent queue or unavailable inbox registry yields no messages. Root queue
+registration and routing stay inside the inbox owner; subagents cannot consume
+the root queue. The LLM performs all reads and user-message injection internally.
+Normal input requests and answers are independent of steering.
+
 ## Related
 
 - [Provider authentication RPCs and global configuration](../config/authentication.md)

@@ -8,11 +8,10 @@ import pydantic
 
 from vectorops.runner.api.composition import WorkflowDefinition
 from vectorops.runner.workflows.agent import agent
-from vectorops.runner.workflows.chat import chat
 from vectorops.runner.workflows.helper import helper
 
 WORKFLOWS: Final[Mapping[str, WorkflowDefinition[..., pydantic.JsonValue]]] = (
-    MappingProxyType({"agent": agent, "chat": chat, "helper": helper})
+    MappingProxyType({"agent": agent, "helper": helper})
 )
 
 

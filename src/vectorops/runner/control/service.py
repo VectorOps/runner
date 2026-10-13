@@ -20,6 +20,7 @@ from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.runner import events, history_query, mailbox
 from vectorops.runner.runner import inspection
+from vectorops.runner.runner import inbox
 from vectorops.runner.runner import branching
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.resources import finish_cleanup
@@ -743,6 +744,56 @@ class RunnerService:
                     mailbox.RequestQuery.model_validate(params)
                 )
             )
+        if method.startswith("mailbox.inboxes."):
+            execution = inbox.Execution.model_validate(
+                {"execution_id": params.get("execution_id")}
+            )
+            async with self._lock:
+                if execution.execution_id in self._branches:
+                    raise p.RemoteError(
+                        "execution_conflict", "branch transition is in progress"
+                    )
+                active = self._active.get(execution.execution_id)
+                if active is None or active.status == "stopping":
+                    raise p.RemoteError(
+                        "mailbox_conflict", "execution inboxes are not active"
+                    )
+                if self.shutdown_requested.is_set() and self.shutdown_mode != "drain":
+                    raise p.RemoteError("runner_stopping", "runner is shutting down")
+                try:
+                    inbox_result: typing.Optional[pydantic.BaseModel]
+                    if method == "mailbox.inboxes.list":
+                        selected_inboxes = inbox.Execution.model_validate(params)
+                        inbox_result = self.runner.list_mailboxes(
+                            selected_inboxes.execution_id
+                        )
+                    elif method == "mailbox.inboxes.inspect":
+                        inbox_result = self.runner.inspect_mailbox(
+                            inbox.Address.model_validate(params)
+                        )
+                    elif method == "mailbox.inboxes.send":
+                        inbox_result = self.runner.send_message(
+                            inbox.Send.model_validate(params)
+                        )
+                    elif method == "mailbox.inboxes.messages":
+                        inbox_result = self.runner.list_messages(
+                            inbox.MessageQuery.model_validate(params)
+                        )
+                    elif method == "mailbox.inboxes.remove":
+                        inbox_result = self.runner.remove_message(
+                            inbox.MessageRef.model_validate(params)
+                        )
+                    elif method == "mailbox.inboxes.pop":
+                        inbox_result = self.runner.pop_message(
+                            inbox.Address.model_validate(params)
+                        )
+                    else:
+                        raise p.RemoteError(
+                            "unsupported_method", "unknown method: " + method
+                        )
+                    return None if inbox_result is None else p.json_value(inbox_result)
+                except inbox.InboxConflict as exc:
+                    raise p.RemoteError("mailbox_conflict", str(exc)) from exc
         if method == "mailbox.get":
             return p.json_value(
                 await self.runner.input_request(

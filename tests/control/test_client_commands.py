@@ -73,7 +73,6 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
             "flow:child",
             "flow:main",
             "builtin:agent",
-            "builtin:chat",
             "builtin:helper",
         ]
         assert rest.next_after is None
@@ -271,7 +270,7 @@ async def test_cli_over_tcp_and_shell_exit_does_not_stop(
                 namespace=cli.Arguments(),
             )
             await cli.dispatch(args)
-            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 6
+            assert len(json.loads(capsys.readouterr().out)["workflows"]) == 5
             async with await client.RunnerClient.tcp(port, token) as connection:
                 accepted = await connection.start(
                     p.Start(reference="flow:main", idempotency_key="start")

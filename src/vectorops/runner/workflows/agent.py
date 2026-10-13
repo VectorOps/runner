@@ -3,6 +3,7 @@
 import pydantic
 
 from vectorops.runner.api import composition, llm, tools
+from vectorops.runner.api import inbox
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.workflows import context, prompts, settings
@@ -31,6 +32,7 @@ async def agent(
         "agent",
         profile=model_tier.value,
         system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
+        inbox=inbox.Inbox("steer", workflow_id=ctx.workflow.id),
     )
     while True:
         conversation.add_message(await llm.request_user_message())

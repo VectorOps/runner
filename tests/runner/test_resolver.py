@@ -150,18 +150,18 @@ async def test_same_size_update_does_not_use_timestamp_bytecode_cache(
 async def test_builtin_resolution_and_descriptor(tmp_path: Path) -> None:
     resolver = WorkflowResolver(tmp_path / "absent")
     with patch.object(Path, "read_bytes", side_effect=AssertionError("local read")):
-        entry = await resolver.resolve("builtin:chat")
-        descriptor = await resolver.describe("builtin:chat")
-        assert descriptor.reference == "builtin:chat"
-        assert descriptor.name == "Chat"
-        assert descriptor.kind == "builtin.chat"
+        entry = await resolver.resolve("builtin:agent")
+        descriptor = await resolver.describe("builtin:agent")
+        assert descriptor.reference == "builtin:agent"
+        assert descriptor.name == "Coding agent"
+        assert descriptor.kind == "builtin.agent"
         descriptor.validate_input({})
         descriptor.validate_input({"model_tier": "weak"})
         descriptor.input_schema.clear()
-        assert (await resolver.describe("builtin:chat")).input_schema
-        await resolver.invalidate("builtin:chat")
+        assert (await resolver.describe("builtin:agent")).input_schema
+        await resolver.invalidate("builtin:agent")
         await resolver.invalidate()
-        assert await resolver.resolve("builtin:chat") is entry
+        assert await resolver.resolve("builtin:agent") is entry
 
 
 async def test_unknown_builtin_never_falls_back(tmp_path: Path) -> None:
@@ -183,13 +183,12 @@ async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
     first = await resolver.discover(limit=1)
     assert [item.reference for item in first.workflows] == ["zzz:double"]
     assert first.next_after == "zzz:double"
-    second = await resolver.discover(after=first.next_after, limit=3)
+    second = await resolver.discover(after=first.next_after, limit=2)
     assert [item.reference for item in second.workflows] == [
         "aaa:double",
         "builtin:agent",
-        "builtin:chat",
     ]
-    assert second.next_after == "builtin:chat"
+    assert second.next_after == "builtin:agent"
     last = await resolver.discover(after=second.next_after, limit=1)
     assert [item.reference for item in last.workflows] == ["builtin:helper"]
     assert last.next_after is None
@@ -227,7 +226,6 @@ async def test_builtin_catalog_without_local_directory(tmp_path: Path) -> None:
     catalog = await WorkflowResolver(tmp_path / "absent").discover()
     assert [item.reference for item in catalog.workflows] == [
         "builtin:agent",
-        "builtin:chat",
         "builtin:helper",
     ]
     assert catalog.errors == []

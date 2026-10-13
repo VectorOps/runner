@@ -59,6 +59,7 @@ class WorkflowExecutor:
         configuration = configuration.model_copy(
             update={
                 "tool_policy_version": 1,
+                "inbox_version": 1,
                 "created_at": configuration.created_at or timestamp(),
             }
         )
@@ -104,7 +105,19 @@ class WorkflowExecutor:
             resources=self.resources,
             mcp=self.mcp,
         )
-        context = WorkflowExecutionContext(self.project, configuration, session)
+        inboxes = self.mailbox.inboxes if self.mailbox is not None else None
+        context = WorkflowExecutionContext(
+            self.project,
+            configuration,
+            session,
+            inboxes=(
+                inboxes
+                if inboxes is not None
+                and inboxes.root_workflow_id == configuration.id
+                and configuration.inbox_version == 1
+                else None
+            ),
+        )
         try:
             entry = self._configured.pop(configuration.id, None)
             if entry is None:

@@ -36,6 +36,7 @@ from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
+from vectorops.runner.runner import inbox
 from vectorops.runner.runner import branching
 from vectorops.runner.runner.pause import ExecutionPause
 from vectorops.runner.runner.llm import RunnerLLM
@@ -259,6 +260,41 @@ class WorkflowRunner:
             )
         return self._naming
 
+    def inboxes(self, execution_id: str) -> inbox.Registry:
+        owner = self._mailboxes.get(execution_id)
+        if (
+            owner is None
+            or owner.inboxes is None
+            or owner.suspending
+            or execution_id in self._stop_requests
+        ):
+            raise inbox.InboxConflict("execution inboxes are not active")
+        return owner.inboxes
+
+    def list_mailboxes(self, execution_id: str) -> inbox.Listing:
+        return self.inboxes(execution_id).listing()
+
+    def inspect_mailbox(self, address: inbox.Address) -> inbox.Status:
+        return self.inboxes(address.execution_id).get(address).inspect()
+
+    def send_message(self, request: inbox.Send) -> inbox.Message:
+        return self.inboxes(request.execution_id).get(request).send(request.payload)
+
+    def list_messages(self, query: inbox.MessageQuery) -> inbox.MessagePage:
+        return self.inboxes(query.execution_id).get(query).messages(query)
+
+    def remove_message(
+        self, reference: inbox.MessageRef
+    ) -> typing.Optional[inbox.Message]:
+        return (
+            self.inboxes(reference.execution_id)
+            .get(reference)
+            .remove(reference.message_id)
+        )
+
+    def pop_message(self, address: inbox.Address) -> typing.Optional[inbox.Message]:
+        return self.inboxes(address.execution_id).get(address).pop()
+
     async def accept_branch(self, request: branching.Branch) -> branching.Operation:
         project = await self.project()
         async with self._writer(project):
@@ -435,7 +471,12 @@ class WorkflowRunner:
                             )
 
                     pause = ExecutionPause(database, checkpointer.persist, changed)
-                    owner = mailbox.Mailbox(database, self.mailbox_sink, pause)
+                    queues = inbox.Registry(
+                        execution_id, record.root_workflow_id, self.mailbox_sink
+                    )
+                    owner = mailbox.Mailbox(
+                        database, self.mailbox_sink, pause, inboxes=queues
+                    )
                     self._mailboxes[execution_id] = owner
                     if execution_id in self._suspending:
                         self.request_suspend(execution_id)
@@ -493,6 +534,7 @@ class WorkflowRunner:
                         await checkpointer.persist("failed")
                         raise
                     finally:
+                        queues.close()
                         self._mailboxes.pop(execution_id, None)
                     await database.cancel_inputs()
                     await checkpointer.persist("completed")

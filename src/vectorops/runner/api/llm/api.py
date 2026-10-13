@@ -12,6 +12,7 @@ import connect
 import pydantic
 
 from vectorops.runner.api import composition as c
+from vectorops.runner.api import inbox as inbox_api
 from vectorops.runner.api.llm import models, provider, tools as tool_api
 from vectorops.runner.api.llm import invocation
 from vectorops.runner.api.llm import compaction as compaction_api
@@ -48,6 +49,7 @@ class LLM:
         ] = models.Unset.VALUE,
         retry: Optional[models.RetryPolicy] = None,
         raise_tool_errors: bool = False,
+        inbox: Optional[inbox_api.Inbox] = None,
         **overrides: typing.Unpack[models.SettingsParameters],
     ) -> None:
         context = c.workflow_context()
@@ -69,6 +71,7 @@ class LLM:
         self._compaction_history = compaction_api.History()
         self._usage = connect.Usage()
         self._busy = False
+        self._inbox = inbox
 
     def _check_context(self) -> None:
         if c.workflow_context() is not self._context:
@@ -294,7 +297,15 @@ class LLM:
     ) -> connect.AssistantMessage:
         with self._mutation():
             await self._configure()
+            await self._steer()
             return await self._round(tools)
+
+    async def _steer(self) -> bool:
+        if self._inbox is None:
+            return False
+        messages = await self._inbox.drain()
+        self._messages.extend(message.to_message() for message in messages)
+        return bool(messages)
 
     async def run(
         self,
@@ -336,11 +347,14 @@ class LLM:
             for index in range(limit):
                 if index:
                     await self._configure()
+                await self._steer()
                 response = await self._round(definitions)
                 calls = [
                     block for block in response.content if block.type == "tool_call"
                 ]
                 if not calls:
+                    if index + 1 < limit and await self._steer():
+                        continue
                     return response
                 results = await asyncio.gather(
                     *(

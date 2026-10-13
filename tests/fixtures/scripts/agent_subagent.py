@@ -4,12 +4,12 @@ from vectorops.runner.api import llm
 
 
 async def main(ctx: object) -> pydantic.JsonValue:
-    tool = await llm.subagent_tool(["builtin:chat"])
+    tool = await llm.subagent_tool(["builtin:agent"])
     return (
         await llm.invoke_tool(
             tool,
             connect.ToolCallBlock(
-                id="chat", name="run_agent", arguments={"reference": "builtin:chat"}
+                id="agent", name="run_agent", arguments={"reference": "builtin:agent"}
             ),
         )
     ).model_dump(mode="json")

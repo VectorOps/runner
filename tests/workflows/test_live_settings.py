@@ -1,40 +1,25 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
 from tests.workflows.test_agent import configure
-from tests.workflows.test_chat import reply
+from tests.fixtures.user_input import reply
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
 from vectorops.runner.runner.workflow import WorkflowRunner
 
 
-@pytest.mark.parametrize("reference", ["builtin:chat", "builtin:agent"])
-async def test_model_changes_between_turns_and_replay(
-    tmp_path: Path, reference: str
-) -> None:
+async def test_model_changes_between_turns_and_replay(tmp_path: Path) -> None:
     configure(tmp_path, tmp_path, "[components.workflows.agent]\nagents = []\n")
-    defaults = (
-        "llm.profiles.strong" if reference == "builtin:agent" else "workflows.defaults"
-    )
-    model_key = (
-        f"{defaults}.model"
-        if reference == "builtin:agent"
-        else f"{defaults}.strong_model"
-    )
-    reasoning_key = (
-        f"{defaults}.reasoning.effort"
-        if reference == "builtin:agent"
-        else f"{defaults}.thinking_level"
-    )
+    defaults = "llm.profiles.strong"
+    model_key = f"{defaults}.model"
+    reasoning_key = f"{defaults}.reasoning.effort"
     backend = FakeProvider([answer("first"), answer("second"), answer("third")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
             accepted = await connection.start(
-                protocol.Start(reference=reference, idempotency_key="start")
+                protocol.Start(reference="builtin:agent", idempotency_key="start")
             )
             request = await pending(connection, accepted.execution_id)
             await connection.set_configuration(model_key, "first-model")
