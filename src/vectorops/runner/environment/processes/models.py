@@ -60,9 +60,7 @@ class ShellCommand(Model):
     script: str = pydantic.Field(min_length=1, pattern=r"^[^\x00]*$")
 
 
-Command = typing.Annotated[
-    typing.Union[ArgvCommand, ShellCommand], pydantic.Field(discriminator="kind")
-]
+Command = typing.Union[ArgvCommand, ShellCommand]
 
 
 class ExecRequest(Model):

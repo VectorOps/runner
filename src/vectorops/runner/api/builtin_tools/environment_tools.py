@@ -46,8 +46,9 @@ def exec_tool(
 
     return tools.Tool(
         "exec",
-        "Execute a command in the target environment. Use command kind argv with an argv list "
-        "for rg, rg --files, and other programs. Shell scripts require environment allow_shell. "
+        "Execute a command in the target environment. Provide exactly one of command.argv "
+        "(an argument list for direct execution) or command.script (a shell script). "
+        "command.kind is optional. Shell scripts require environment allow_shell. "
         "Returns bounded output and a process_id/cursor; poll running processes for more output. "
         "Cancellation of this call does not kill the process.",
         processes.ExecRequest,

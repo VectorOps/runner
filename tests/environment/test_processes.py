@@ -57,6 +57,60 @@ async def finish(
     return result, data
 
 
+@pytest.mark.parametrize("explicit_kind", [False, True])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (
+            {"argv": ["git", "status", "--short"]},
+            m.ArgvCommand(argv=["git", "status", "--short"]),
+        ),
+        ({"script": "git status --short"}, m.ShellCommand(script="git status --short")),
+    ],
+)
+def test_exec_command_optional_kind(
+    value: dict[str, pydantic.JsonValue], expected: m.Command, explicit_kind: bool
+) -> None:
+    value = dict(value)
+    if explicit_kind:
+        value["kind"] = expected.kind
+    request = m.ExecRequest.model_validate({"command": value})
+    assert request.command == expected
+    assert m.ExecRequest.model_validate_json(request.model_dump_json()) == request
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"kind": "argv"},
+        {"kind": "shell"},
+        {"argv": ["git"], "script": "git"},
+        {"kind": "argv", "argv": ["git"], "script": "git"},
+        {"kind": "shell", "argv": ["git"], "script": "git"},
+        {"kind": "shell", "argv": ["git"]},
+        {"kind": "argv", "script": "git"},
+        {"kind": "unknown", "argv": ["git"]},
+        {"argv": []},
+        {"script": ""},
+    ],
+)
+def test_invalid_exec_command(value: dict[str, pydantic.JsonValue]) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        m.ExecRequest.model_validate({"command": value})
+
+
+def test_exec_command_schema_has_no_required_discriminator() -> None:
+    schema = m.ExecRequest.model_json_schema()
+    command_schema = schema["properties"]["command"]
+    assert "discriminator" not in command_schema
+    assert len(command_schema["anyOf"]) == 2
+    for name, field in (("ArgvCommand", "argv"), ("ShellCommand", "script")):
+        variant = schema["$defs"][name]
+        assert variant["required"] == [field]
+        assert variant["additionalProperties"] is False
+
+
 def test_exec_timeout_defaults_and_schema() -> None:
     request = m.ExecRequest(command=command("noop"))
     assert request.yield_timeout_ms == 60000
