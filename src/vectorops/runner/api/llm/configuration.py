@@ -9,6 +9,10 @@ from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import models
 
+_PROFILE_CATALOG_ADAPTER: typing.Final = pydantic.TypeAdapter(
+    dict[str, dict[str, pydantic.JsonValue]]
+)
+
 
 def explicit_options(
     settings: typing.Optional[
@@ -53,20 +57,32 @@ def _merge(
 
 async def resolve_configuration(
     supplied: dict[str, pydantic.JsonValue],
+    *,
+    profile: typing.Optional[str] = None,
 ) -> models.Configuration:
     """Read one recorded snapshot before interpreting LLM-specific policy."""
     values = await get_config(composition.workflow_context(), "llm", {})
     if not isinstance(values, dict):
         raise ValueError("configuration llm must be a mapping")
-    return models.Configuration.model_validate(_merge(values, supplied))
+    defaults = dict(values)
+    profiles = _PROFILE_CATALOG_ADAPTER.validate_python(defaults.pop("profiles", {}))
+    if profile is not None:
+        if profile not in profiles:
+            raise ValueError(f"unknown LLM profile: {profile!r}")
+        defaults = _merge(defaults, profiles[profile])
+    return models.Configuration.model_validate(_merge(defaults, supplied))
 
 
 async def resolve_settings(
     settings: typing.Optional[
         typing.Union[models.Settings, models.SettingsOverrides]
     ] = None,
+    *,
+    profile: typing.Optional[str] = None,
     **overrides: typing.Unpack[models.SettingsParameters],
 ) -> models.Settings:
     """Resolve generation settings for workflow-side LLM helpers."""
-    resolved = await resolve_configuration(explicit_options(settings, **overrides))
+    resolved = await resolve_configuration(
+        explicit_options(settings, **overrides), profile=profile
+    )
     return resolved.generation_settings()

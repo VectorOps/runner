@@ -222,7 +222,8 @@ Compaction decisions and generation within one round share that snapshot.
 The round limit is resolved once at the start of `run()` and remains fixed for
 that invocation; the next `run()` can adopt a changed limit.
 
-LLM precedence is built-in defaults, workspace values, then explicit options.
+LLM precedence is built-in defaults, workspace values, the selected profile,
+then explicit options.
 Its owner merges nested mappings recursively; scalars and lists replace lower
 layers. Explicit `None` clears optional settings rather than inheriting them.
 Pydantic option models contribute only explicitly supplied fields. Pydantic here
@@ -253,21 +254,24 @@ and cannot perform a recorded read.
 
 `LLM.set_settings(SettingsOverrides(...))` replaces explicit generation options
 without clearing messages, usage, or compaction history. Omitted fields revert to
-workspace inheritance rather than retaining old overrides. Explicit compaction
-and retry policies are preserved. Call it between generations; overlapping
-mutations are rejected. `LLM.settings` still reports the last resolved generation
+profile and workspace inheritance rather than retaining old overrides. Profile
+selection and explicit compaction and retry policies are preserved. Call it
+between generations; overlapping mutations are rejected. `LLM.settings` still
+reports the last resolved generation
 until the next call.
 
-Built-in chat and coding-agent workflows read `workflows.defaults` directly with
-`get_config(ctx, ..., model=Settings)` after each user message and apply the selected
+The built-in chat workflow reads `workflows.defaults` directly with
+`get_config(ctx, ..., model=Settings)` after each user message and applies the selected
 tier with `set_settings`. Overrides to a tier model or shared thinking level take
 effect on the next turn. Clearing those fields restores `components.llm` inheritance.
+The coding agent selects an LLM profile matching its `model_tier` input instead;
+see [Named LLM profiles](#named-llm-profiles) below.
 The helper reads shared defaults and `workflows.helper` directly for each task.
 Prompt and tool selection remain invocation-scoped; no settings-loader wrappers
 or legacy workflow-settings schema digests are used.
 
 Workflow-side helpers can call `await llm.resolve_settings(...)` with the same optional
-settings and generation keywords. This requires active workflow context and does
+settings, `profile`, and generation keywords. This requires active workflow context and does
 not work inside an activity; resolve before entering its recorded callback.
 
 | Workspace field | Built-in default | Validation/meaning |
@@ -298,6 +302,63 @@ trigger_threshold_ratio = 0.7
 keep_recent_ratio = 0.25
 summary_max_output_tokens = 4096
 ```
+
+### Named LLM profiles
+
+Use `LLM("agent", profile="strong")` to select a partial configuration under
+`components.llm.profiles`. Shared fields remain directly under `components.llm`:
+
+```toml
+[components.llm]
+model = "gpt-4.1"
+provider = "openai"
+max_output_tokens = 4096
+reasoning = {effort = "high"}
+
+[components.llm.profiles.strong]
+model = "o3"
+
+[components.llm.profiles.medium]
+
+[components.llm.profiles.weak]
+model = "gpt-4.1-mini"
+reasoning = {effort = "low"}
+```
+
+Each profile can override generation settings, `compaction`, `retry`, and
+`max_rounds`. Nested mappings merge recursively before the resolved configuration
+is validated. An empty profile inherits all shared settings. Unknown profile names,
+non-mapping catalogs or profile entries, and invalid resolved settings fail before
+generation. Profiles cannot contain another profile catalog or select a parent
+profile. Without `profile=`, the LLM uses only shared settings and explicit options.
+
+Profile selection is separate from `credential_profile`, which references runtime
+credentials. A settings profile can select a credential profile by name, but must
+not contain secrets. The entire `llm` subtree, including the catalog, is recorded
+in the existing per-round configuration snapshot. Runtime overrides such as
+`await config.set("llm.profiles.strong.model", "o3", permanent=True)` use the same
+storage and lifetime rules as other component settings. Fresh rounds see updates;
+replayed or interrupted generations use their recorded snapshot.
+
+### Migrate the coding agent
+
+The coding agent selects `profile=model_tier.value`; its default tier is `strong`.
+Define each tier profile you use, even if it is empty and inherits the shared model.
+Move `workflows.defaults.strong_model`, `medium_model`, and `weak_model` to the
+corresponding `llm.profiles.<tier>.model` fields for the coding agent. Move its shared
+`thinking_level` to `llm.reasoning.effort`, or set reasoning in individual profiles.
+Update stored overrides to target the new keys as well. Chat and helper workflows
+still use `workflows.defaults`; retain their settings when those workflows need them.
+
+The agent no longer reads or translates workflow defaults after every user message.
+Its LLM refreshes the selected profile before each generation, including tool rounds,
+without clearing conversation history. Prompt and tool settings remain workflow-owned.
+
+This changes the agent's recorded activity sequence, so `builtin.agent` now uses
+workflow contract version 2. Start a new agent execution after migrating settings.
+Version-1 histories require the previous implementation; they are not automatically
+migrated and replay with the new contract is rejected. Profile-less LLM workflows
+retain their existing configuration-read and generation contracts.
 
 ### Measured compaction
 

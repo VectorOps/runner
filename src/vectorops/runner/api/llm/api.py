@@ -40,6 +40,7 @@ class LLM:
             typing.Union[models.Settings, models.SettingsOverrides]
         ] = None,
         *,
+        profile: Optional[str] = None,
         system_prompt: Optional[str] = None,
         backend: Optional[provider.Provider] = None,
         compaction: typing.Union[
@@ -54,6 +55,7 @@ class LLM:
             raise ValueError("LLM identity must not be blank")
         self._context = context
         self._identity = identity
+        self._profile = profile
         self._overrides = explicit_options(settings, compaction=compaction, **overrides)
         if retry is not None:
             self._overrides["retry"] = retry.model_dump(mode="json", exclude_unset=True)
@@ -95,7 +97,7 @@ class LLM:
         return self._settings.model_copy(deep=True)
 
     async def _configure(self) -> models.Configuration:
-        resolved = await resolve_configuration(self._overrides)
+        resolved = await resolve_configuration(self._overrides, profile=self._profile)
         self._settings = resolved.generation_settings()
         self._compaction = resolved.compaction
         self._retry = resolved.retry
@@ -118,8 +120,9 @@ class LLM:
     def set_settings(self, settings: models.SettingsOverrides) -> None:
         """Replace generation overrides without resetting history or runtime policies.
 
-        Omitted fields inherit workspace LLM settings on the next round instead
-        of retaining a previous explicit value. Compaction and retry are unchanged.
+        Omitted fields inherit the selected profile and workspace LLM settings
+        on the next round instead of retaining a previous explicit value.
+        Profile selection, compaction, and retry overrides are unchanged.
         """
         with self._mutation():
             self._overrides = {

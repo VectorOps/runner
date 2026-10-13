@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from collections.abc import AsyncGenerator
+from typing import Optional
 
 import connect
 import pydantic
@@ -103,17 +104,22 @@ async def test_overridden_model_changes_and_recorded_settings_on_replay(
     assert len(backend.requests) == 2
 
 
+@pytest.mark.parametrize("profile", [None, "strong"])
 async def test_interrupted_generation_keeps_old_settings_then_refreshes(
     history: MemoryHistory,
     tmp_path: Path,
+    profile: Optional[str],
 ) -> None:
     path = tmp_path / "config.toml"
-    path.write_text('[components.llm]\nmodel = "old"\n')
+    section = (
+        "components.llm" if profile is None else f"components.llm.profiles.{profile}"
+    )
+    path.write_text(f'[{section}]\nmodel = "old"\n')
     backend = FakeProvider([answer("first"), answer("second")])
     backend.release = asyncio.Event()
 
     async def workflow() -> pydantic.JsonValue:
-        agent = llm.LLM("interrupted", backend=backend)
+        agent = llm.LLM("interrupted", profile=profile, backend=backend)
         agent.add_user_message("hello")
         await agent.generate()
         await agent.generate()
@@ -124,7 +130,7 @@ async def test_interrupted_generation_keeps_old_settings_then_refreshes(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    path.write_text('[components.llm]\nmodel = "new"\n')
+    path.write_text(f'[{section}]\nmodel = "new"\n')
     backend.release.set()
     result = await replay.run(
         history, workflow, backend.step_ids[0], workspace=tmp_path

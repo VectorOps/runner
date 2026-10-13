@@ -26,6 +26,9 @@ def configure(
 ) -> None:
     (workspace / "config.toml").write_text(
         f'[environment]\nkind = "local"\nbase_project_path = {json.dumps(str(target))}\n'
+        '[components.llm.profiles.strong]\nmodel = "strong"\nreasoning = {effort = "high"}\n'
+        '[components.llm.profiles.medium]\nmodel = "medium"\n'
+        '[components.llm.profiles.weak]\nmodel = "weak"\n'
         '[components.workflows.defaults]\nstrong_model = "strong"\nweak_model = "weak"\n'
         'thinking_level = "high"\n'
         "[components.tools.approval]\napprove_all = "
@@ -158,9 +161,10 @@ async def test_parent_delegates_then_patches_and_resumes(tmp_path: Path) -> None
             await settled(connection, identifier)
 
 
+@pytest.mark.parametrize("tier", list(settings.ModelTier))
 @pytest.mark.parametrize("agents", [[], ["custom:research"]])
 async def test_parent_configures_available_agents(
-    tmp_path: Path, agents: list[str]
+    tmp_path: Path, agents: list[str], tier: settings.ModelTier
 ) -> None:
     configure(
         tmp_path,
@@ -173,12 +177,17 @@ async def test_parent_configures_available_agents(
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
             accepted = await connection.start(
-                protocol.Start(reference="builtin:agent", idempotency_key="start")
+                protocol.Start(
+                    reference="builtin:agent",
+                    input={"model_tier": tier.value},
+                    idempotency_key="start",
+                )
             )
             await reply(
                 connection, await pending(connection, accepted.execution_id), "hello"
             )
             await pending(connection, accepted.execution_id)
+            assert backend.settings[0].model == tier.value
             bindings = {tool.name: tool for tool in backend.requests[0].tools}
             assert ("run_agent" in bindings) is bool(agents)
             if agents:

@@ -13,6 +13,7 @@ from vectorops.runner.workflows.tools import default_collections
     name="Coding agent",
     description="Plan, investigate, edit, and test with explicit helper delegation.",
     kind="builtin.agent",
+    version=2,
 )
 async def agent(
     ctx: WorkflowExecutionContext,
@@ -28,12 +29,9 @@ async def agent(
     )
     conversation = llm.LLM(
         "agent",
+        profile=model_tier.value,
         system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
     )
     while True:
         conversation.add_message(await llm.request_user_message())
-        defaults = settings.Settings.model_validate(
-            await get_config(ctx, "workflows.defaults", {}, model=settings.Settings)
-        )
-        conversation.set_settings(defaults.llm_overrides(model_tier))
         await conversation.run(tools=bindings)

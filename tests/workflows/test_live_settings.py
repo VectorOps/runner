@@ -17,6 +17,19 @@ async def test_model_changes_between_turns_and_replay(
     tmp_path: Path, reference: str
 ) -> None:
     configure(tmp_path, tmp_path, "[components.workflows.agent]\nagents = []\n")
+    defaults = (
+        "llm.profiles.strong" if reference == "builtin:agent" else "workflows.defaults"
+    )
+    model_key = (
+        f"{defaults}.model"
+        if reference == "builtin:agent"
+        else f"{defaults}.strong_model"
+    )
+    reasoning_key = (
+        f"{defaults}.reasoning.effort"
+        if reference == "builtin:agent"
+        else f"{defaults}.thinking_level"
+    )
     backend = FakeProvider([answer("first"), answer("second"), answer("third")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
@@ -24,31 +37,23 @@ async def test_model_changes_between_turns_and_replay(
                 protocol.Start(reference=reference, idempotency_key="start")
             )
             request = await pending(connection, accepted.execution_id)
-            await connection.set_configuration(
-                "workflows.defaults.strong_model", "first-model"
-            )
-            await connection.set_configuration(
-                "workflows.defaults.thinking_level", "high"
-            )
+            await connection.set_configuration(model_key, "first-model")
+            await connection.set_configuration(reasoning_key, "high")
             await reply(connection, request, "hello")
             request = await pending(connection, accepted.execution_id)
             assert backend.settings[0].model == "first-model"
             assert backend.settings[0].reasoning is not None
             assert backend.settings[0].reasoning.effort == "high"
 
-            await connection.set_configuration(
-                "workflows.defaults.strong_model", "second-model"
-            )
-            await connection.set_configuration(
-                "workflows.defaults.thinking_level", "low"
-            )
+            await connection.set_configuration(model_key, "second-model")
+            await connection.set_configuration(reasoning_key, "low")
             await reply(connection, request, "continue")
             request = await pending(connection, accepted.execution_id)
             assert backend.settings[1].model == "second-model"
             assert backend.settings[1].reasoning is not None
             assert backend.settings[1].reasoning.effort == "low"
 
-            await connection.set_configuration("workflows.defaults", {})
+            await connection.set_configuration(defaults, {})
             await connection.set_configuration("llm.model", "fallback-model")
             await connection.set_configuration("llm.reasoning", {"effort": "medium"})
             await reply(connection, request, "again")
