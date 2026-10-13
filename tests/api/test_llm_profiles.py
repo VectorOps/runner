@@ -11,7 +11,6 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import llm
 from vectorops.runner.api.llm import configuration
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.streaming import StreamItem
 
@@ -261,7 +260,7 @@ async def test_profile_changes_between_tool_rounds_and_replay(
     assert len(backend.requests) == 2
 
 
-async def test_changed_profile_selector_rejects_changed_request_on_replay(
+async def test_changed_profile_selector_replays_recorded_response(
     history: MemoryHistory, tmp_path: Path
 ) -> None:
     (tmp_path / "config.toml").write_text(
@@ -280,6 +279,5 @@ async def test_changed_profile_selector_rejects_changed_request_on_replay(
     first = await replay.run(history, workflow, workspace=tmp_path)
     assert first.outcome.kind == "completed", first.outcome
     profile = "weak"
-    with pytest.raises(ReplayMismatchError):
-        await replay.run(history, workflow, first.id, workspace=tmp_path)
+    assert await replay.run(history, workflow, first.id, workspace=tmp_path) == first
     assert len(backend.requests) == 1

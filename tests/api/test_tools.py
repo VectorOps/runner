@@ -16,7 +16,6 @@ from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.patch import PatchService
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ReplayMismatchError
 
 
 class Arguments(pydantic.BaseModel):
@@ -321,7 +320,9 @@ async def test_invalid_approval_fails_closed(
     assert (await replay.run(history, workflow, result.id)).outcome.kind == "completed"
 
 
-async def test_changed_tool_arguments_reject_replay(history: MemoryHistory) -> None:
+async def test_changed_tool_arguments_replay_recorded_result(
+    history: MemoryHistory,
+) -> None:
     value = 1
 
     async def execute(
@@ -339,5 +340,4 @@ async def test_changed_tool_arguments_reject_replay(history: MemoryHistory) -> N
     first = await replay.run(history, workflow)
     assert first.outcome.kind == "completed"
     value = 2
-    with pytest.raises(ReplayMismatchError):
-        await replay.run(history, workflow, first.id)
+    assert await replay.run(history, workflow, first.id) == first

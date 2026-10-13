@@ -27,8 +27,9 @@ async def test_deferred_history_failure_is_fatal_not_a_child_exception(
         )
     assert not set(asyncio.all_tasks()) - before
     assert any(step.outcome.kind == "waiting" for step in history.steps.values())
-    assert not any(
+    assert any(
         step.operation.kind == "workflow.complete"
+        and step.outcome.kind == "failed"
         and step.workflow_id
         == next(
             workflow.id

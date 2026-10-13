@@ -55,8 +55,10 @@ async def test_delivery_failure_never_wakes_workflow(
         with pytest.raises(OSError, match="delivery write"):
             await runner.run("activities:workflow", workflow_id="root")
     path = history.path(history.heads["root"])
-    assert len(path) == 1
+    assert len(path) == 2
     assert path[0].outcome.kind == "completed"
+    assert path[-1].outcome.kind == "failed"
+    assert path[-1].resume_step_id == path[0].id
     assert not path[0].deliveries
     assert (
         await runner.run("activities:workflow", continue_from_step_id=path[0].id) == 2

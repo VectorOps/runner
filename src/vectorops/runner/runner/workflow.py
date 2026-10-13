@@ -446,7 +446,24 @@ class WorkflowRunner:
                             await database.cancel_inputs()
                             await checkpointer.persist("cancelled")
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        current = await database.get_execution()
+                        head = current.checkpoint.heads.get(record.root_workflow_id)
+                        terminal = (
+                            await history.get_step(head) if head is not None else None
+                        )
+                        if (
+                            terminal is None
+                            or terminal.operation.kind != "workflow.complete"
+                            or terminal.outcome.kind != "failed"
+                        ):
+                            await WorkflowExecutor(
+                                project,
+                                history,
+                                checkpointer,
+                                execution_id,
+                                self.event_sink,
+                            ).fail(configuration, exc, head)
                         await database.cancel_inputs()
                         await checkpointer.persist("failed")
                         raise

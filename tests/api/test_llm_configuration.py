@@ -12,7 +12,6 @@ from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import llm
 from vectorops.runner.api.llm.models import RoundLimitError
-from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
 from vectorops.runner.runner.project import RunnerProject
@@ -226,7 +225,7 @@ async def test_round_limit_from_configuration(
     assert result.outcome.kind == "completed"
 
 
-async def test_explicit_settings_change_still_rejects_replay(
+async def test_explicit_settings_change_replays_recorded_response(
     history: MemoryHistory,
 ) -> None:
     backend = FakeProvider([answer("done")])
@@ -245,6 +244,5 @@ async def test_explicit_settings_change_still_rejects_replay(
 
     first = await replay.run(history, workflow)
     effort = "low"
-    with pytest.raises(ReplayMismatchError):
-        await replay.run(history, workflow, first.id)
+    assert await replay.run(history, workflow, first.id) == first
     assert len(backend.requests) == 1

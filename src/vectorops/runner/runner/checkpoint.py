@@ -87,6 +87,7 @@ class ExecutionCheckpointer:
         finally:
             self._worker.cancel()
             results = await asyncio.gather(self._worker, return_exceptions=True)
+            self._worker = None
             result = results[0]
             if isinstance(result, Exception):
                 raise result

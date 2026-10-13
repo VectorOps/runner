@@ -229,7 +229,6 @@ class SpawnHandler:
                     request.contract_kind is not None
                     and child.kind != request.contract_kind
                 )
-                or (request.version is not None and child.version != request.version)
             ):
                 raise ReplayMismatchError("child configuration differs from replay")
         else:

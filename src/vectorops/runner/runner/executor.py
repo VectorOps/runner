@@ -67,10 +67,7 @@ class WorkflowExecutor:
         if not isinstance(entry, composition.WorkflowDefinition):
             return configuration
         if configuration.kind != "workflow" or configuration.version != 1:
-            if (configuration.kind, configuration.version) != (
-                entry.kind,
-                entry.version,
-            ):
+            if configuration.kind != entry.kind:
                 raise ReplayMismatchError("workflow contract differs from declaration")
         return models.Workflow(
             **{
@@ -91,18 +88,6 @@ class WorkflowExecutor:
         child_heads: typing.Optional[Mapping[str, str]] = None,
     ) -> models.WorkflowStep:
         """Run a session and return its exact workflow completion record."""
-        entry = self._configured.pop(configuration.id, None)
-        if entry is None:
-            entry = await self._definition(configuration.definition_ref)
-        if isinstance(entry, composition.WorkflowDefinition):
-            if (configuration.kind, configuration.version) != (
-                entry.kind,
-                entry.version,
-            ):
-                raise ReplayMismatchError("workflow contract differs from declaration")
-            workflow = entry.func
-        else:
-            workflow = entry
         session = ExecutionSession(
             self.history,
             configuration,
@@ -120,7 +105,23 @@ class WorkflowExecutor:
             mcp=self.mcp,
         )
         context = WorkflowExecutionContext(self.project, configuration, session)
-        inspect.signature(workflow).bind(context, **configuration.input)
+        try:
+            entry = self._configured.pop(configuration.id, None)
+            if entry is None:
+                entry = await self._definition(configuration.definition_ref)
+            if isinstance(entry, composition.WorkflowDefinition):
+                if configuration.kind != entry.kind:
+                    raise ReplayMismatchError(
+                        "workflow contract differs from declaration"
+                    )
+                workflow = entry.func
+            else:
+                workflow = entry
+            inspect.signature(workflow).bind(context, **configuration.input)
+        except Exception as exc:
+            await self.history.save_workflow(configuration)
+            await session.fail(exc)
+            raise
 
         async def invoke() -> pydantic.JsonValue:
             token = composition._CURRENT_CONTEXT.set(context)
@@ -164,3 +165,22 @@ class WorkflowExecutor:
         return (
             entry.func if isinstance(entry, composition.WorkflowDefinition) else entry
         )
+
+    async def fail(
+        self,
+        configuration: models.Workflow,
+        exc: Exception,
+        head_step_id: typing.Optional[str],
+    ) -> models.WorkflowStep:
+        """Finalize runner setup or cleanup errors through the session's failure owner."""
+        session = ExecutionSession(
+            self.history,
+            configuration,
+            self.execute,
+            continue_from_step_id=head_step_id,
+            child_heads={},
+            reporter=self.reporter,
+            execution_id=self.execution_id,
+            event_sink=self.event_sink,
+        )
+        return await session.fail(exc)

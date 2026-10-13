@@ -128,8 +128,11 @@ async def test_update_storage_failure_is_fatal_and_closes_generator(
     history.fail_update = True
     with pytest.raises(OSError, match="storage"):
         await runner.run("streaming:workflow", workflow_id="root")
-    assert len(history.steps) == 1
-    assert history.steps[history.heads["root"]].outcome.kind == "streaming"
+    assert len(history.steps) == 2
+    completion = history.steps[history.heads["root"]]
+    assert completion.outcome.kind == "failed"
+    assert completion.outcome.error.type == "OSError"
+    assert history.steps[str(completion.resume_step_id)].outcome.kind == "streaming"
     assert execution_probe.cancelled == 1
 
 

@@ -8,11 +8,11 @@ import pytest
 
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import models
+from vectorops.runner import models, tool_policy
 from vectorops.runner.api import composition as c, llm
 from vectorops.runner.api.llm.models import RoundLimitError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
+from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.streaming import StreamItem
 
 
@@ -94,7 +94,7 @@ async def test_history_reconstructs_without_growing_inputs(
     assert all(len(str(item)) < 150 for item in inputs)
 
 
-async def test_changed_prompt_fails_replay(history: MemoryHistory) -> None:
+async def test_changed_prompt_replays_recorded_response(history: MemoryHistory) -> None:
     backend = FakeProvider([answer("done")])
     prompt = "original"
 
@@ -108,9 +108,93 @@ async def test_changed_prompt_fails_replay(history: MemoryHistory) -> None:
 
     first = await replay.run(history, workflow)
     prompt = "changed"
-    with pytest.raises(ReplayMismatchError):
-        await replay.run(history, workflow, first.id)
+    second = await replay.run(history, workflow, first.id)
+    assert second == first
     assert len(backend.requests) == 1
+
+
+@pytest.mark.parametrize("gated", [False, True])
+@pytest.mark.parametrize("removed", [False, True])
+async def test_changed_tool_schema_and_version_replay_then_use_live_definition(
+    history: MemoryHistory, gated: bool, removed: bool
+) -> None:
+    class OldArguments(pydantic.BaseModel):
+        value: int
+
+    class NewArguments(pydantic.BaseModel):
+        replacement: str
+
+    calls: list[int] = []
+
+    async def old_execute(
+        ctx: ActivityExecutionContext, args: OldArguments
+    ) -> llm.ToolResponse:
+        calls.append(args.value)
+        return llm.ToolResponse(content=[connect.TextBlock(text="old result")])
+
+    async def new_execute(
+        ctx: ActivityExecutionContext, args: NewArguments
+    ) -> llm.ToolResponse:
+        raise AssertionError("cached arguments must fail current validation")
+
+    call = connect.ToolCallBlock(id="a", name="echo", arguments={"value": 1})
+    backend = FakeProvider(
+        [
+            connect.AssistantMessage(content=[call], finish_reason="tool_call"),
+            answer("done"),
+        ]
+    )
+    binding = llm.Tool("echo", "Old description", OldArguments, old_execute)
+    bindings: list[llm.ToolBinding] = [binding]
+    policy = tool_policy.ToolPolicy()
+    policy.allow("echo")
+    snapshots: list[tuple[connect.Message, ...]] = []
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", model="test", backend=backend)
+        agent.add_user_message("hello")
+        await agent.run(tools=bindings)
+        snapshots.append(agent.history)
+        return None
+
+    first = await replay.run(
+        history, workflow, tool_policy_version=1 if gated else None, policy=policy
+    )
+    assert first.outcome.kind == "completed", first.outcome
+    bindings = (
+        []
+        if removed
+        else [
+            llm.Tool(
+                "echo", "Changed description", NewArguments, new_execute, version=99
+            )
+        ]
+    )
+    before = dict(history.steps)
+    second = await replay.run(
+        history,
+        workflow,
+        first.id,
+        tool_policy_version=1 if gated else None,
+        policy=policy,
+    )
+    assert second == first
+    assert snapshots[0] == snapshots[1]
+    assert history.steps == before
+    assert calls == [1]
+    assert len(backend.requests) == 2
+
+    async def live() -> pydantic.JsonValue:
+        result = await llm.invoke_tool(bindings[0] if bindings else None, call)
+        assert result.is_error
+        return None
+
+    assert (
+        await replay.run(
+            history, live, tool_policy_version=1 if gated else None, policy=policy
+        )
+    ).outcome.kind == "completed"
+    assert calls == [1]
 
 
 async def test_new_object_resets_history(history: MemoryHistory) -> None:

@@ -42,6 +42,14 @@ class StepOperation(_JsonModel):
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     version: int = pydantic.Field(default=1, ge=1, strict=True)
 
+    def matches_replay(self, recorded: StepOperation) -> bool:
+        """Match activity positions, treating LLM metadata and versions as informational."""
+        if (self.kind, self.name) != (recorded.kind, recorded.name):
+            return False
+        if self.kind.startswith("llm."):
+            return True
+        return self.input == recorded.input
+
     @pydantic.field_validator("kind", mode="after")
     @classmethod
     def validate_kind(cls, kind: str) -> str:
@@ -203,6 +211,9 @@ class WorkflowStep(_JsonModel):
     created_at: typing.Optional[str] = None
     completed_at: typing.Optional[str] = None
     metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
+    resume_step_id: typing.Optional[str] = pydantic.Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
     deferred_delivery: bool = False
     revision: int = pydantic.Field(default=1, ge=1, strict=True)
     deliveries: list[str] = pydantic.Field(
@@ -240,6 +251,14 @@ class WorkflowStep(_JsonModel):
         """Validate local links and outcome shape without loading referenced histories."""
         if self.previous_step_id == self.id:
             raise ValueError("a step cannot be its own predecessor")
+        if self.resume_step_id is not None and (
+            not isinstance(self.operation, WorkflowCompleteOperation)
+            or self.outcome.kind != "failed"
+            or self.resume_step_id != self.previous_step_id
+        ):
+            raise ValueError(
+                "a failure resume boundary must be its completion predecessor"
+            )
         if self.deferred_delivery and not isinstance(
             self.operation, (StepOperation, WorkflowJoinOperation)
         ):

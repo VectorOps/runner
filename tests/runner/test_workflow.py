@@ -136,7 +136,13 @@ async def test_operation_mismatch_is_fatal(
     before = list(history.appended)
     with pytest.raises(ReplayMismatchError):
         await runner.run("activities:workflow", continue_from_step_id=path[-1].id)
-    assert history.appended == before
+    assert history.appended[:-1] == before
+    completion = history.steps[history.heads["root"]]
+    assert completion.operation.kind == "workflow.complete"
+    assert completion.outcome.kind == "failed"
+    assert completion.outcome.error.type == "ReplayMismatchError"
+    assert completion.previous_step_id == path[-1].id
+    assert completion.resume_step_id == path[-1].id
     assert history.closed_paths == 1
 
 

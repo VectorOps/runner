@@ -210,6 +210,16 @@ class SQLiteHistory:
                         raise ValueError("execution identity cannot change")
                     if preserve_status:
                         saved = execution.model_copy(update={"status": previous.status})
+                    if not replace_heads:
+                        authoritative = self._execution(connection)
+                        saved = saved.model_copy(
+                            update={
+                                "checkpoint": saved.checkpoint.model_copy(
+                                    update={"heads": authoritative.checkpoint.heads}
+                                ),
+                                "completion_step_id": authoritative.completion_step_id,
+                            }
+                        )
                 for workflow_id, step_id in execution.checkpoint.heads.items():
                     if self._step(connection, step_id).workflow_id != workflow_id:
                         raise ValueError("checkpoint head belongs to another workflow")
@@ -817,6 +827,7 @@ class SQLiteHistory:
                     if (
                         previous.outcome.kind in ("streaming", "pending")
                         and not previous.deferred_delivery
+                        and step.resume_step_id is None
                     ):
                         raise ValueError(
                             "unfinished activity steps cannot have descendants"

@@ -99,6 +99,8 @@ def plan(
         workflow_id: str,
         head: typing.Optional[str],
         join_target: typing.Optional[models.WorkflowStep] = None,
+        *,
+        resume: bool = False,
     ) -> None:
         if workflow_id in heads:
             if heads[workflow_id] != head:
@@ -112,7 +114,7 @@ def plan(
         outstanding: set[str] = set()
         for step in steps:
             retained.add(step.id)
-            if step.outcome.kind in ("pending", "streaming", "waiting"):
+            if not resume and step.outcome.kind in ("pending", "streaming", "waiting"):
                 raise BranchConflict("branch prefix contains unfinished work")
             if step.deferred_delivery:
                 outstanding.add(step.id)
@@ -124,9 +126,14 @@ def plan(
             if isinstance(step.outcome, models.StepJoined):
                 for child in step.outcome.child_completions:
                     joined[child.spawn_step_id] = child.completion_step_id
-        if outstanding:
+        if outstanding and not resume:
             raise BranchConflict("branch prefix contains undelivered work")
         unjoined = set(spawns) - set(joined)
+        if resume:
+            for spawn_id in unjoined:
+                child_id = spawns[spawn_id]
+                retain(child_id, execution.checkpoint.heads.get(child_id), resume=True)
+            unjoined = set()
         if unjoined:
             if (
                 join_target is None
@@ -167,9 +174,15 @@ def plan(
             completion = get_step(completion_id)
             if not isinstance(completion.operation, models.WorkflowCompleteOperation):
                 raise BranchConflict("join does not reference a child completion")
-            retain(spawns[spawn_id], completion_id)
+            retain(spawns[spawn_id], completion_id, resume=resume)
 
-    retain(target.workflow_id, target.previous_step_id, target)
+    retain(
+        target.workflow_id,
+        target.previous_step_id,
+        target,
+        resume=target.resume_step_id is not None
+        and isinstance(request.action, Restart),
+    )
     result = Plan(heads=heads, retained_step_ids=retained)
     if isinstance(request.action, InsertInput):
         if (

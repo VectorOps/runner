@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import sys
+from unittest.mock import AsyncMock, patch
 
 import pydantic
 import pytest
@@ -224,6 +225,24 @@ async def test_restart_discovery_reads_status_from_database(
     assert execution_probe.calls == [0, 1]
     assert await reopened.resume() == 2
     assert execution_probe.calls == [0, 1]
+
+
+async def test_environment_setup_failure_records_completion(workspace: Path) -> None:
+    runner = WorkflowRunner(workspace)
+    with patch(
+        "vectorops.runner.runner.workflow.environments.open_environment",
+        AsyncMock(side_effect=RuntimeError("environment unavailable")),
+    ):
+        with pytest.raises(RuntimeError, match="environment unavailable"):
+            await runner.run("activities:workflow", workflow_id="root")
+    record = await runner.execution_state(str(runner.last_execution_id))
+    assert record.status == "failed"
+    assert record.completion_step_id is not None
+    completion = await database(workspace, record.id).get_step(
+        record.completion_step_id
+    )
+    assert completion.outcome.kind == "failed"
+    assert completion.outcome.error.message == "environment unavailable"
 
 
 async def test_process_crash_recovers_database_head_before_periodic_checkpoint(

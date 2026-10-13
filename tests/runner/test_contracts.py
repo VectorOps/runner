@@ -9,7 +9,6 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.api import composition as c
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner.events import StepEvent
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
@@ -114,7 +113,7 @@ async def test_contracts_survive_sqlite_restart(workspace: Path) -> None:
 
 
 @pytest.mark.parametrize("declaration", ["activity", "stream", "workflow", "child"])
-async def test_replay_rejects_changed_contract_versions(
+async def test_replay_ignores_changed_contract_versions(
     workspace: Path, history: MemoryHistory, declaration: str
 ) -> None:
     path = workspace / "workflows" / "contracts.py"
@@ -140,16 +139,18 @@ async def test_replay_rejects_changed_contract_versions(
         ),
     }
     path.write_text(SOURCE.replace(*replacements[declaration]) + "\n")
-    with pytest.raises(ReplayMismatchError):
-        if declaration in ("activity", "stream"):
-            child = next(w for w in history.workflows.values() if w.id != "root")
-            await runner.run(
-                "contracts:turn", continue_from_step_id=history.heads[child.id]
-            )
-        else:
-            await runner.run(
-                "contracts:workflow", continue_from_step_id=history.heads["root"]
-            )
+    before = dict(history.steps)
+    if declaration in ("activity", "stream"):
+        child = next(w for w in history.workflows.values() if w.id != "root")
+        result = await runner.run(
+            "contracts:turn", continue_from_step_id=history.heads[child.id]
+        )
+    else:
+        result = await runner.run(
+            "contracts:workflow", continue_from_step_id=history.heads["root"]
+        )
+    assert result == {"text": "hello"}
+    assert history.steps == before
 
 
 async def test_manual_spawn_resolves_decorated_contract_and_replays(

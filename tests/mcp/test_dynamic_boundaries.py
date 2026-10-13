@@ -10,10 +10,9 @@ from tests.fixtures.history import MemoryHistory
 from tests.mcp.test_discovery import Arguments, catalog, execute
 from vectorops.runner import tool_policy
 from vectorops.runner.api import llm
-from vectorops.runner.runner.errors import ReplayMismatchError
 
 
-async def test_mixed_static_bindings_and_catalog_change_rejects_replay(
+async def test_mixed_static_bindings_and_catalog_change_replays_recorded_response(
     history: MemoryHistory,
 ) -> None:
     selected = catalog("alpha")
@@ -36,8 +35,8 @@ async def test_mixed_static_bindings_and_catalog_change_rejects_replay(
         selected.bindings[0].definition.name,
     ]
     selected = catalog("beta")
-    with pytest.raises(ReplayMismatchError):
-        await replay.run(history, workflow, result.id)
+    assert await replay.run(history, workflow, result.id) == result
+    assert len(backend.requests) == 1
 
 
 async def test_activation_collision_rejects_round_without_committing_results(

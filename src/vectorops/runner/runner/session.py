@@ -86,6 +86,7 @@ class ExecutionSession:
         self.child_heads = child_heads
         self.replay_head = continue_from_step_id
         self.head: typing.Optional[str] = None
+        self.durable_head = continue_from_step_id
         self.queue: asyncio.Queue[typing.Union[_Invocation, str]] = asyncio.Queue()
         self.invocations: dict[str, _Invocation] = {}
         self.buffered: typing.Optional[models.WorkflowStep] = None
@@ -179,7 +180,11 @@ class ExecutionSession:
         self, invoke: Callable[[], Awaitable[pydantic.JsonValue]]
     ) -> models.WorkflowStep:
         """Drive workflow requests while treating dispatch failures as fatal."""
-        await self.history.save_workflow(self.workflow)
+        try:
+            await self.history.save_workflow(self.workflow)
+        except Exception as exc:
+            await self.fail(exc)
+            raise
         replay = self._path()
         self.replay = replay
 
@@ -208,6 +213,9 @@ class ExecutionSession:
             if fatal.done():
                 raise fatal.result()
             return await self._complete(task)
+        except Exception as exc:
+            await self.fail(exc)
+            raise
         finally:
             if self.pause is not None:
                 self.pause.sessions.pop(self.workflow.id, None)
@@ -390,6 +398,24 @@ class ExecutionSession:
             raise ReplayMismatchError("workflow returned before consuming history")
         return completion
 
+    async def fail(self, exc: Exception) -> models.WorkflowStep:
+        """Record terminal failure after the durable head, never the replay cursor."""
+        outcome = self.failure(exc)
+        self.head = self.durable_head
+        try:
+            return await self.append(
+                models.WorkflowCompleteOperation(),
+                outcome,
+                resume_step_id=self.durable_head,
+            )
+        except Exception as persistence_error:
+            diagnostics.log(
+                "workflow.completion_failed",
+                level=diagnostics.Level.ERROR,
+                error=persistence_error,
+            )
+            raise exc from persistence_error
+
     @staticmethod
     def failure(exc: Exception) -> models.StepFailed:
         diagnostics.log("operation.failed", level=diagnostics.Level.ERROR, error=exc)
@@ -406,16 +432,24 @@ class ExecutionSession:
         if self.deliveries:
             raise ReplayMismatchError("operation submitted before recorded deliveries")
         step = await self._peek()
-        self.buffered = None
         if step is None:
             return None
-        if operation is not None and step.operation != operation:
-            raise ReplayMismatchError("operation differs from recorded history")
+        if operation is not None:
+            matches = (
+                operation.matches_replay(step.operation)
+                if isinstance(operation, models.StepOperation)
+                and isinstance(step.operation, models.StepOperation)
+                else operation == step.operation
+            )
+            if not matches:
+                raise ReplayMismatchError(
+                    f"operation differs from recorded history at {step.id}: "
+                    f"expected {step.operation.kind}, received {operation.kind}"
+                )
+        self.buffered = None
         self.ordered_replay = self.ordered_replay or step.deferred_delivery
         self.deliveries.extend(step.deliveries)
         self.head = step.id
-        if self.reporter is not None:
-            self.reporter.record(self.workflow.id, step.id)
         return step
 
     async def _peek(self) -> typing.Optional[models.WorkflowStep]:
@@ -441,7 +475,11 @@ class ExecutionSession:
         return step
 
     async def append(
-        self, operation: models.WorkflowOperation, outcome: models.StepOutcome
+        self,
+        operation: models.WorkflowOperation,
+        outcome: models.StepOutcome,
+        *,
+        resume_step_id: typing.Optional[str] = None,
     ) -> models.WorkflowStep:
         now = timestamp()
         step = models.WorkflowStep(
@@ -450,6 +488,7 @@ class ExecutionSession:
             previous_step_id=self.head,
             operation=operation,
             outcome=outcome,
+            resume_step_id=resume_step_id,
             created_at=(
                 self.workflow.created_at
                 if isinstance(operation, models.WorkflowCompleteOperation)
@@ -463,8 +502,9 @@ class ExecutionSession:
             ),
         )
         await self.history.append_step(step)
-        self._emit(step, created=True)
         self.head = step.id
+        self.durable_head = step.id
+        self._emit(step, created=True)
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
         return step
@@ -512,9 +552,8 @@ class ExecutionSession:
             )
             await self.history.update_step(step)
             self._emit(step)
-        if self.reporter is not None:
-            if self.head is not None:
-                self.reporter.record(self.workflow.id, self.head)
+        if self.reporter is not None and self.durable_head is not None:
+            self.reporter.record(self.workflow.id, self.durable_head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
         return ActivityExecutionContext(

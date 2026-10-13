@@ -80,7 +80,10 @@ async def test_replayed_spawn_validates_child_configuration(
     before = list(history.appended)
     with pytest.raises(ReplayMismatchError, match="configuration"):
         await runner.run("children:sequential", continue_from_step_id=path[-1].id)
-    assert history.appended == before
+    assert history.appended[:-1] == before
+    completion = history.steps[history.heads["root"]]
+    assert completion.previous_step_id == path[-1].id
+    assert completion.outcome.kind == "failed"
 
 
 @pytest.mark.parametrize(

@@ -92,8 +92,12 @@ async def test_wrong_workflow_arguments_are_rejected_before_execution(
 ) -> None:
     with pytest.raises(TypeError):
         await runner.run("activities:workflow", input={"unknown": True})
-    assert not history.steps
-    assert not history.workflows
+    assert len(history.steps) == 1
+    completion = next(iter(history.steps.values()))
+    assert completion.operation.kind == "workflow.complete"
+    assert completion.outcome.kind == "failed"
+    assert completion.outcome.error.type == "TypeError"
+    assert len(history.workflows) == 1
 
 
 async def test_runner_uses_workspace_configuration_overrides(
