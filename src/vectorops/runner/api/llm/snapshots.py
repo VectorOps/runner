@@ -86,7 +86,9 @@ def blocks(
 
 def output_fields(block: dict[str, pydantic.JsonValue]) -> tuple[str, ...]:
     kind = block.get("type")
-    if kind in ("text", "reasoning"):
+    if kind == "reasoning":
+        return ("text", "signature")
+    if kind == "text":
         return ("text",)
     if kind == "tool_call":
         return ("arguments_text", "arguments")

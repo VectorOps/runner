@@ -15,7 +15,7 @@ from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import diagnostics
 from vectorops.runner.api import composition as c, llm
-from vectorops.runner.api.llm import deadlines, retry
+from vectorops.runner.api.llm import deadlines, retry, snapshots
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
@@ -104,6 +104,59 @@ async def test_healthy_progress_has_no_total_deadline(kind: str, field: str) -> 
     items = [item async for item in deadlines.stream(healthy(), settings)]
     assert items[-1] == c.final(answer("done").model_dump(mode="json"))
     assert len(items) == 13
+
+
+@pytest.mark.parametrize("new_blocks", [False, True])
+async def test_redacted_reasoning_refreshes_deadline(new_blocks: bool) -> None:
+    async def healthy() -> AsyncGenerator[StreamItem, None]:
+        accumulator = snapshots.Accumulator()
+        for index in range(12):
+            await asyncio.sleep(0.01)
+            event = connect.ReasoningEndEvent(
+                index=index if new_blocks else 0,
+                text="",
+                signature=f"opaque-{index}",
+                redacted=True,
+            )
+            yield c.delta(accumulator.update(event))
+        yield c.final(answer("done").model_dump(mode="json"))
+
+    settings = llm.Settings(
+        model="test", first_token_timeout=0.06, stream_stall_timeout=0.06
+    )
+    items = [item async for item in deadlines.stream(healthy(), settings)]
+    assert items[-1] == c.final(answer("done").model_dump(mode="json"))
+    assert len(items) == 13
+
+
+@pytest.mark.parametrize("signature", [None, "", "opaque"])
+async def test_unchanged_reasoning_does_not_refresh_deadline(
+    signature: Optional[str],
+) -> None:
+    async def unchanged() -> AsyncGenerator[StreamItem, None]:
+        while True:
+            yield c.delta(
+                {
+                    "content": [
+                        {
+                            "type": "reasoning",
+                            "text": "",
+                            "signature": signature,
+                            "redacted": True,
+                        }
+                    ]
+                }
+            )
+            await asyncio.sleep(0.005)
+
+    settings = llm.Settings(
+        model="test", first_token_timeout=0.05, stream_stall_timeout=0.03
+    )
+    async with asyncio.timeout(2):
+        with pytest.raises(deadlines.StreamTimeoutError) as error:
+            async for _ in deadlines.stream(unchanged(), settings):
+                pass
+    assert error.value.phase == ("stream_stall" if signature else "first_token")
 
 
 async def test_metadata_does_not_reset_first_output_budget() -> None:
