@@ -1,6 +1,6 @@
 """Exact SEARCH/REPLACE blocks with all-or-nothing planning per file."""
 
-from typing import Final, Optional
+from typing import Final, Optional, Union
 
 from . import common, models
 
@@ -35,9 +35,10 @@ class Operation(models.Model):
     source: str
     blocks: list[Block]
 
-    def plan(self, content: Optional[str]) -> models.FileChange:
+    def plan(self, content: Optional[Union[str, bytes]]) -> models.FileChange:
         """Apply blocks in memory, emitting no change on any failure."""
-        lines, newline, trailing = common.split_text(content or "")
+        text = common.decode_text(content) if content is not None else ""
+        lines, newline, trailing = common.split_text(text)
         exists = content is not None
         for block in self.blocks:
             if not block.search:

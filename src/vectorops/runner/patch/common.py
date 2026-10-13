@@ -2,6 +2,7 @@
 
 from pathlib import PurePosixPath
 import re
+import typing
 from typing import Optional, Protocol
 
 from .models import FileChange
@@ -23,7 +24,16 @@ class FileOperation(Protocol):
     @property
     def source(self) -> str: ...
 
-    def plan(self, content: Optional[str]) -> FileChange: ...
+    def plan(self, content: Optional[typing.Union[str, bytes]]) -> FileChange: ...
+
+
+def decode_text(content: typing.Union[str, bytes]) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PatchFailure("File is not valid UTF-8") from exc
 
 
 def validate_path(path: str) -> str:

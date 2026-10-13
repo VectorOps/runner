@@ -37,7 +37,7 @@ class PatchService:
 
     async def _read(
         self, path: str, description: filesystem.EnvironmentDescription
-    ) -> Optional[str]:
+    ) -> Optional[bytes]:
         try:
             info = await self._environment.stat(filesystem.PathRequest(path=path))
         except EnvironmentError as exc:
@@ -64,10 +64,7 @@ class PatchService:
                 break
             if not part.content:
                 raise common.PatchFailure("Incomplete file read made no progress")
-        try:
-            return content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise common.PatchFailure("File is not valid UTF-8") from exc
+        return bytes(content)
 
     async def apply(
         self, text: str, *, format: str = "v4a", reverse: bool = False
@@ -140,9 +137,15 @@ class PatchService:
                         models.AppliedChange(path=change.path, kind="deleted")
                     )
                     continue
-                encoded = change.content.encode("utf-8")
+                encoded = (
+                    change.content.encode("utf-8")
+                    if isinstance(change.content, str)
+                    else change.content
+                )
                 if len(encoded) > description.max_write_bytes:
                     raise common.PatchFailure("Replacement exceeds write size limit")
+                if encoded == content and change.destination is None:
+                    continue
                 destination = change.destination or change.path
                 parent = str(PurePosixPath(destination).parent)
                 if parent != ".":

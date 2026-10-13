@@ -1,6 +1,7 @@
 """File-oriented v4a parsing and forward, whitespace-tolerant matching."""
 
 from typing import Final, Literal, Optional
+import typing
 import re
 
 import pydantic
@@ -10,8 +11,9 @@ from . import common, models
 INSTRUCTION: Final = """Use *** Begin Patch and *** End Patch around file operations.
 Use *** Add File: path with every content line prefixed by +;
 *** Delete File: path with no body; or *** Update File: path with hunks.
-An update may have *** Move to: destination immediately after its header.
-Start hunks with @@, optionally followed by an exact class/function anchor.
+An update may be empty or have *** Move to: destination after its header.
+Moves without text hunks preserve binary payloads byte-for-byte.
+Start hunks with @@, optionally followed by a class/function search hint.
 Consecutive labeled @@ lines narrow the search in order.
 Prefix context with a space, removals with -, and additions with +.
 Use enough context to locate the edit. Order hunks top-to-bottom.
@@ -26,10 +28,18 @@ unsupported without a saved before-image. Reverse is not a general undo.
 HEADER: Final = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$")
 
 
+class Edit(models.Model):
+    old_index: int
+    new_index: int
+    old_lines: list[str]
+    new_lines: list[str]
+
+
 class Chunk(models.Model):
     old_lines: list[str] = pydantic.Field(default_factory=list)
     new_lines: list[str] = pydantic.Field(default_factory=list)
     anchors: list[str] = pydantic.Field(default_factory=list)
+    edits: list[Edit] = pydantic.Field(default_factory=list)
     source: str
     eof: bool = False
 
@@ -43,8 +53,8 @@ class Operation(models.Model):
     added: list[str] = pydantic.Field(default_factory=list)
     reverse: bool = False
 
-    def plan(self, content: Optional[str]) -> models.FileChange:
-        """Build a complete replacement; a failed hunk never emits a change."""
+    def plan(self, content: Optional[typing.Union[str, bytes]]) -> models.FileChange:
+        """Match original sections, then apply only edits, preserving context bytes."""
         if self.kind == "Delete" and self.reverse:
             raise common.PatchFailure(
                 "Cannot reverse Delete File without a before-image"
@@ -52,7 +62,10 @@ class Operation(models.Model):
         if self.kind == "Add":
             added = common.join_text(self.added, "\n", True)
             if self.reverse:
-                if content != added:
+                expected = (
+                    added.encode("utf-8") if isinstance(content, bytes) else added
+                )
+                if content != expected:
                     raise common.PatchFailure("Reverse add does not match current file")
                 return models.FileChange(path=self.path, content=None)
             if content is not None:
@@ -62,21 +75,22 @@ class Operation(models.Model):
             raise common.PatchFailure("File does not exist")
         if self.kind == "Delete":
             return models.FileChange(path=self.path, content=None)
-        lines, newline, trailing = common.split_text(content)
+        if not any(
+            chunk.old_lines or chunk.new_lines or chunk.anchors for chunk in self.chunks
+        ):
+            return models.FileChange(
+                path=self.path, content=content, destination=self.destination
+            )
+        lines, newline, trailing = common.split_text(common.decode_text(content))
         cursor = 0
+        edits: list[tuple[int, list[str], list[str]]] = []
         for chunk in self.chunks:
             old = chunk.new_lines if self.reverse else chunk.old_lines
-            new = chunk.old_lines if self.reverse else chunk.new_lines
             start = cursor
             for anchor in chunk.anchors:
-                position = find_context(lines, [anchor], start)
-                if position is None:
-                    raise common.PatchFailure(
-                        "Patch anchor did not match", chunk=chunk.source
-                    )
-                start = position + 1
+                start = advance_anchor(lines, anchor, start)
             if not old:
-                position = start if chunk.anchors else len(lines)
+                position = len(lines) if chunk.eof else start
             else:
                 position = None
                 if chunk.eof:
@@ -89,13 +103,38 @@ class Operation(models.Model):
                 raise common.PatchFailure(
                     "Patch context did not match", chunk=chunk.source
                 )
-            lines[position : position + len(old)] = new
-            cursor = position + len(new)
+            for edit in chunk.edits:
+                offset = edit.new_index if self.reverse else edit.old_index
+                removed = edit.new_lines if self.reverse else edit.old_lines
+                inserted = edit.old_lines if self.reverse else edit.new_lines
+                edits.append((position + offset, removed, inserted))
+            cursor = position + len(old)
+        result: list[str] = []
+        cursor = 0
+        for position, removed, inserted in edits:
+            if position < cursor:
+                raise common.PatchFailure("Patch edits overlap")
+            result.extend(lines[cursor:position])
+            result.extend(inserted)
+            cursor = position + len(removed)
+        result.extend(lines[cursor:])
         return models.FileChange(
             path=self.path,
-            content=common.join_text(lines, newline, trailing),
+            content=common.join_text(result, newline, trailing),
             destination=self.destination,
         )
+
+
+def advance_anchor(lines: list[str], anchor: str, start: int) -> int:
+    """Use exact then stripped skip-ahead hints, ignoring missing or prior hints."""
+    for normalize in (str, str.strip):
+        expected = normalize(anchor)
+        if any(normalize(line) == expected for line in lines[:start]):
+            continue
+        for index in range(start, len(lines)):
+            if normalize(lines[index]) == expected:
+                return index + 1
+    return start
 
 
 def find_context(lines: list[str], context: list[str], start: int) -> Optional[int]:
@@ -116,27 +155,41 @@ def parse_chunks(body: list[str]) -> list[Chunk]:
     raw: list[str] = []
     old: list[str] = []
     new: list[str] = []
-    changed = False
+    edits: list[Edit] = []
+    removed: list[str] = []
+    inserted: list[str] = []
     has_body = False
     ended = False
 
-    def finish(eof: bool = False) -> None:
-        nonlocal anchors, raw, old, new, changed, has_body
-        if not changed:
-            raise common.PatchFailure(
-                "Update hunk has no changes", chunk="\n".join(raw)
+    def finish_edit() -> None:
+        nonlocal removed, inserted
+        if removed or inserted:
+            edits.append(
+                Edit(
+                    old_index=len(old) - len(removed),
+                    new_index=len(new) - len(inserted),
+                    old_lines=removed,
+                    new_lines=inserted,
+                )
             )
+            removed, inserted = [], []
+
+    def finish(eof: bool = False) -> None:
+        nonlocal anchors, raw, old, new, edits, has_body
+        finish_edit()
         chunks.append(
             Chunk(
                 old_lines=old,
                 new_lines=new,
                 anchors=anchors,
+                edits=edits,
                 source="\n".join(raw),
                 eof=eof,
             )
         )
         anchors, raw, old, new = [], [], [], []
-        changed = has_body = False
+        edits = []
+        has_body = False
 
     for line in body:
         if ended:
@@ -146,7 +199,7 @@ def parse_chunks(body: list[str]) -> list[Chunk]:
                 finish()
             raw.append(line)
             if line[2:].strip():
-                anchors.append(line[2:].strip())
+                anchors.append(line[3:])
         elif line == "*** End of File":
             raw.append(line)
             finish(eof=True)
@@ -156,11 +209,12 @@ def parse_chunks(body: list[str]) -> list[Chunk]:
             has_body = True
             if line.startswith("-"):
                 old.append(line[1:])
-                changed = True
+                removed.append(line[1:])
             elif line.startswith("+"):
                 new.append(line[1:])
-                changed = True
+                inserted.append(line[1:])
             elif line.startswith(" ") or line == "":
+                finish_edit()
                 old.append(line[1:])
                 new.append(line[1:])
             else:
@@ -169,8 +223,6 @@ def parse_chunks(body: list[str]) -> list[Chunk]:
                 )
     if raw:
         finish()
-    if not chunks:
-        raise common.PatchFailure("Update has no hunks")
     return chunks
 
 

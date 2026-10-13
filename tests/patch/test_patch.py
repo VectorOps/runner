@@ -94,6 +94,112 @@ def test_stacked_anchors() -> None:
     )
 
 
+async def test_context_only_sections_in_branching_patch(
+    tmp_path: Path, environment: LocalEnvironment
+) -> None:
+    text = envelope("""*** Update File: frontend/tests/branching.test.tsx
+@@
+ vitest.test.each([false, true])(
+@@
+   },
+ );
++
++vitest.test("failed workflow stop exposes a retry control", () => {
++  const stopped = item(
++    "failed-stop",
++    null,
++    "root",
++    { kind: "workflow.complete" },
++    null,
++  );
++  stopped.step = {
++    ...(stopped.step as Record<string, Json>),
++    outcome: {
++      kind: "failed",
++      error: { type: "WorkflowError", message: "Workflow stopped" },
++    },
++  };
++  const view = testing.render(
++    <StepBranchControls step={steps.stepView(stopped)} actions={actions()} />,
++  );
++  vitest
++    .expect(view.getByRole("button", { name: "Retry this step" }))
++    .toBeTruthy();
++});
+\x20
+ vitest.test(
+@@
+-      view.getByRole("button", { name: "Restart this step" }),
++      view.getByRole("button", { name: "Retry this step" }),
+@@
+-      .expect(view.getByRole("button", { name: "Restart this step" }))
++      .expect(view.getByRole("button", { name: "Retry this step" }))
+@@
+-      view.getByRole("button", { name: "Restart this step" }),
++      view.getByRole("button", { name: "Retry this step" }),
+@@
+-    testing.fireEvent.click(view.getByRole("button", { name: "Restart step" }));
++    testing.fireEvent.click(view.getByRole("button", { name: "Retry step" }));""")
+    original = "\n".join(
+        [
+            "  },",
+            ");",
+            "vitest.test.each([false, true])(",
+            "  cases,",
+            "  },",
+            ");",
+            "",
+            "vitest.test(",
+            '      view.getByRole("button", { name: "Restart this step" }),',
+            '      .expect(view.getByRole("button", { name: "Restart this step" }))',
+            '      view.getByRole("button", { name: "Restart this step" }),',
+            '    testing.fireEvent.click(view.getByRole("button", { name: "Restart step" }));',
+            "",
+        ]
+    )
+    path = tmp_path / "frontend/tests/branching.test.tsx"
+    path.parent.mkdir(parents=True)
+    path.write_text(original)
+    result = await PatchService(environment).apply(text)
+    assert not result.is_error
+    insertion = "\n".join(
+        line[1:] for line in text.splitlines() if line.startswith("+")
+    ).split("\n      view.getByRole", 1)[0]
+    expected = original.replace("Restart", "Retry").replace(
+        ");\n\nvitest.test(", f");\n{insertion}\n\nvitest.test(", 1
+    )
+    assert path.read_text() == expected
+    result = await PatchService(environment).apply(text, reverse=True)
+    assert not result.is_error
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("eof", ["", "\n*** End of File"])
+def test_context_only_section_preserves_whitespace(eof: str) -> None:
+    operations, errors = v4a.parse(
+        envelope(f"*** Update File: file\n@@\n context{eof}")
+    )
+    assert not errors
+    original = "  context  \r\n"
+    assert operations[0].plan(original).content == original
+
+
+@pytest.mark.parametrize(
+    "original", ["old\n", "old\ncontext\n", "context\nold\nmissing\n"]
+)
+async def test_context_only_sections_require_ordered_matches(
+    tmp_path: Path, environment: LocalEnvironment, original: str
+) -> None:
+    path = tmp_path / "file"
+    path.write_text(original)
+    result = await PatchService(environment).apply(
+        envelope("*** Update File: file\n@@\n context\n@@\n-old\n+new\n@@\n final")
+    )
+    assert result.is_error
+    assert "context did not match" in result.errors[0].msg
+    assert path.read_text() == original
+
+
 @pytest.mark.parametrize("original", ["old", "old\n", "old\r\n", "old\n\n"])
 @pytest.mark.parametrize("format", ["v4a", "patch"])
 def test_line_endings(original: str, format: str) -> None:
@@ -187,17 +293,151 @@ async def test_overwrite_and_duplicate_rejected(
     assert (tmp_path / "file").read_text() == "original"
 
 
+async def test_empty_operations_rejected(
+    environment: LocalEnvironment,
+) -> None:
+    assert (await PatchService(environment).apply(envelope(""))).is_error
+
+
+@pytest.mark.parametrize("body", ["", "\n@@", "\n@@ anchor", "\n@@\n*** End of File"])
+async def test_empty_updates_are_noops(
+    tmp_path: Path, environment: LocalEnvironment, body: str
+) -> None:
+    path = tmp_path / "file"
+    path.write_text("anchor\nold\n")
+    modified = path.stat().st_mtime_ns
+    text = envelope(f"*** Update File: file{body}")
+    result = await PatchService(environment).apply(text)
+    assert not result.is_error
+    assert not result.changes
+    assert path.read_text() == "anchor\nold\n"
+    assert path.stat().st_mtime_ns == modified
+    path.unlink()
+    assert (await PatchService(environment).apply(text)).is_error
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_fuzzy_edits_preserve_context(newline: str) -> None:
+    original = newline.join(
+        ["  keep  ", "  old", "\tmiddle\t", "remove", "  tail  ", ""]
+    )
+    text = envelope(
+        "*** Update File: file\n@@\n keep\n-old\n+new\n middle\n-remove\n+replacement\n tail"
+    )
+    operations, errors = v4a.parse(text)
+    assert not errors
+    expected = original.replace("  old", "new").replace("remove", "replacement")
+    assert operations[0].plan(original).content == expected
+    reverse, errors = v4a.parse(text, reverse=True)
+    assert not errors
+    assert reverse[0].plan(expected).content == expected.replace("new", "old").replace(
+        "replacement", "remove"
+    )
+
+
 @pytest.mark.parametrize(
-    "text",
+    "body, original, expected",
     [
-        "*** Begin Patch\n*** End Patch",
-        "*** Begin Patch\n*** Update File: file\n*** End Patch",
+        ("@@\n+zero", "one\ntwo\n", "zero\none\ntwo\n"),
+        ("@@\n+zero", "", "zero"),
+        ("@@\n-one\n+ONE\n@@\n+inserted", "one\ntwo\n", "ONE\ninserted\ntwo\n"),
+        ("@@\n one\n@@\n+inserted", "one\ntwo\n", "one\ninserted\ntwo\n"),
+        ("@@ anchor\n@@\n+inserted", "anchor\ntwo\n", "anchor\ninserted\ntwo\n"),
+        ("@@\n+last\n*** End of File", "one\ntwo\n", "one\ntwo\nlast\n"),
+        ("@@\n-one\n+ONE\n+extra\n@@\n-two\n+TWO", "one\ntwo\n", "ONE\nextra\nTWO\n"),
     ],
 )
-async def test_empty_operations_rejected(
-    environment: LocalEnvironment, text: str
+def test_insertions_and_original_cursor(
+    body: str, original: str, expected: str
 ) -> None:
-    assert (await PatchService(environment).apply(text)).is_error
+    text = envelope(f"*** Update File: file\n{body}")
+    operations, errors = v4a.parse(text)
+    assert not errors
+    assert operations[0].plan(original).content == expected
+    reverse, errors = v4a.parse(text, reverse=True)
+    assert not errors
+    assert reverse[0].plan(expected).content == original
+
+
+@pytest.mark.parametrize(
+    "body, original, expected",
+    [
+        ("@@ missing\n-old\n+new", "old\n", "new\n"),
+        (
+            "@@ anchor\n-old\n+new\n@@ anchor\n-next\n+NEXT",
+            "anchor\nold\nnext\n",
+            "anchor\nnew\nNEXT\n",
+        ),
+        ("@@   foo\n-old\n+new", "foo\nold\n  foo\nold\n", "foo\nold\n  foo\nnew\n"),
+    ],
+)
+def test_anchor_hints(body: str, original: str, expected: str) -> None:
+    operations, errors = v4a.parse(envelope(f"*** Update File: file\n{body}"))
+    assert not errors
+    assert operations[0].plan(original).content == expected
+
+
+def test_matching_prefers_exact_then_rstrip_then_strip() -> None:
+    assert v4a.find_context(["  old  ", "old  ", "old"], ["old"], 0) == 2
+    assert v4a.find_context(["  old  ", "old  "], ["old"], 0) == 1
+    assert v4a.find_context(["  old  "], ["old"], 0) == 0
+
+
+@pytest.mark.parametrize("body", ["", "\n@@", "\n@@\n*** End of File"])
+@pytest.mark.parametrize("payload", [b"\x00\xff\xfe\r\n\x80", b"one\r\ntwo\n", b""])
+async def test_binary_move_roundtrip(tmp_path: Path, body: str, payload: bytes) -> None:
+    environment = await LocalEnvironment.open(
+        LocalEnvironmentConfig(base_project_path=str(tmp_path), max_read_bytes=2)
+    )
+    source = tmp_path / "old"
+    destination = tmp_path / "nested/new"
+    source.write_bytes(payload)
+    text = envelope(f"*** Update File: old\n*** Move to: nested/new{body}")
+    service = PatchService(environment)
+    result = await service.apply(text)
+    assert not result.is_error
+    assert not source.exists()
+    assert destination.read_bytes() == payload
+    result = await service.apply(text, reverse=True)
+    assert not result.is_error
+    assert not destination.exists()
+    assert source.read_bytes() == payload
+
+
+async def test_binary_move_safety(
+    tmp_path: Path, environment: LocalEnvironment
+) -> None:
+    source = tmp_path / "old"
+    destination = tmp_path / "new"
+    payload = b"\xff\x00\x80"
+    source.write_bytes(payload)
+    destination.write_bytes(b"keep")
+    service = PatchService(environment)
+    for body in [
+        "*** Move to: new",
+        "*** Move to: ../outside",
+        "*** Move to: ./old",
+        "*** Move to: new\n@@\n-old\n+new",
+    ]:
+        result = await service.apply(envelope(f"*** Update File: old\n{body}"))
+        assert result.is_error
+        assert source.read_bytes() == payload
+        assert destination.read_bytes() == b"keep"
+    assert (await service.apply(envelope("*** Add File: old\n+text"))).is_error
+    assert source.read_bytes() == payload
+
+
+async def test_binary_move_conflicting_destinations(
+    tmp_path: Path, environment: LocalEnvironment
+) -> None:
+    (tmp_path / "old").write_bytes(b"\xff")
+    result = await PatchService(environment).apply(
+        envelope("*** Update File: old\n*** Move to: new\n*** Add File: new\n+text")
+    )
+    assert result.is_error
+    assert not result.changes
+    assert (tmp_path / "old").read_bytes() == b"\xff"
+    assert not (tmp_path / "new").exists()
 
 
 async def test_move_conflict(environment: LocalEnvironment, tmp_path: Path) -> None:
@@ -248,21 +488,50 @@ class FailingEnvironment(LocalEnvironment):
         await super().remove(request)
 
 
-async def test_move_io_failure_reports_completed_write(tmp_path: Path) -> None:
+@pytest.mark.parametrize("binary", [False, True])
+async def test_move_io_failure_reports_completed_write(
+    tmp_path: Path, binary: bool
+) -> None:
     environment = await FailingEnvironment.open(
         LocalEnvironmentConfig(base_project_path=str(tmp_path))
     )
     environment.fail_remove = True
-    (tmp_path / "old").write_text("one\n")
+    payload = b"\xff\x00\x80" if binary else b"one\n"
+    (tmp_path / "old").write_bytes(payload)
+    body = "" if binary else "\n@@\n-one\n+two"
     result = await PatchService(environment).apply(
-        envelope("*** Update File: old\n*** Move to: new\n@@\n-one\n+two")
+        envelope(f"*** Update File: old\n*** Move to: new{body}")
     )
     assert result.is_error
     assert result.errors[0].may_have_occurred
     assert [(change.path, change.kind) for change in result.changes] == [
         ("new", "created")
     ]
-    assert (tmp_path / "old").read_text() == "one\n"
+    assert (tmp_path / "old").read_bytes() == payload
+    assert (tmp_path / "new").read_bytes() == (payload if binary else b"two\n")
+
+
+async def test_binary_move_limits_and_cancellation(tmp_path: Path) -> None:
+    environment = await FailingEnvironment.open(
+        LocalEnvironmentConfig(
+            base_project_path=str(tmp_path), max_read_bytes=2, max_write_bytes=3
+        )
+    )
+    source = tmp_path / "old"
+    destination = tmp_path / "new"
+    text = envelope("*** Update File: old\n*** Move to: new")
+    service = PatchService(environment)
+    source.write_bytes(b"\xff" * 4)
+    result = await service.apply(text)
+    assert result.is_error
+    assert source.read_bytes() == b"\xff" * 4
+    assert not destination.exists()
+    source.write_bytes(b"\xff" * 3)
+    environment.cancel_write = True
+    with pytest.raises(asyncio.CancelledError):
+        await service.apply(text)
+    assert source.read_bytes() == b"\xff" * 3
+    assert not destination.exists()
 
 
 async def test_cancellation_propagates(tmp_path: Path) -> None:

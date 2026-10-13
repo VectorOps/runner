@@ -1,6 +1,6 @@
 """Public patch results and concrete file changes, independent of patch syntax."""
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import pydantic
 
@@ -17,8 +17,12 @@ class PatchError(Model):
 
 
 class FileChange(Model):
+    model_config = pydantic.ConfigDict(
+        extra="forbid", frozen=True, ser_json_bytes="base64", val_json_bytes="base64"
+    )
+
     path: str
-    content: Optional[str]
+    content: Optional[Union[str, bytes]]
     destination: Optional[str] = None
 
 
