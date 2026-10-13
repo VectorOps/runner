@@ -25,6 +25,7 @@ class CachedHistory:
         max_pending: int = 64,
         flush_interval: float = 0.25,
         write_through: bool = False,
+        cache_workflows: bool = True,
     ) -> None:
         if cache_size < 1 or max_pending < 1:
             raise ValueError("cache and pending limits must be positive")
@@ -35,6 +36,7 @@ class CachedHistory:
         self.max_pending = max_pending
         self.flush_interval = flush_interval
         self.write_through = write_through
+        self.cache_workflows = cache_workflows
         self._workflows: OrderedDict[str, models.Workflow] = OrderedDict()
         self._steps: OrderedDict[str, models.WorkflowStep] = OrderedDict()
         self._pending: dict[str, models.WorkflowStep] = {}
@@ -56,6 +58,8 @@ class CachedHistory:
             self._steps.popitem(last=False)
 
     def _cache_workflow(self, workflow: models.Workflow) -> None:
+        if not self.cache_workflows:
+            return
         self._workflows[workflow.id] = workflow
         self._workflows.move_to_end(workflow.id)
         if len(self._workflows) > self.cache_size:
@@ -66,7 +70,7 @@ class CachedHistory:
             self._check()
             cached = self._workflows.get(workflow.id)
             if cached is not None:
-                if cached != workflow:
+                if not cached.same_configuration(workflow):
                     raise ValueError("workflow configuration conflict")
                 return
             await self.backend.save_workflow(workflow)

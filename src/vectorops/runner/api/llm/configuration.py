@@ -63,6 +63,16 @@ async def resolve_configuration(
 ) -> models.Configuration:
     """Read one recorded snapshot before interpreting LLM-specific policy."""
     values = await get_config(composition.workflow_context(), "llm", {})
+    return interpret_configuration(values, supplied, profile=profile)
+
+
+def interpret_configuration(
+    values: pydantic.JsonValue,
+    supplied: dict[str, pydantic.JsonValue],
+    *,
+    profile: typing.Optional[str] = None,
+) -> models.Configuration:
+    """Interpret a configuration snapshot independently of activity recording."""
     if not isinstance(values, dict):
         raise ValueError("configuration llm must be a mapping")
     defaults = dict(values)

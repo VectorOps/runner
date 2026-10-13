@@ -172,7 +172,9 @@ class SQLiteHistory:
                     "SELECT payload FROM workflows WHERE id = ?", (workflow.id,)
                 ).fetchone()
                 if row is not None:
-                    if models.Workflow.model_validate_json(row[0]) != workflow:
+                    if not models.Workflow.model_validate_json(
+                        row[0]
+                    ).same_configuration(workflow):
                         raise ValueError("workflow configuration conflict")
                     return
                 connection.execute(
@@ -185,6 +187,50 @@ class SQLiteHistory:
         return await self._run(
             lambda connection: self._workflow(connection, workflow_id)
         )
+
+    async def set_workflow_name(self, workflow_id: str, name: str) -> models.Workflow:
+        """Set presentation metadata once without replacing execution configuration."""
+
+        def update(connection: sqlite3.Connection) -> models.Workflow:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                workflow = self._workflow(connection, workflow_id)
+                if workflow.name is not None:
+                    return workflow
+                updated = models.Workflow.model_validate(
+                    {**workflow.model_dump(), "name": name}
+                )
+                connection.execute(
+                    "UPDATE workflows SET payload = ? WHERE id = ?",
+                    (updated.model_dump_json(), workflow_id),
+                )
+                return updated
+
+        return await self._run(update)
+
+    async def first_input(
+        self, workflow_id: str, request_type: str
+    ) -> typing.Optional[mailbox.InputRequest]:
+        """Read the first accepted input, ignoring requests with no user response."""
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> typing.Optional[mailbox.InputRequest]:
+            row = connection.execute(
+                "SELECT payload FROM input_requests "
+                "WHERE json_extract(payload, '$.workflow_id') = ? "
+                "AND json_extract(payload, '$.request_type') = ? "
+                "AND json_extract(payload, '$.status') = 'answered' "
+                "ORDER BY json_extract(payload, '$.answered_at'), rowid LIMIT 1",
+                (workflow_id, request_type),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else mailbox.StoredInputRequest.model_validate_json(row[0]).public()
+            )
+
+        return await self._run(read)
 
     async def save_execution(
         self,
@@ -484,6 +530,7 @@ class SQLiteHistory:
                     execution_id=execution.id,
                     reference=workflow.definition_ref,
                     root_workflow_id=workflow.id,
+                    name=workflow.name,
                     status=execution.status,
                     pending_inputs=pending,
                 )

@@ -32,6 +32,13 @@ class Workflow(_JsonModel):
     version: int = pydantic.Field(default=1, ge=1, strict=True)
     tool_policy_version: typing.Optional[typing.Literal[1]] = None
     created_at: typing.Optional[str] = None
+    name: typing.Optional[str] = pydantic.Field(
+        default=None, min_length=1, max_length=120
+    )
+
+    def same_configuration(self, other: Workflow) -> bool:
+        """Compare execution configuration without mutable presentation metadata."""
+        return self.model_dump(exclude={"name"}) == other.model_dump(exclude={"name"})
 
 
 class StepOperation(_JsonModel):

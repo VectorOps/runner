@@ -38,6 +38,8 @@ from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import branching
 from vectorops.runner.runner.pause import ExecutionPause
+from vectorops.runner.runner.llm import RunnerLLM
+from vectorops.runner.runner.naming import WorkflowNaming
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.resources import ExecutionResources, finish_cleanup
 
@@ -74,6 +76,7 @@ class WorkflowRunner:
         self._project = project
         self._project_lock = asyncio.Lock()
         self._execution_index: typing.Optional[ExecutionIndex] = None
+        self._naming: typing.Optional[WorkflowNaming] = None
 
     async def project(self) -> RunnerProject:
         async with self._project_lock:
@@ -233,11 +236,28 @@ class WorkflowRunner:
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
         owner = self._mailboxes.get(answer.execution_id)
         if owner is not None:
-            return await owner.answer(answer)
-        project = await self.project()
-        async with self._writer(project):
-            database = await self._database(project, answer.execution_id)
-            return await mailbox.Mailbox(database, self.mailbox_sink).answer(answer)
+            request = await owner.answer(answer)
+        else:
+            project = await self.project()
+            async with self._writer(project):
+                database = await self._database(project, answer.execution_id)
+                request = await mailbox.Mailbox(database, self.mailbox_sink).answer(
+                    answer
+                )
+        if request.request_type == "chat.message.v1":
+            project = await self.project()
+            await (await self._workflow_naming()).ensure_name(
+                await self._database(project, answer.execution_id), request.workflow_id
+            )
+        return request
+
+    async def _workflow_naming(self) -> WorkflowNaming:
+        if self._naming is None:
+            project = await self.project()
+            self._naming = WorkflowNaming(
+                RunnerLLM(project.configuration, self.authentication)
+            )
+        return self._naming
 
     async def accept_branch(self, request: branching.Branch) -> branching.Operation:
         project = await self.project()
@@ -346,6 +366,7 @@ class WorkflowRunner:
                     CachedHistory(
                         database,
                         write_through=self._state_store is not None,
+                        cache_workflows=False,
                     ) as history,
                 ):
                     if configuration is not None:
@@ -421,6 +442,10 @@ class WorkflowRunner:
                     try:
                         if on_started is not None:
                             on_started()
+                        if not is_new:
+                            await (await self._workflow_naming()).ensure_name(
+                                database, record.root_workflow_id
+                            )
                         if (
                             execution_id in self._stop_requests
                             or execution_id in self._suspending
