@@ -7,6 +7,7 @@ import connect
 import pytest
 
 from vectorops.runner.api.llm.models import LLMResponseError
+from vectorops.runner.api.llm.configuration import ConfigurationError
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.llm import RunnerLLM
 from vectorops.runner.runner.project import RunnerProject
@@ -104,3 +105,19 @@ async def test_runner_llm_rejects_unsuccessful_responses(
         await helper.generate(
             connect.UserMessage(content=[connect.TextBlock(text="Hello")])
         )
+
+
+async def test_runner_llm_configuration_error_has_file_and_profile(
+    tmp_path: Path,
+) -> None:
+    project = await RunnerProject.open(tmp_path)
+    helper = RunnerLLM(project.configuration, AuthenticationService())
+    with pytest.raises(ConfigurationError) as error:
+        await helper.generate(
+            connect.UserMessage(content=[connect.TextBlock(text="Hello")])
+        )
+    message = str(error.value)
+    assert str(project.config_path) in message
+    assert "profile 'weak'" in message
+    assert "model: required setting is missing" in message
+    assert "[components.llm.profiles.weak]" in message

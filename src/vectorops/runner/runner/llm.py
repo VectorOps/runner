@@ -36,6 +36,7 @@ class RunnerLLM:
             self.configuration.get("llm", {}),
             configuration.explicit_options(**overrides),
             profile=profile,
+            source_path=self.configuration.path,
         ).generation_settings()
         auth = await self.authentication.transport(
             settings.provider, settings.model, settings.credential_profile

@@ -11,6 +11,7 @@ from tests.api.test_llm import FakeProvider, answer
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import llm
+from vectorops.runner.api.llm.configuration import ConfigurationError
 from vectorops.runner.api.llm.models import RoundLimitError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.streaming import StreamItem
@@ -155,13 +156,16 @@ async def test_invalid_resolved_settings(
     history: MemoryHistory, settings: str, tmp_path: Path
 ) -> None:
     (tmp_path / "config.toml").write_text("[components.llm]\n" + settings)
+    project = await RunnerProject.open(tmp_path)
 
     async def workflow() -> pydantic.JsonValue:
-        with pytest.raises(pydantic.ValidationError):
+        with pytest.raises(ConfigurationError) as error:
             await llm.LLM("invalid").generate()
+        assert str(project.config_path) in str(error.value)
+        assert "Section: components.llm" in str(error.value)
         return None
 
-    result = await replay.run(history, workflow, workspace=tmp_path)
+    result = await replay.run(history, workflow, project=project)
     assert result.outcome.kind == "completed"
 
 

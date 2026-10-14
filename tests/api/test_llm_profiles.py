@@ -131,8 +131,12 @@ async def test_invalid_profiles(
     await project.configuration.set("llm", {"model": "default", **values})
 
     async def workflow() -> pydantic.JsonValue:
-        with pytest.raises(pydantic.ValidationError):
+        with pytest.raises(configuration.ConfigurationError) as error:
             await llm.resolve_settings(profile="strong")
+        assert "profile 'strong'" in str(error.value)
+        assert str(project.config_path) in str(error.value)
+        assert isinstance(error.value.__cause__, pydantic.ValidationError)
+        assert "input_value" not in str(error.value)
         return None
 
     result = await replay.run(history, workflow, project=project)
@@ -179,8 +183,11 @@ async def test_builtin_profiles_still_require_a_model(
     history: MemoryHistory, tmp_path: Path, profile: str
 ) -> None:
     async def workflow() -> pydantic.JsonValue:
-        with pytest.raises(pydantic.ValidationError, match="model"):
+        with pytest.raises(configuration.ConfigurationError, match="model") as error:
             await llm.resolve_settings(profile=profile)
+        assert "required setting is missing" in str(error.value)
+        assert f"[components.llm.profiles.{profile}]" in str(error.value)
+        assert "shared model" in str(error.value)
         return None
 
     result = await replay.run(history, workflow, workspace=tmp_path)
@@ -196,9 +203,13 @@ async def test_missing_profile_and_empty_profile(
 
     async def workflow() -> pydantic.JsonValue:
         assert (await llm.resolve_settings(profile="strong")).model == "default"
-        with pytest.raises(ValueError, match="unknown LLM profile"):
+        with pytest.raises(
+            configuration.ConfigurationError, match="Unknown LLM profile"
+        ):
             await llm.LLM("missing", profile="missing", model="explicit").generate()
-        with pytest.raises(ValueError, match="unknown LLM profile"):
+        with pytest.raises(
+            configuration.ConfigurationError, match="Unknown LLM profile"
+        ):
             await llm.resolve_settings(profile="missing")
         return None
 
