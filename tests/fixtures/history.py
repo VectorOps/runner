@@ -76,6 +76,7 @@ class MemoryHistory:
             step.operation,
         ):
             raise ValueError("step identity and links cannot change")
+        step.validate_authorization_update(existing)
         self.steps[step.id] = models.WorkflowStep.model_validate_json(
             step.model_dump_json()
         )

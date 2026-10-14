@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from collections.abc import Mapping
 from contextlib import aclosing
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 import typing
@@ -49,6 +50,8 @@ class _Invocation:
     step: typing.Optional[models.WorkflowStep] = None
     task: typing.Optional[asyncio.Task[context.OperationResponse]] = None
     delivery_queued: bool = False
+    parent_step_id: typing.Optional[str] = None
+    reconstruct: bool = False
 
     def cancel_wait(self, response: asyncio.Future[context.OperationResponse]) -> None:
         if response.cancelled() and self.task is not None:
@@ -107,6 +110,9 @@ class ExecutionSession:
         self.mailbox = mailbox
         self.pause = None if mailbox is None else mailbox.pause
         self._dispatching = False
+        self._parent_step: ContextVar[typing.Optional[str]] = ContextVar(
+            "workflow_activity_parent", default=None
+        )
         self.authentication = authentication
         self.environment = environment
         self.resources = resources
@@ -124,7 +130,11 @@ class ExecutionSession:
     ) -> context.OperationResponse:
         if self.closed:
             raise RuntimeError("workflow session is closed")
-        pending = _Invocation(request, asyncio.get_running_loop().create_future())
+        pending = _Invocation(
+            request,
+            asyncio.get_running_loop().create_future(),
+            parent_step_id=self._parent_step.get(),
+        )
         pending.response.add_done_callback(pending.cancel_wait)
         self.queue.put_nowait(pending)
         if self.pause is not None:
@@ -145,6 +155,16 @@ class ExecutionSession:
             return None
         requests: set[str] = set()
         for identifier, invocation in self.invocations.items():
+            if identifier in self.pause.requests:
+                requests.add(identifier)
+                continue
+            if invocation.reconstruct:
+                if not any(
+                    child.parent_step_id == identifier
+                    for child in self.invocations.values()
+                ):
+                    return None
+                continue
             if (
                 invocation.task is None
                 or invocation.task.done()
@@ -153,6 +173,9 @@ class ExecutionSession:
                 return None
             if identifier in self.pause.requests:
                 requests.add(identifier)
+            elif invocation.parent_step_id in self.pause.requests:
+                assert invocation.parent_step_id is not None
+                requests.add(invocation.parent_step_id)
             elif isinstance(invocation.request, context.JoinRequest):
                 if not self.children or any(
                     not task.done() and child not in self.pause.sessions
@@ -263,6 +286,7 @@ class ExecutionSession:
                     continue
                 if isinstance(response, handlers.DeferredResponse):
                     pending.step = response.step
+                    pending.reconstruct = response.reconstruct
                     self.invocations[response.step.id] = pending
                     pending.task = asyncio.create_task(self._resolve(response))
                     pending.task.add_done_callback(
@@ -283,14 +307,25 @@ class ExecutionSession:
     async def _resolve(
         self, deferred: handlers.DeferredResponse
     ) -> context.OperationResponse:
-        if deferred.step.deferred_delivery and deferred.step.outcome.kind in (
-            "pending",
-            "streaming",
-            "waiting",
+        if (
+            not deferred.reconstruct
+            and deferred.step.deferred_delivery
+            and deferred.step.outcome.kind
+            in (
+                "pending",
+                "streaming",
+                "waiting",
+            )
         ):
             await self.live.wait()
         with diagnostics.bind(step_id=deferred.step.id):
-            return await deferred.invoke()
+            token = self._parent_step.set(
+                deferred.step.id if deferred.reconstruct else self._parent_step.get()
+            )
+            try:
+                return await deferred.invoke()
+            finally:
+                self._parent_step.reset(token)
 
     async def _replay_delivery(self, step_id: str) -> None:
         invocation = self.invocations.get(step_id)
@@ -540,6 +575,11 @@ class ExecutionSession:
             previous = await self.history.get_step(step.id)
             step = step.model_copy(
                 update={
+                    "authorized": (
+                        previous.authorized
+                        if previous.authorized is True
+                        else step.authorized
+                    ),
                     "revision": previous.revision + 1,
                     "deliveries": previous.deliveries,
                     "created_at": previous.created_at,
@@ -556,6 +596,13 @@ class ExecutionSession:
             self.reporter.record(self.workflow.id, self.durable_head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
+        async def authorize() -> None:
+            current = await self.history.get_step(step.id)
+            if current.workflow_id != self.workflow.id:
+                raise ValueError("step belongs to another workflow")
+            if current.authorized is not True:
+                await self.update(current.authorize())
+
         return ActivityExecutionContext(
             self.execution_id,
             self.workflow.id,
@@ -565,6 +612,8 @@ class ExecutionSession:
             self.environment,
             self.resources,
             self.mcp,
+            authorized=step.authorized is True,
+            persist_authorization=authorize,
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

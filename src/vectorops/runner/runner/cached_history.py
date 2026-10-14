@@ -132,6 +132,7 @@ class CachedHistory:
             ):
                 raise ValueError("step identity and links cannot change")
             snapshot = step.model_copy(deep=True)
+            snapshot.validate_authorization_update(previous)
             if snapshot.outcome.kind == "streaming" and not self.write_through:
                 self._pending[step.id] = snapshot
                 self._cache_step(snapshot)

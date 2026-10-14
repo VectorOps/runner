@@ -216,6 +216,9 @@ class WorkflowStep(_JsonModel):
     previous_step_id: typing.Optional[str] = pydantic.Field(default=None, min_length=1)
     operation: WorkflowOperation
     outcome: StepOutcome
+    authorized: typing.Optional[bool] = pydantic.Field(
+        default=None, strict=True, exclude_if=lambda value: value is None
+    )
     created_at: typing.Optional[str] = None
     completed_at: typing.Optional[str] = None
     metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
@@ -234,6 +237,21 @@ class WorkflowStep(_JsonModel):
         if any(not value for value in values) or len(set(values)) != len(values):
             raise ValueError("delivery step IDs must be nonempty and unique")
         return values
+
+    def authorize(self) -> WorkflowStep:
+        """Mark a pending tool invocation authorized without changing its outcome."""
+        if self.operation.kind != "llm.tool" or self.outcome.kind != "pending":
+            raise ValueError("authorization requires a pending tool call")
+        return self.model_copy(update={"authorized": True})
+
+    def validate_authorization_update(self, previous: WorkflowStep) -> None:
+        if self.authorized == previous.authorized:
+            return
+        if previous.authorized is True or self.authorized is not True:
+            raise ValueError("authorization cannot be revoked")
+        previous.authorize()
+        if self.outcome.kind != "pending":
+            raise ValueError("authorization must be persisted before completion")
 
     def delivered(self, target: WorkflowStep) -> WorkflowStep:
         """Append delivery order without changing the anchor's outcome or links."""
@@ -259,6 +277,8 @@ class WorkflowStep(_JsonModel):
         """Validate local links and outcome shape without loading referenced histories."""
         if self.previous_step_id == self.id:
             raise ValueError("a step cannot be its own predecessor")
+        if self.authorized is not None and self.operation.kind != "llm.tool":
+            raise ValueError("authorization is only valid for tool calls")
         if self.resume_step_id is not None and (
             not isinstance(self.operation, WorkflowCompleteOperation)
             or self.outcome.kind != "failed"

@@ -16,7 +16,10 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner.api import definitions
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.context import (
+    ActivityReconstruction,
+    WorkflowExecutionContext,
+)
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner import streaming
 
@@ -34,6 +37,31 @@ def workflow_context() -> WorkflowExecutionContext:
     if context is None:
         raise RuntimeError("operation requires an active workflow context")
     return context
+
+
+async def run_recorded_invocation(
+    operation: models.StepOperation,
+    invoke: Callable[
+        [ActivityExecutionContext, models.WorkflowStep], Awaitable[pydantic.JsonValue]
+    ],
+    *,
+    replay_when: typing.Optional[Callable[[models.WorkflowStep], bool]] = None,
+) -> pydantic.JsonValue:
+    """Reconstruct orchestration inside one recorded invocation in its workflow context."""
+    context = workflow_context()
+
+    async def reconstruct(
+        activity_context: ActivityExecutionContext, step: models.WorkflowStep
+    ) -> pydantic.JsonValue:
+        token = _CURRENT_CONTEXT.set(context)
+        try:
+            return await invoke(activity_context, step)
+        finally:
+            _CURRENT_CONTEXT.reset(token)
+
+    return await context.run_activity(
+        operation, ActivityReconstruction(reconstruct, replay_when)
+    )
 
 
 @dataclass(frozen=True)

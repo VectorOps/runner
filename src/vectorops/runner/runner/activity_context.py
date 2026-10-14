@@ -1,6 +1,7 @@
 """Runtime identity supplied explicitly to activity implementations."""
 
 from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from typing import Optional
 
 from vectorops.runner.authentication.service import AuthenticationService
@@ -8,6 +9,7 @@ from vectorops.runner.environment.protocol import TargetEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.resources import CleanupRegistry
+from vectorops.runner.runner.errors import AuthorizationPersistenceError
 
 
 @dataclass(frozen=True)
@@ -26,3 +28,19 @@ class ActivityExecutionContext:
         default=None, compare=False, repr=False
     )
     mcp: Optional[MCPRuntime] = field(default=None, compare=False, repr=False)
+    authorized: bool = False
+    persist_authorization: Optional[Callable[[], Awaitable[None]]] = field(
+        default=None, compare=False, repr=False
+    )
+
+    async def record_authorization(self) -> None:
+        if self.persist_authorization is None:
+            raise AuthorizationPersistenceError(
+                "authorization persistence is unavailable"
+            )
+        try:
+            await self.persist_authorization()
+        except Exception as exc:
+            raise AuthorizationPersistenceError(
+                "cannot persist tool authorization"
+            ) from exc

@@ -8,12 +8,18 @@ import connect
 import pydantic
 
 from vectorops.runner import diagnostics
-from vectorops.runner.authentication.models import AuthenticationError
+from vectorops.runner import global_config
+from vectorops.runner import models
+from vectorops.runner.authentication.models import (
+    AuthenticationError,
+    CredentialStorageError,
+)
 from vectorops.runner.api import composition as c
 from vectorops.runner.api import tool_contracts, tool_approval
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ActivityError
+from vectorops.runner.runner.project import RunnerProject
+from vectorops.runner.runner import errors as runtime_errors
 
 Tool = tool_contracts.Tool
 ToolBinding = tool_contracts.ToolBinding
@@ -182,16 +188,18 @@ async def _execute_tool(
                 raise ToolExecutionError(error)
             if binding is None:
                 raise ToolExecutionError(f"unknown tool: {request.name}")
-            response = await binding.execute(ctx, request.arguments)
-            _log_result(request, response)
-            return _result(request, response).model_dump(mode="json")
-        except AuthenticationError:
+        except (AuthenticationError, runtime_errors.AuthorizationPersistenceError):
             raise
         except Exception as exc:
             _log_failure(request, exc)
             if raise_errors:
                 raise
             return _failure(request, exc).model_dump(mode="json")
+        if not ctx.authorized:
+            await ctx.record_authorization()
+        return (await _execute_binding(binding, ctx, request, raise_errors)).model_dump(
+            mode="json"
+        )
 
     result = await call.run(input=input, invoke=invoke)
     return connect.ToolResultMessage.model_validate(result)
@@ -207,44 +215,39 @@ async def _gated_tool(
     gate_only: bool = False,
 ) -> connect.ToolResultMessage:
     """Gate only live tool execution; replay returns the recorded result directly."""
+    result = await _run_gated_tool(
+        call, binding, request, instance, raise_errors, gate_only
+    )
+    return connect.ToolResultMessage.model_validate(result)
+
+
+async def _run_gated_tool(
+    call: c.ActivityCall,
+    binding: typing.Optional[ToolBinding],
+    request: connect.ToolCallBlock,
+    instance: typing.Optional[str],
+    raise_errors: bool,
+    gate_only: bool,
+) -> pydantic.JsonValue:
     project = c.workflow_context().project
     definition = binding.definition if binding is not None else None
     digest = _digest(definition.model_dump(mode="json")) if definition else None
 
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-        error = await tool_approval.authorize(
-            project,
-            ctx,
-            binding,
-            request,
-            definition,
-            digest,
-            instance,
+        denial = await _authorize_call(
+            project, ctx, binding, request, instance, raise_errors
         )
-        try:
-            if error is not None:
-                raise error
-            assert binding is not None
-            if gate_only:
-                return connect.ToolResultMessage(
-                    tool_call_id=request.id,
-                    tool_name=request.name,
-                    content=[],
-                ).model_dump(mode="json")
-            if isinstance(binding, WorkflowToolBinding):
-                raise RuntimeError("workflow tools require workflow execution")
-            result = await binding.execute(ctx, request.arguments)
-            _log_result(request, result)
-            return _result(request, result).model_dump(mode="json")
-        except AuthenticationError:
-            raise
-        except Exception as exc:
-            _log_failure(request, exc)
-            if raise_errors:
-                raise
-            return _failure(request, exc).model_dump(mode="json")
+        if denial is not None:
+            return denial.model_dump(mode="json")
+        if gate_only:
+            return connect.ToolResultMessage(
+                tool_call_id=request.id, tool_name=request.name, content=[]
+            ).model_dump(mode="json")
+        return (await _execute_binding(binding, ctx, request, raise_errors)).model_dump(
+            mode="json"
+        )
 
-    result = await call.run(
+    return await call.run(
         input={
             "instance": instance,
             "call_digest": _digest(request.model_dump(mode="json")),
@@ -255,7 +258,69 @@ async def _gated_tool(
         },
         invoke=invoke,
     )
-    return connect.ToolResultMessage.model_validate(result)
+
+
+async def _authorize_call(
+    project: RunnerProject,
+    context: ActivityExecutionContext,
+    binding: typing.Optional[ToolBinding],
+    request: connect.ToolCallBlock,
+    instance: typing.Optional[str],
+    raise_errors: bool,
+) -> typing.Optional[connect.ToolResultMessage]:
+    if context.authorized:
+        return None
+    definition = binding.definition if binding is not None else None
+    error = await tool_approval.authorize(
+        project,
+        context,
+        binding,
+        request,
+        definition,
+        _digest(definition.model_dump(mode="json")) if definition else None,
+        instance,
+    )
+    if error is not None:
+        _log_failure(request, error)
+        if raise_errors:
+            raise error
+        return _failure(request, error)
+    await context.record_authorization()
+    return None
+
+
+async def _execute_binding(
+    binding: typing.Optional[ToolBinding],
+    context: typing.Optional[ActivityExecutionContext],
+    request: connect.ToolCallBlock,
+    raise_errors: bool,
+) -> connect.ToolResultMessage:
+    try:
+        if binding is None:
+            raise ToolExecutionError(f"unknown tool: {request.name}")
+        if isinstance(binding, WorkflowToolBinding):
+            response = await binding.execute_workflow(
+                c.workflow_context(), request.arguments
+            )
+        else:
+            if context is None:
+                raise RuntimeError("activity tools require an activity context")
+            response = await binding.execute(context, request.arguments)
+        _log_result(request, response)
+        return _result(request, response)
+    except (
+        AuthenticationError,
+        CredentialStorageError,
+        global_config.ConfigurationError,
+        runtime_errors.AuthorizationPersistenceError,
+        runtime_errors.ReplayMismatchError,
+    ):
+        raise
+    except Exception as exc:
+        _log_failure(request, exc)
+        if raise_errors:
+            raise
+        return _failure(request, exc)
 
 
 async def _workflow_tool(
@@ -264,14 +329,82 @@ async def _workflow_tool(
     instance: typing.Optional[str],
     raise_errors: bool,
 ) -> connect.ToolResultMessage:
-    """Replay the approval gate while leaving child operations in workflow history."""
-    gate = await _gated_tool(binding, request, instance, raise_errors, gate_only=True)
-    if gate.is_error:
-        return gate
-    try:
-        result = await binding.execute_workflow(c.workflow_context(), request.arguments)
-    except (ActivityError, ToolExecutionError) as exc:
-        if raise_errors:
+    """Record one tool invocation while replaying its workflow implementation."""
+    context = c.workflow_context()
+    definition = binding.definition
+    digest = _digest(definition.model_dump(mode="json"))
+    legacy = False
+
+    def replay_when(step: models.WorkflowStep) -> bool:
+        nonlocal legacy
+        legacy = (
+            isinstance(step.operation, models.StepOperation)
+            and step.operation.input.get("gate_only") is True
+        )
+        return not legacy and (
+            step.outcome.kind == "pending" or step.authorized is True
+        )
+
+    async def invoke(
+        ctx: ActivityExecutionContext, step: models.WorkflowStep
+    ) -> pydantic.JsonValue:
+        if (
+            isinstance(step.operation, models.StepOperation)
+            and step.operation.input.get("gate_only") is True
+        ):
+            denial = await _authorize_call(
+                context.project, ctx, binding, request, instance, raise_errors
+            )
+            if denial is not None:
+                return denial.model_dump(mode="json")
+            return connect.ToolResultMessage(
+                tool_call_id=request.id, tool_name=request.name, content=[]
+            ).model_dump(mode="json")
+        if step.outcome.kind == "pending":
+            denial = await _authorize_call(
+                context.project, ctx, binding, request, instance, raise_errors
+            )
+            if denial is not None:
+                return denial.model_dump(mode="json")
+            return (
+                await _execute_binding(binding, ctx, request, raise_errors)
+            ).model_dump(mode="json")
+        try:
+            await _execute_binding(binding, ctx, request, raise_errors)
+        except (
+            AuthenticationError,
+            CredentialStorageError,
+            global_config.ConfigurationError,
+            runtime_errors.AuthorizationPersistenceError,
+            runtime_errors.ReplayMismatchError,
+        ):
             raise
-        return _failure(request, exc)
-    return _result(request, result)
+        except Exception:
+            if step.outcome.kind != "failed":
+                raise
+        if step.outcome.kind == "failed":
+            raise runtime_errors.ActivityError(step.outcome.error)
+        if step.outcome.kind != "completed":
+            raise runtime_errors.ReplayMismatchError("invalid recorded tool outcome")
+        return step.outcome.result
+
+    recorded = await c.run_recorded_invocation(
+        models.StepOperation(
+            kind="llm.tool",
+            name="invoke_tool",
+            version=3,
+            input={
+                "instance": instance,
+                "call_digest": _digest(request.model_dump(mode="json")),
+                "tool_digest": digest,
+                "tool_version": binding.version,
+                **({"raise_errors": True} if raise_errors else {}),
+            },
+        ),
+        invoke,
+        replay_when=replay_when,
+    )
+    result = connect.ToolResultMessage.model_validate(recorded)
+    if legacy and not result.is_error:
+        return await _execute_binding(binding, None, request, raise_errors)
+    return result

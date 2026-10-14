@@ -923,6 +923,7 @@ class SQLiteHistory:
                         step.deliveries,
                     ):
                         raise ValueError("step identity and links cannot change")
+                    step.validate_authorization_update(previous)
                     connection.execute(
                         "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
                     )

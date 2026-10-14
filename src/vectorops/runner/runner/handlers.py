@@ -18,7 +18,10 @@ from vectorops.runner.authentication.models import CredentialStorageError
 from vectorops.runner.runner import context
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
-from vectorops.runner.runner.errors import ReplayMismatchError
+from vectorops.runner.runner.errors import (
+    AuthorizationPersistenceError,
+    ReplayMismatchError,
+)
 from vectorops.runner.runner.history import WorkflowHistory
 
 
@@ -56,6 +59,7 @@ R = typing.TypeVar("R", bound=context.OperationRequest, contravariant=True)
 class DeferredResponse:
     step: models.WorkflowStep
     invoke: Callable[[], Awaitable[context.OperationResponse]]
+    reconstruct: bool = False
 
 
 async def prepare_response(
@@ -111,27 +115,50 @@ class ActivityHandler:
         self.runtime = runtime
 
     async def execute(self, request: context.ActivityRequest) -> DeferredResponse:
-        return await prepare_response(
+        response = await prepare_response(
             self.runtime,
             request.operation,
             models.StepPending(),
             partial(self._resolve, request),
         )
+        return DeferredResponse(
+            response.step,
+            response.invoke,
+            reconstruct=isinstance(request.invoke, context.ActivityReconstruction)
+            and request.invoke.applies(response.step),
+        )
 
     async def _resolve(
         self, request: context.ActivityRequest, step: models.WorkflowStep
     ) -> context.ActivityResponse:
-        if step.outcome.kind == "pending":
+        reconstruct = isinstance(
+            request.invoke, context.ActivityReconstruction
+        ) and request.invoke.applies(step)
+        if step.outcome.kind == "pending" or reconstruct:
             try:
                 outcome: models.StepOutcome = models.StepCompleted(
-                    result=await request.invoke(self.runtime.activity_context(step))
+                    result=(
+                        await request.invoke.invoke(
+                            self.runtime.activity_context(step), step
+                        )
+                        if isinstance(request.invoke, context.ActivityReconstruction)
+                        else await request.invoke(self.runtime.activity_context(step))
+                    )
                 )
-            except (CredentialStorageError, global_config.ConfigurationError):
+            except (
+                AuthorizationPersistenceError,
+                CredentialStorageError,
+                global_config.ConfigurationError,
+                ReplayMismatchError,
+            ):
                 raise
             except Exception as exc:
                 outcome = self.runtime.failure(exc)
-            step = step.model_copy(update={"outcome": outcome})
-            await self.runtime.update(step)
+            if step.outcome.kind == "pending":
+                step = step.model_copy(update={"outcome": outcome})
+                await self.runtime.update(step)
+            elif step.outcome != outcome:
+                raise ReplayMismatchError("activity outcome differs from replay")
         if step.outcome.kind not in ("completed", "failed"):
             raise ReplayMismatchError("activity has an invalid outcome")
         return context.ActivityResponse(step.outcome)

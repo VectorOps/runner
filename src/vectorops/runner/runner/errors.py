@@ -11,3 +11,7 @@ class ActivityError(Exception):
 
 class ReplayMismatchError(Exception):
     """Workflow code or referenced records disagree with selected history."""
+
+
+class AuthorizationPersistenceError(Exception):
+    """A tool cannot execute because its authorization was not durably recorded."""

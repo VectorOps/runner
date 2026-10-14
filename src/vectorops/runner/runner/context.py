@@ -19,10 +19,29 @@ from vectorops.runner.runner.streaming import StreamItem
 
 
 @dataclass(frozen=True)
+class ActivityReconstruction:
+    """Run orchestration for pending calls and selected recorded outcomes."""
+
+    invoke: Callable[
+        [ActivityExecutionContext, models.WorkflowStep], Awaitable[pydantic.JsonValue]
+    ]
+    replay_when: typing.Optional[Callable[[models.WorkflowStep], bool]] = None
+
+    def applies(self, step: models.WorkflowStep) -> bool:
+        return self.replay_when is None or self.replay_when(step)
+
+
+ActivityInvocation: typing.TypeAlias = typing.Union[
+    Callable[[ActivityExecutionContext], Awaitable[pydantic.JsonValue]],
+    ActivityReconstruction,
+]
+
+
+@dataclass(frozen=True)
 class ActivityRequest:
     kind: typing.ClassVar[typing.Literal["activity"]] = "activity"
     operation: models.StepOperation
-    invoke: Callable[[ActivityExecutionContext], Awaitable[pydantic.JsonValue]]
+    invoke: ActivityInvocation
 
 
 @dataclass(frozen=True)
@@ -56,7 +75,10 @@ class ChildWorkflowHandle:
 
 
 OperationRequest: typing.TypeAlias = typing.Union[
-    ActivityRequest, StreamingActivityRequest, SpawnRequest, JoinRequest
+    ActivityRequest,
+    StreamingActivityRequest,
+    SpawnRequest,
+    JoinRequest,
 ]
 
 
@@ -102,7 +124,7 @@ class WorkflowExecutionContext:
     async def run_activity(
         self,
         operation: models.StepOperation,
-        invoke: Callable[[ActivityExecutionContext], Awaitable[pydantic.JsonValue]],
+        invoke: ActivityInvocation,
     ) -> pydantic.JsonValue:
         response = await self.submitter.submit(ActivityRequest(operation, invoke))
         if response.kind != "activity":
