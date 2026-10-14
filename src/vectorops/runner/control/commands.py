@@ -264,12 +264,12 @@ async def execute(connection: client.RunnerClient, args: Arguments) -> None:
                 p.ExecutionList(after=args.after, limit=args.limit)
             )
             lines = (
-                ["Reference  Active  Pending inputs  Auth waits  Description"]
+                ["Reference  Description"]
                 if page.workflows
                 else ["No workflows discovered."]
             )
             lines.extend(
-                f"{item.descriptor.reference}  {item.active_executions}  {item.pending_inputs}  {item.awaiting_authentication}  {_compact(item.descriptor.description or '')}"
+                f"{item.descriptor.reference}  {_compact(item.descriptor.description or '')}"
                 for item in page.workflows
             )
             lines.extend(

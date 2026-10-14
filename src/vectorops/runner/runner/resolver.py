@@ -64,15 +64,18 @@ class WorkflowResolver:
         )
 
     async def discover(
-        self, *, after: typing.Optional[str] = None, limit: int = 100
+        self, *, query: str = "", after: typing.Optional[str] = None, limit: int = 100
     ) -> catalog.WorkflowCatalog:
         """Page newest-modified local definitions, then built-ins, with reference ties.
 
+        Every space-separated query word must match a case-insensitive substring
+        of the reference, name, or description before pagination.
         Reference cursors resume in the current catalog, not a frozen snapshot.
         A cursor whose workflow is no longer available must be restarted.
         """
         if not 1 <= limit <= 500:
             raise ValueError("catalog limit must be between 1 and 500")
+        words = [word for word in query.casefold().split(" ") if word]
 
         def scan() -> catalog.WorkflowCatalog:
             result = catalog.WorkflowCatalog()
@@ -118,6 +121,22 @@ class WorkflowResolver:
                             result.errors.append(
                                 catalog.DiscoveryError(source=target, error=str(exc))
                             )
+                if words:
+                    result.workflows = [
+                        descriptor
+                        for descriptor in result.workflows
+                        if all(
+                            any(
+                                word in value.casefold()
+                                for value in (
+                                    descriptor.reference,
+                                    descriptor.name,
+                                    descriptor.description or "",
+                                )
+                            )
+                            for word in words
+                        )
+                    ]
                 result.workflows.sort(
                     key=lambda descriptor: order[descriptor.reference]
                 )

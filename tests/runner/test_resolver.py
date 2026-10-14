@@ -195,6 +195,52 @@ async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
     assert not (await resolver.discover(after="builtin:helper")).workflows
 
 
+@pytest.mark.parametrize(
+    "query, references",
+    [
+        ("MATH:DOU", ["math:double"]),
+        ("OUBLE", ["math:double"]),
+        ("NUMB", ["math:double"]),
+        ("  MATH  OUBLE  NUMB  ", ["math:double"]),
+        ("math missing", []),
+        ("unmatched", []),
+        ("BUILTIN:AGE", ["builtin:agent"]),
+        ("CODING", ["builtin:agent"]),
+        ("", ["math:double", "builtin:agent", "builtin:helper"]),
+        ("   ", ["math:double", "builtin:agent", "builtin:helper"]),
+    ],
+)
+async def test_catalog_search(
+    tmp_path: Path, query: str, references: list[str]
+) -> None:
+    (tmp_path / "math.py").write_text(SOURCE)
+    page = await WorkflowResolver(tmp_path).discover(query=query)
+    assert [item.reference for item in page.workflows] == references
+    assert page.next_after is None
+
+
+async def test_catalog_search_before_pagination(tmp_path: Path) -> None:
+    (tmp_path / "aaa.py").write_text(SOURCE)
+    (tmp_path / "zzz.py").write_text(SOURCE)
+    (tmp_path / "newest.py").write_text(
+        SOURCE.replace("Double", "Triple").replace("double", "triple")
+    )
+    for index, name in enumerate(("aaa", "zzz", "newest"), start=1):
+        os.utime(tmp_path / f"{name}.py", ns=(index * 10**9, index * 10**9))
+    (tmp_path / "broken.py").write_text("this is invalid python")
+    resolver = WorkflowResolver(tmp_path)
+    first = await resolver.discover(query="OUBLE", limit=1)
+    assert [item.reference for item in first.workflows] == ["zzz:double"]
+    assert first.next_after == "zzz:double"
+    assert [error.source for error in first.errors] == ["broken"]
+    last = await resolver.discover(query="OUBLE", after=first.next_after, limit=1)
+    assert [item.reference for item in last.workflows] == ["aaa:double"]
+    assert last.next_after is None
+    assert not (
+        await resolver.discover(query="OUBLE", after="aaa:double", limit=1)
+    ).workflows
+
+
 async def test_catalog_modified_time_ties_and_refresh(tmp_path: Path) -> None:
     for name in ("zzz", "aaa"):
         path = tmp_path / f"{name}.py"

@@ -586,36 +586,23 @@ class RunnerService:
                     description_query.reference
                 )
             )
-        if method == "workflows.list":
-            listing = p.ExecutionList.model_validate(params)
-            discovered = await (await self.runner.project()).resolver.discover(
-                after=listing.after, limit=listing.limit
+        if method in ("workflows.list", "workflows.search"):
+            workflow_query = (
+                p.WorkflowSearch.model_validate(params)
+                if method == "workflows.search"
+                else p.WorkflowSearch(
+                    query="", **p.ExecutionList.model_validate(params).model_dump()
+                )
             )
-            active_summaries = [
-                await self._summary(identifier) for identifier in tuple(self._active)
-            ]
+            discovered = await (await self.runner.project()).resolver.discover(
+                query=workflow_query.query,
+                after=workflow_query.after,
+                limit=workflow_query.limit,
+            )
             return p.json_value(
                 p.WorkflowPage(
                     workflows=[
-                        p.WorkflowListing(
-                            descriptor=descriptor,
-                            active_executions=sum(
-                                item.active and item.reference == descriptor.reference
-                                for item in active_summaries
-                            ),
-                            pending_inputs=sum(
-                                item.pending_inputs
-                                for item in active_summaries
-                                if item.active
-                                and item.reference == descriptor.reference
-                            ),
-                            awaiting_authentication=sum(
-                                item.awaiting_authentication
-                                for item in active_summaries
-                                if item.active
-                                and item.reference == descriptor.reference
-                            ),
-                        )
+                        p.WorkflowListing(descriptor=descriptor)
                         for descriptor in discovered.workflows
                     ],
                     errors=discovered.errors,

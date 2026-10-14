@@ -212,6 +212,11 @@ class RunnerClient:
             )
         )
 
+    async def search_workflows(self, params: p.WorkflowSearch) -> p.WorkflowPage:
+        return p.WorkflowPage.model_validate(
+            await self.request("workflows.search", params.model_dump(mode="json"))
+        )
+
     async def describe_workflow(self, reference: str) -> WorkflowDescriptor:
         return WorkflowDescriptor.model_validate(
             await self.request("workflows.describe", {"reference": reference})

@@ -129,15 +129,16 @@ class ExecutionList(Model):
     limit: int = pydantic.Field(default=100, ge=1, le=500, strict=True)
 
 
+class WorkflowSearch(ExecutionList):
+    query: str
+
+
 class DescribeWorkflow(Model):
     reference: str = pydantic.Field(min_length=1, max_length=4096)
 
 
 class WorkflowListing(Model):
     descriptor: WorkflowDescriptor
-    active_executions: int = 0
-    pending_inputs: int = 0
-    awaiting_authentication: int = 0
 
 
 class WorkflowPage(Model):

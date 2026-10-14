@@ -95,6 +95,34 @@ async def test_catalog_dynamic_and_paged(tmp_path: Path) -> None:
         ]
 
 
+async def test_workflow_search_pagination(tmp_path: Path) -> None:
+    prepare(tmp_path)
+    async with client.embedded(tmp_path) as connection:
+        first = await connection.search_workflows(
+            p.WorkflowSearch(query="FLOW", limit=1)
+        )
+        assert [item.descriptor.reference for item in first.workflows] == [
+            "flow:approval"
+        ]
+        assert first.next_after == "flow:approval"
+        rest = await connection.search_workflows(
+            p.WorkflowSearch(query="FLOW", after=first.next_after)
+        )
+        assert [item.descriptor.reference for item in rest.workflows] == [
+            "flow:child",
+            "flow:main",
+        ]
+        assert rest.next_after is None
+        assert not (
+            await connection.search_workflows(p.WorkflowSearch(query="unmatched"))
+        ).workflows
+        assert (await connection.search_workflows(p.WorkflowSearch(query=""))) == (
+            await connection.workflows()
+        )
+        with pytest.raises(p.RemoteError, match="valid string"):
+            await connection.request("workflows.search", {"query": 42})
+
+
 async def test_execution_summary_counts_child_input_and_auth(tmp_path: Path) -> None:
     prepare(tmp_path)
     token = secrets.token_urlsafe(32)
@@ -112,13 +140,22 @@ async def test_execution_summary_counts_child_input_and_auth(tmp_path: Path) -> 
                 assert summary.reference == "flow:main"
                 assert summary.pending_inputs == 1 and summary.active
                 assert summary.root_workflow_id != request.workflow_id
-                page = await connection.workflows()
+                with patch.object(
+                    service,
+                    "_summary",
+                    side_effect=AssertionError("live count queried"),
+                ):
+                    page = await connection.workflows()
+                    matches = await connection.search_workflows(
+                        p.WorkflowSearch(query="FLOW:MA")
+                    )
                 root = next(
                     item
                     for item in page.workflows
                     if item.descriptor.reference == "flow:main"
                 )
-                assert root.active_executions == root.pending_inputs == 1
+                assert root.model_dump().keys() == {"descriptor"}
+                assert matches.workflows == [root]
                 login = await connection.login("chatgpt")
                 assert login.execution_ids == []
                 assert not (
@@ -166,7 +203,9 @@ async def test_commands_start_list_send_and_shell(
         identifier = json.loads(capsys.readouterr().out)["execution_id"]
         request = await pending(connection, identifier)
         await command(connection, "workflow", "list")
-        assert "Pending inputs" in capsys.readouterr().out
+        listing_output = capsys.readouterr().out
+        assert "Reference  Description" in listing_output
+        assert "Pending inputs" not in listing_output
         await command(connection, "execution", "list", "--active", "--json")
         assert (
             json.loads(capsys.readouterr().out)["executions"][0]["pending_inputs"] == 1
