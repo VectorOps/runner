@@ -68,6 +68,9 @@ async def test_name_survives_restart_without_steps_and_preserves_configuration(
     reopened = SQLiteHistory(database.path)
     assert (await reopened.get_workflow("workflow")).name == "Fix failing tests"
     cast(AsyncMock, owner.llm.generate).assert_awaited_once()
+    arguments = cast(AsyncMock, owner.llm.generate).call_args.kwargs
+    assert arguments["max_output_tokens"] is None
+    assert "at most 8 words" in arguments["system_prompt"]
     await (await naming(tmp_path)).ensure_name(reopened, "workflow")
     assert (await reopened.inspect_execution()).stats.steps == 1
     assert (await reopened.execution_summary()).name == "Fix failing tests"

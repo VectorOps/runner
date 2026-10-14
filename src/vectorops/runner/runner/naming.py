@@ -48,7 +48,7 @@ class WorkflowNaming:
                     response = await self.llm.generate(
                         message.to_message(),
                         system_prompt=_INSTRUCTION,
-                        max_output_tokens=64,
+                        max_output_tokens=None,
                     )
                 text = " ".join(
                     block.text for block in response.content if block.type == "text"
