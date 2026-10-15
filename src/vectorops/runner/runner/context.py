@@ -118,6 +118,11 @@ class WorkflowExecutionContext:
     inboxes: typing.Optional[inbox.Registry] = None
 
     @property
+    def version(self) -> int:
+        """Return the durable execution version, unchanged by code upgrades on replay."""
+        return self.workflow.version
+
+    @property
     def data_path(self) -> Path:
         return self.project.data_path
 

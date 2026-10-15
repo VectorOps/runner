@@ -165,3 +165,70 @@ async def test_manual_spawn_resolves_decorated_contract_and_replays(
     assert await runner.run(
         "contracts:manual", continue_from_step_id=history.heads["root"]
     ) == {"text": "hello"}
+
+
+async def test_context_version_preserves_root_and_child_branches_on_replay(
+    workspace: Path, history: MemoryHistory
+) -> None:
+    source = sources.read("workflow_versions.py")
+    path = workspace / "workflows" / "versions.py"
+    path.write_text(source)
+    runner = WorkflowRunner(workspace, history)
+    original = {
+        "version": 1,
+        "value": "legacy",
+        "child": {"version": 3, "value": "legacy"},
+    }
+    assert await runner.run("versions:workflow", workflow_id="root") == original
+    child = next(w for w in history.workflows.values() if w.id != "root")
+    path.write_text(
+        source.replace("version=1", "version=2").replace("version=3", "version=4")
+    )
+    before = dict(history.steps)
+    restarted = WorkflowRunner(workspace, history)
+    assert (
+        await restarted.run(
+            "versions:workflow", continue_from_step_id=history.heads["root"]
+        )
+        == original
+    )
+    assert (
+        await restarted.run(
+            "versions:child", continue_from_step_id=history.heads[child.id]
+        )
+        == original["child"]
+    )
+    assert history.steps == before
+    assert history.workflows["root"].version == 1
+    assert history.workflows[child.id].version == 3
+    assert await restarted.run("versions:workflow", workflow_id="new") == {
+        "version": 2,
+        "value": "modern",
+        "child": {"version": 4, "value": "modern"},
+    }
+
+
+async def test_context_version_survives_sqlite_restart_and_code_upgrade(
+    workspace: Path,
+) -> None:
+    source = sources.read("workflow_versions.py")
+    path = workspace / "workflows" / "versions.py"
+    path.write_text(source)
+    runner = WorkflowRunner(workspace)
+    original = await runner.run("versions:workflow")
+    assert original == {
+        "version": 1,
+        "value": "legacy",
+        "child": {"version": 3, "value": "legacy"},
+    }
+    assert runner.last_execution_id is not None
+    path.write_text(
+        source.replace("version=1", "version=2").replace("version=3", "version=4")
+    )
+    restarted = WorkflowRunner(workspace)
+    assert await restarted.resume(runner.last_execution_id) == original
+    assert await restarted.run("versions:workflow") == {
+        "version": 2,
+        "value": "modern",
+        "child": {"version": 4, "value": "modern"},
+    }
