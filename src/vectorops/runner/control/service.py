@@ -93,6 +93,7 @@ class RunnerService:
             project=project,
         )
         try:
+            await self.runner.initialize_usage()
             candidates = await self.runner.recovery_candidates()
             await self._store.reconcile([candidate.id for candidate in candidates])
             for candidate in candidates:
@@ -617,6 +618,21 @@ class RunnerService:
             return p.json_value(
                 await self._summary(p.Execution.model_validate(params).execution_id)
             )
+        if method == "workflows.state":
+            workflow_state = p.WorkflowState.model_validate(params)
+            return p.json_value(
+                await self.runner.workflow_state(
+                    workflow_state.execution_id, workflow_state.workflow_id
+                )
+            )
+        if method in ("runner.usage", "runner.usage.reset"):
+            p.Empty.model_validate(params)
+            async with self._lock:
+                if self.shutdown_requested.is_set():
+                    raise p.RemoteError("runner_stopping", "runner is shutting down")
+                return p.json_value(
+                    await self.runner.runner_usage(reset=method == "runner.usage.reset")
+                )
         if method == "logs.list":
             p.Empty.model_validate(params)
             return p.json_value(await self.logs.listing())

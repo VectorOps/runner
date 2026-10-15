@@ -11,6 +11,7 @@ import pydantic
 
 from vectorops.runner import configuration as config_api, diagnostics
 from vectorops.runner import global_config
+from vectorops.runner import models, usage
 from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.authentication import models as am
 from vectorops.runner.mcp import management as mm, models as mcp_models
@@ -160,6 +161,22 @@ class RunnerClient:
 
     async def info(self) -> pydantic.JsonValue:
         return await self.request("runner.info")
+
+    async def runner_usage(self) -> usage.RunnerUsage:
+        return usage.RunnerUsage.model_validate(await self.request("runner.usage"))
+
+    async def reset_runner_usage(self) -> usage.RunnerUsage:
+        return usage.RunnerUsage.model_validate(
+            await self.request("runner.usage.reset")
+        )
+
+    async def workflow_state(
+        self, execution_id: str, workflow_id: str
+    ) -> models.Workflow:
+        query = p.WorkflowState(execution_id=execution_id, workflow_id=workflow_id)
+        return models.Workflow.model_validate(
+            await self.request("workflows.state", query.model_dump(mode="json"))
+        )
 
     async def get_configuration(self, name: str) -> config_api.Value:
         return config_api.Value.model_validate(

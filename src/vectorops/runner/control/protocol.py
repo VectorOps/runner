@@ -114,6 +114,10 @@ class Execution(Model):
     execution_id: str = pydantic.Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
 
 
+class WorkflowState(Execution):
+    workflow_id: str = pydantic.Field(min_length=1, max_length=128)
+
+
 class Resume(Execution):
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
 

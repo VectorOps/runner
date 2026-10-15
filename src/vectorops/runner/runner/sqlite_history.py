@@ -10,13 +10,15 @@ import sqlite3
 import typing
 from uuid import uuid4
 
-from vectorops.runner import models, tool_policy
+from vectorops.runner import models, tool_policy, usage
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import branching
 from vectorops.runner.runner.sqlite_writer import SQLiteWriter
+from vectorops.runner.runner.usage_history import UsageHistory
+from vectorops.runner.runner.usage_store import UsageStore
 
 T = typing.TypeVar("T")
 
@@ -34,7 +36,13 @@ async def _offload(function: Callable[[], T]) -> T:
 
 
 class SQLiteHistory:
-    def __init__(self, path: typing.Union[str, Path], *, batch_size: int = 128) -> None:
+    def __init__(
+        self,
+        path: typing.Union[str, Path],
+        *,
+        batch_size: int = 128,
+        usage_store: typing.Optional[UsageStore] = None,
+    ) -> None:
         if batch_size < 1:
             raise ValueError("replay batch size must be positive")
         self.path = Path(path).expanduser().absolute()
@@ -43,6 +51,7 @@ class SQLiteHistory:
         self._initialization_lock = asyncio.Lock()
         self._writer: typing.Optional[SQLiteWriter] = None
         self._closed = False
+        self._usage_store = usage_store
 
     async def __aenter__(self) -> typing.Self:
         if self._closed or self._writer is not None:
@@ -130,8 +139,34 @@ class SQLiteHistory:
                 PRAGMA user_version = 1;
                 COMMIT;
                 """)
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                UsageHistory.initialize(connection)
 
-    async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
+    async def _run(
+        self, operation: Callable[[sqlite3.Connection], T], *, account: bool = False
+    ) -> T:
+        if self._usage_store is None or not account:
+            return await self._invoke(operation)
+        store = self._usage_store
+        async with store.lock:
+
+            async def persist() -> T:
+                result = await self._invoke(operation)
+                revision, total = await self._invoke(UsageHistory.snapshot)
+                await store.record(self.path.parent.name, revision, total)
+                return result
+
+            task = asyncio.create_task(persist())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await task
+                finally:
+                    raise
+
+    async def _invoke(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         if self._closed:
             raise RuntimeError("history writer is closed")
         await self._prepare()
@@ -163,7 +198,7 @@ class SQLiteHistory:
         return models.WorkflowStep.model_validate_json(row[0])
 
     async def save_workflow(self, workflow: models.Workflow) -> None:
-        payload = workflow.model_dump_json()
+        payload = workflow.model_copy(update={"usage": None}).model_dump_json()
 
         def save(connection: sqlite3.Connection) -> None:
             with connection:
@@ -472,6 +507,9 @@ class SQLiteHistory:
 
         return await self._run(read)
 
+    async def usage_snapshot(self) -> tuple[int, usage.Totals]:
+        return await self._invoke(UsageHistory.snapshot)
+
     @staticmethod
     def _execution(connection: sqlite3.Connection) -> state.ExecutionRecord:
         row = connection.execute(
@@ -512,7 +550,9 @@ class SQLiteHistory:
             raise
 
     async def execution_summary(self) -> inspection.ExecutionSummary:
-        """Read root identity and all pending mailbox counts without scanning step history."""
+        """Read persisted totals and project context from the authoritative root path."""
+
+        await self._prepare()
 
         def read() -> inspection.ExecutionSummary:
             with closing(self._connect_readonly()) as connection:
@@ -533,6 +573,10 @@ class SQLiteHistory:
                     name=workflow.name,
                     status=execution.status,
                     pending_inputs=pending,
+                    usage=usage.ExecutionUsage(
+                        totals=UsageHistory.snapshot(connection)[1],
+                        root_context=UsageHistory.root_context(connection, workflow.id),
+                    ),
                 )
 
         return await _offload(read)
@@ -890,8 +934,10 @@ class SQLiteHistory:
                     "INSERT INTO workflow_heads VALUES (?, ?) ON CONFLICT(workflow_id) DO UPDATE SET step_id = excluded.step_id",
                     (step.workflow_id, step.id),
                 )
+                UsageHistory.link(connection, step)
+                UsageHistory.update(connection, step)
 
-        await self._run(append)
+        await self._run(append, account=True)
 
     async def update_step(self, step: models.WorkflowStep) -> None:
         await self.update_steps((step,))
@@ -927,8 +973,9 @@ class SQLiteHistory:
                     connection.execute(
                         "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
                     )
+                    UsageHistory.update(connection, step, previous)
 
-        await self._run(update)
+        await self._run(update, account=True)
 
     def _snapshot_path(self, workflow_id: str, head_step_id: str) -> sqlite3.Connection:
         """Materialize the selected path in SQLite temporary storage, not Python lists."""

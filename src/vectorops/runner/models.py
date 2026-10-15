@@ -6,6 +6,8 @@ import typing
 
 import pydantic
 
+from vectorops.runner import usage as usage_models
+
 _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
     "workflow.spawn",
     "workflow.join",
@@ -36,10 +38,13 @@ class Workflow(_JsonModel):
     name: typing.Optional[str] = pydantic.Field(
         default=None, min_length=1, max_length=120
     )
+    usage: typing.Optional[usage_models.WorkflowUsage] = None
 
     def same_configuration(self, other: Workflow) -> bool:
         """Compare execution configuration without mutable presentation metadata."""
-        return self.model_dump(exclude={"name"}) == other.model_dump(exclude={"name"})
+        return self.model_dump(exclude={"name", "usage"}) == other.model_dump(
+            exclude={"name", "usage"}
+        )
 
 
 class StepOperation(_JsonModel):

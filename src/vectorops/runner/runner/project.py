@@ -21,6 +21,7 @@ from vectorops.runner.environment.configuration import (
 )
 from vectorops.runner.tool_policy import ToolPolicy
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
+from vectorops.runner.runner.usage_store import UsageStore
 
 if typing.TYPE_CHECKING:
     from vectorops.runner.runner.resolver import WorkflowResolver
@@ -261,6 +262,10 @@ class RunnerProject:
     @cached_property
     def database(self) -> WorkspaceDatabase:
         return WorkspaceDatabase(self.data_path)
+
+    @cached_property
+    def usage(self) -> UsageStore:
+        return UsageStore(self.database)
 
     @cached_property
     def resolver(self) -> WorkflowResolver:

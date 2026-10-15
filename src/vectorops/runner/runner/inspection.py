@@ -4,7 +4,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import models
+from vectorops.runner import models, usage as usage_models
 from vectorops.runner.runner import execution_state
 
 
@@ -31,6 +31,7 @@ class ExecutionSummary(pydantic.BaseModel):
     pending_inputs: int = 0
     awaiting_authentication: bool = False
     active: bool = False
+    usage: typing.Optional[usage_models.ExecutionUsage] = None
 
 
 class ExportHeader(pydantic.BaseModel):

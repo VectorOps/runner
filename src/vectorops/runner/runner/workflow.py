@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pydantic
 
-from vectorops.runner import models
+from vectorops.runner import models, usage
 from vectorops.runner import diagnostics
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
@@ -78,6 +78,8 @@ class WorkflowRunner:
         self._project_lock = asyncio.Lock()
         self._execution_index: typing.Optional[ExecutionIndex] = None
         self._naming: typing.Optional[WorkflowNaming] = None
+        self._usage_ready = False
+        self._usage_lock = asyncio.Lock()
 
     async def project(self) -> RunnerProject:
         async with self._project_lock:
@@ -327,6 +329,7 @@ class WorkflowRunner:
         ):
             raise ValueError("new execution ID requires a new persistent execution")
         if self.history is None:
+            await self.initialize_usage()
             is_new = execution_id is None
             identifier = execution_id or new_execution_id or uuid4().hex
             async with self._execution_writer(project, identifier) as store:
@@ -398,7 +401,7 @@ class WorkflowRunner:
                 ):
                     raise FileNotFoundError("execution history is missing")
                 async with (
-                    SQLiteHistory(history_path) as database,
+                    SQLiteHistory(history_path, usage_store=project.usage) as database,
                     CachedHistory(
                         database,
                         write_through=self._state_store is not None,
@@ -646,7 +649,7 @@ class WorkflowRunner:
             raise ValueError("execution history escapes project data")
         if not await asyncio.to_thread(path.is_file):
             raise FileNotFoundError("execution history is missing")
-        return SQLiteHistory(path)
+        return SQLiteHistory(path, usage_store=project.usage)
 
     async def execution_state(
         self, execution_id: str
@@ -671,6 +674,33 @@ class WorkflowRunner:
 
     async def execution_summary(self, execution_id: str) -> inspection.ExecutionSummary:
         return await (await self._selected_database(execution_id)).execution_summary()
+
+    async def workflow_state(
+        self, execution_id: str, workflow_id: str
+    ) -> models.Workflow:
+        return await (await self._selected_database(execution_id)).get_workflow(
+            workflow_id
+        )
+
+    async def initialize_usage(self) -> None:
+        """Reconcile retained histories once before accepting work or reading counters."""
+        async with self._usage_lock:
+            if self._usage_ready:
+                return
+            project = await self.project()
+            identifiers = await (await self.execution_index()).discover()
+            async with project.usage.lock:
+                for identifier in identifiers:
+                    database = await self._database(project, identifier)
+                    revision, total = await database.usage_snapshot()
+                    await project.usage.record(identifier, revision, total)
+            self._usage_ready = True
+
+    async def runner_usage(self, *, reset: bool = False) -> usage.RunnerUsage:
+        await self.initialize_usage()
+        project = await self.project()
+        async with project.usage.lock:
+            return await project.usage.read(reset=reset)
 
     async def query_history(
         self, query: history_query.HistoryQuery
@@ -738,11 +768,15 @@ class WorkflowRunner:
 
     async def remove_execution(self, execution_id: str) -> None:
         project = await self.project()
+        await self.initialize_usage()
         async with RunnerStateStore(project.data_path, project.database) as store:
             database = await self._database(project, execution_id)
             record = await database.get_execution()
             if record.status in ("running", "paused"):
                 raise ValueError("active execution history cannot be removed")
+            async with project.usage.lock:
+                revision, total = await database.usage_snapshot()
+                await project.usage.record(execution_id, revision, total)
             pointer = await store.load()
             if pointer.last_execution_id == execution_id:
                 await store.save(pointer.model_copy(update={"last_execution_id": None}))
