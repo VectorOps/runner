@@ -49,6 +49,7 @@ class StreamingActivityRequest:
     kind: typing.ClassVar[typing.Literal["streaming"]] = "streaming"
     operation: models.StepOperation
     invoke: Callable[[ActivityExecutionContext], AsyncGenerator[StreamItem, None]]
+    input_factory: typing.Optional[Callable[[], dict[str, pydantic.JsonValue]]] = None
 
 
 @dataclass(frozen=True)
@@ -164,9 +165,13 @@ class WorkflowExecutionContext:
         self,
         operation: models.StepOperation,
         invoke: Callable[[ActivityExecutionContext], AsyncGenerator[StreamItem, None]],
+        *,
+        input_factory: typing.Optional[
+            Callable[[], dict[str, pydantic.JsonValue]]
+        ] = None,
     ) -> pydantic.JsonValue:
         response = await self.submitter.submit(
-            StreamingActivityRequest(operation, invoke)
+            StreamingActivityRequest(operation, invoke, input_factory)
         )
         if response.kind != "activity":
             raise RuntimeError("executor returned an invalid activity response")

@@ -1,6 +1,6 @@
 """Workflow-local conversations reconstructed by deterministic activity replay."""
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 import asyncio
 import hashlib
@@ -153,8 +153,9 @@ class LLM:
     def _request(
         self, definitions: Sequence[connect.ToolSpec], *, snapshot: bool = False
     ) -> connect.GenerateRequest:
+        """Snapshot list membership; retry isolates messages at the provider boundary."""
         assert self._settings is not None
-        messages = [message.model_copy(deep=True) for message in self._messages]
+        messages = list(self._messages)
         factory = (
             connect.GenerateRequest.model_construct
             if snapshot
@@ -163,7 +164,7 @@ class LLM:
         request = factory(
             messages=messages,
             system_prompt=self._system_prompt,
-            tools=[definition.model_copy(deep=True) for definition in definitions],
+            tools=list(definitions),
             temperature=self._settings.temperature,
             max_output_tokens=self._settings.max_output_tokens,
             reasoning=self._settings.reasoning,
@@ -195,21 +196,35 @@ class LLM:
     async def _invoke(
         self,
         call: c.ActivityCall,
-        request: connect.GenerateRequest,
+        request: typing.Union[
+            connect.GenerateRequest, Callable[[], connect.GenerateRequest]
+        ],
         *,
         settings: Optional[models.Settings] = None,
         finalize: Optional[invocation.Finalizer] = None,
     ) -> pydantic.JsonValue:
+        """Prepare requests once for live work, never for terminal generation replay."""
         assert self._settings is not None
         selected = self._settings if settings is None else settings
+        prepared: Optional[connect.GenerateRequest] = None
+
+        def prepare() -> connect.GenerateRequest:
+            nonlocal prepared
+            if prepared is None:
+                prepared = request() if callable(request) else request
+            return prepared
+
+        def provider_request() -> connect.GenerateRequest:
+            return prepare().model_copy(
+                update={"session": connect.SessionHints(session_id=self._session_id)}
+            )
+
         return await invocation.invoke(
             call,
-            self._input(request, selected),
+            lambda: self._input(prepare(), selected),
             self._backend,
             selected,
-            request.model_copy(
-                update={"session": connect.SessionHints(session_id=self._session_id)}
-            ),
+            provider_request,
             self._retry,
             finalize,
         )
@@ -222,7 +237,7 @@ class LLM:
         self, call: c.ActivityCall, definitions: Sequence[connect.ToolSpec]
     ) -> connect.AssistantMessage:
         response = connect.AssistantMessage.model_validate(
-            await self._invoke(call, self._request(definitions))
+            await self._invoke(call, lambda: self._request(definitions))
         )
         self._messages.append(response.model_copy(deep=True))
         self._account(response)
@@ -265,7 +280,9 @@ class LLM:
             return streaming.ActivityFinal(result.model_dump(mode="json"), item.metrics)
 
         generation = models.Generation.model_validate(
-            await self._invoke(call, self._request(definitions), finalize=measured)
+            await self._invoke(
+                call, lambda: self._request(definitions), finalize=measured
+            )
         )
         self._compaction_history.record(
             generation, len(self._messages), self._signature(definitions)

@@ -264,12 +264,15 @@ class ActivityCall:
     async def stream(
         self,
         *,
-        input: dict[str, pydantic.JsonValue],
+        input: typing.Union[
+            dict[str, pydantic.JsonValue], Callable[[], dict[str, pydantic.JsonValue]]
+        ],
         invoke: Callable[
             [ActivityExecutionContext], AsyncGenerator[streaming.StreamItem, None]
         ],
     ) -> pydantic.JsonValue:
-        operation = self._operation(input)
+        """Defer informational input factories until a new activity is recorded."""
+        operation = self._operation({} if callable(input) else input)
 
         async def isolated(
             ctx: ActivityExecutionContext,
@@ -282,7 +285,9 @@ class ActivityCall:
             finally:
                 _CURRENT_CONTEXT.reset(token)
 
-        return await self._context.run_streaming_activity(operation, isolated)
+        return await self._context.run_streaming_activity(
+            operation, isolated, input_factory=input if callable(input) else None
+        )
 
 
 def activity_wrapper(

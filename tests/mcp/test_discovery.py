@@ -293,7 +293,15 @@ async def test_interrupted_generation_reconstructs_activation(
         assert runner.last_execution_id is not None
         await WorkflowRunner(workspace).resume(runner.last_execution_id)
         assert len(fixture.probe.requests) == 4
-        assert fixture.probe.requests[1] == fixture.probe.requests[2]
+        original, resumed = fixture.probe.requests[1:3]
+        assert original.session is not None
+        assert resumed.session is not None
+        assert original.session != resumed.session
+        assert original.model_dump(exclude={"session"}) == resumed.model_dump(
+            exclude={"session"}
+        )
+        assert fixture.probe.requests[0].session == original.session
+        assert fixture.probe.requests[3].session == resumed.session
     finally:
         if not task.done():
             task.cancel()

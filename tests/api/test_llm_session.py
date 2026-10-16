@@ -1,5 +1,3 @@
-from collections.abc import Sequence
-
 import connect
 from connect.providers.chatgpt import ChatGPTProvider
 import pydantic
@@ -9,36 +7,26 @@ from tests.api.test_llm import FakeProvider, answer
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import llm
-from vectorops.runner.api.llm import api
 
 
 async def test_session_lasts_for_object_not_workflow_or_identity(
-    history: MemoryHistory, monkeypatch: pytest.MonkeyPatch
+    history: MemoryHistory,
 ) -> None:
     backend = FakeProvider([answer("one"), answer("two"), answer("three")])
     sessions: list[str] = []
-    original = api.LLM._request
-
-    def request(
-        self: api.LLM,
-        definitions: Sequence[connect.ToolSpec],
-        *,
-        snapshot: bool = False,
-    ) -> connect.GenerateRequest:
-        sessions.append(self._session_id)
-        return original(self, definitions, snapshot=snapshot)
-
-    monkeypatch.setattr(api.LLM, "_request", request)
 
     async def workflow() -> pydantic.JsonValue:
         first = llm.LLM("same", model="test", backend=backend)
         first.add_user_message("hello")
         await first.generate()
+        sessions.append(first._session_id)
         first.add_user_message("continue")
         await first.generate()
+        sessions.append(first._session_id)
         second = llm.LLM("same", model="test", backend=backend)
         second.add_user_message("new conversation")
         await second.generate()
+        sessions.append(second._session_id)
         return None
 
     result = await replay.run(history, workflow)

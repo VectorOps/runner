@@ -171,12 +171,20 @@ class StreamingActivityHandler:
     async def execute(
         self, request: context.StreamingActivityRequest
     ) -> DeferredResponse:
-        return await prepare_response(
-            self.runtime,
-            request.operation,
-            models.StepStreaming(),
-            partial(self._resolve, request),
-        )
+        operation = request.operation
+        if request.input_factory is not None and not operation.replay_ignores_input:
+            raise ValueError("deferred input requires informational replay inputs")
+        step = await self.runtime.recorded(operation)
+        if step is None:
+            if request.input_factory is not None:
+                operation = models.StepOperation(
+                    kind=operation.kind,
+                    name=operation.name,
+                    version=operation.version,
+                    input=request.input_factory(),
+                )
+            step = await self.runtime.append(operation, models.StepStreaming())
+        return DeferredResponse(step, partial(self._resolve, request, step))
 
     async def _resolve(
         self, request: context.StreamingActivityRequest, step: models.WorkflowStep

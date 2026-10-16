@@ -79,6 +79,62 @@ async def test_wrapper_explicit_input_detects_mismatch(history: MemoryHistory) -
         await replay.run(history, wrapped, first.id)
 
 
+@pytest.mark.parametrize("failed", [False, True])
+async def test_deferred_stream_input_is_persisted_once_and_skipped_on_replay(
+    history: MemoryHistory, failed: bool
+) -> None:
+    inputs: list[str] = []
+
+    @c.activity_wrapper(kind="llm.test")
+    async def wrapped(call: c.ActivityCall) -> pydantic.JsonValue:
+        def prepare() -> dict[str, pydantic.JsonValue]:
+            inputs.append("prepared")
+            return {"digest": "original"}
+
+        async def invoke(
+            ctx: ActivityExecutionContext,
+        ) -> AsyncGenerator[StreamItem, None]:
+            assert c._CURRENT_CONTEXT.get() is None
+            if failed:
+                raise ValueError("failed")
+            yield c.final(7)
+
+        return await call.stream(input=prepare, invoke=invoke)
+
+    async def workflow() -> pydantic.JsonValue:
+        if failed:
+            with pytest.raises(ActivityError, match="failed"):
+                await wrapped()
+            return None
+        return await wrapped()
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed", first.outcome
+    operation = history.path(first.id)[0].operation
+    assert isinstance(operation, models.StepOperation)
+    assert operation.input == {"digest": "original"}
+    before = dict(history.steps)
+    assert await replay.run(history, workflow, first.id) == first
+    assert inputs == ["prepared"]
+    assert history.steps == before
+
+
+async def test_deferred_input_cannot_bypass_explicit_replay_matching(
+    history: MemoryHistory,
+) -> None:
+    @c.activity_wrapper(kind="test.strict")
+    async def wrapped(call: c.ActivityCall) -> None:
+        async def invoke(
+            ctx: ActivityExecutionContext,
+        ) -> AsyncGenerator[StreamItem, None]:
+            yield c.final(None)
+
+        await call.stream(input=lambda: {"value": 1}, invoke=invoke)
+
+    with pytest.raises(ValueError, match="informational replay inputs"):
+        await replay.run(history, wrapped)
+
+
 async def test_helper_lifetime_and_single_submission(history: MemoryHistory) -> None:
     saved: list[c.ActivityCall] = []
 

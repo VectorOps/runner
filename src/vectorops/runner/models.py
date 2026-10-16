@@ -55,11 +55,15 @@ class StepOperation(_JsonModel):
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     version: int = pydantic.Field(default=1, ge=1, strict=True)
 
+    @property
+    def replay_ignores_input(self) -> bool:
+        return self.kind.startswith("llm.")
+
     def matches_replay(self, recorded: StepOperation) -> bool:
         """Match activity positions, treating LLM metadata and versions as informational."""
         if (self.kind, self.name) != (recorded.kind, recorded.name):
             return False
-        if self.kind.startswith("llm."):
+        if self.replay_ignores_input:
             return True
         return self.input == recorded.input
 

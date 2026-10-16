@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
-from typing import Optional
+from typing import Optional, Union
 
 import connect
 import pydantic
@@ -21,19 +21,22 @@ Finalizer = Callable[
 
 async def invoke(
     call: c.ActivityCall,
-    input: dict[str, pydantic.JsonValue],
+    input: Union[
+        dict[str, pydantic.JsonValue], Callable[[], dict[str, pydantic.JsonValue]]
+    ],
     backend: provider.Provider,
     settings: models.Settings,
-    request: connect.GenerateRequest,
+    request: Union[connect.GenerateRequest, Callable[[], connect.GenerateRequest]],
     policy: models.RetryPolicy,
     finalize: Optional[Finalizer] = None,
 ) -> pydantic.JsonValue:
     async def stream(
         ctx: ActivityExecutionContext,
     ) -> AsyncGenerator[streaming.StreamItem, None]:
-        observation = observability.Observation(settings, request)
+        selected = request() if callable(request) else request
+        observation = observability.Observation(settings, selected)
         async with aclosing(
-            retry.stream(backend, ctx, settings, request, policy, observation)
+            retry.stream(backend, ctx, settings, selected, policy, observation)
         ) as items:
             async for item in items:
                 if isinstance(item, streaming.ActivityFinal) and finalize is not None:

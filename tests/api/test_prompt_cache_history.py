@@ -1,14 +1,14 @@
 """Exact prompt-prefix checks, including opt-in read-only production-history replay."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
 import sqlite3
-from typing import Optional
+from typing import Optional, Union
 
 import connect
 from connect.providers.chatgpt import ChatGPTProvider
@@ -80,15 +80,21 @@ def capture(monkeypatch: pytest.MonkeyPatch) -> list[Prompt]:
 
     async def invoke(
         call: composition.ActivityCall,
-        input: dict[str, pydantic.JsonValue],
+        input: Union[
+            dict[str, pydantic.JsonValue], Callable[[], dict[str, pydantic.JsonValue]]
+        ],
         backend: llm.Provider,
         settings: llm.Settings,
-        request: connect.GenerateRequest,
+        request: Union[connect.GenerateRequest, Callable[[], connect.GenerateRequest]],
         policy: llm.RetryPolicy,
         finalize: Optional[invocation.Finalizer] = None,
     ) -> pydantic.JsonValue:
-        prompts.append(Prompt.from_request(str(len(prompts) + 1), settings, request))
-        return await original(call, input, backend, settings, request, policy, finalize)
+        prepared = request() if callable(request) else request
+        metadata = input() if callable(input) else input
+        prompts.append(Prompt.from_request(str(len(prompts) + 1), settings, prepared))
+        return await original(
+            call, metadata, backend, settings, prepared, policy, finalize
+        )
 
     monkeypatch.setattr(invocation, "invoke", invoke)
     return prompts
