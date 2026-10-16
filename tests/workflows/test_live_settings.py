@@ -12,9 +12,9 @@ from vectorops.runner.runner.workflow import WorkflowRunner
 
 async def test_model_changes_between_turns_and_replay(tmp_path: Path) -> None:
     configure(tmp_path, tmp_path, "[components.workflows.agent]\nagents = []\n")
-    defaults = "llm.profiles.strong"
-    model_key = f"{defaults}.model"
-    reasoning_key = f"{defaults}.reasoning.effort"
+    defaults = ["components", "llm", "profiles", "strong"]
+    model_key = [*defaults, "model"]
+    reasoning_key = [*defaults, "reasoning", "effort"]
     backend = FakeProvider([answer("first"), answer("second"), answer("third")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
@@ -39,8 +39,12 @@ async def test_model_changes_between_turns_and_replay(tmp_path: Path) -> None:
             assert backend.settings[1].reasoning.effort == "low"
 
             await connection.set_configuration(defaults, {})
-            await connection.set_configuration("llm.model", "fallback-model")
-            await connection.set_configuration("llm.reasoning", {"effort": "medium"})
+            await connection.set_configuration(
+                ["components", "llm", "model"], "fallback-model"
+            )
+            await connection.set_configuration(
+                ["components", "llm", "reasoning"], {"effort": "medium"}
+            )
             await reply(connection, request, "again")
             request = await pending(connection, accepted.execution_id)
             assert backend.settings[2].model == "fallback-model"

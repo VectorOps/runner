@@ -133,9 +133,9 @@ Setting or resetting a subtree also removes overlapping ancestor/descendant
 overrides. Setting `llm.model` after overriding `llm` removes the whole `llm`
 override; unrelated sibling keys remain unaffected.
 
-Permanent overrides are stored atomically in `data/config-overrides.json`, with
-the coordination lock at `data/config-overrides.lock`. Both paths follow the
-configured `data_directory`. Each override includes a fingerprint of the
+Permanent overrides are stored in the `configuration` document in
+`data/workspace.sqlite3`, following the configured `data_directory`.
+Each override includes a fingerprint of the
 canonical TOML value for its key. At startup,
 a changed value, type, presence, or selected subtree invalidates that override.
 Formatting-only edits and changes to unrelated keys do not. Invalidated overrides
@@ -152,22 +152,44 @@ The authenticated control protocol exposes the same operations over embedded and
 TCP connections:
 
 ```python
-await client.set_configuration("llm.model", "gpt-4.1", permanent=True)
-current = await client.get_configuration("llm.model")
-await client.reset_configuration("llm.model")
+path = ["components", "llm", "model"]
+await client.set_configuration(path, "gpt-4.1", permanent=True)
+current = await client.get_configuration(path)
+snapshot = await client.get_configuration()
+suggestions = await client.suggest_configuration(path, prefix="gpt")
+await client.reset_configuration(path)
 ```
 
 | RPC method | Parameters | Result |
 | --- | --- | --- |
-| `configuration.get` | `name` | Current value and source |
-| `configuration.set` | `name`, required `value`, optional `permanent` (false) | Updated value and source |
-| `configuration.reset` | `name` | Value after removing overlapping overrides |
+| `configuration.get` | Optional `path` (array of strings, default `[]`) | `path`, `exists`, `value` |
+| `configuration.set` | `path`, required `value`, optional `permanent` (false) | Null acknowledgment |
+| `configuration.reset` | `path` | Null acknowledgment |
+| `configuration.suggest` | `path`, optional `prefix` (empty string) | Advisory `values` array |
 
-Results contain `name`, `exists`, `value`, and `source` (`toml`, `temporary`,
-`permanent`, `mixed`, or `missing`). `mixed` describes a subtree containing
-descendant overrides. `exists` distinguishes a missing key from an explicit null.
-All clients of the same worker share these overrides. Use the running worker's
-API rather than creating a second independent configuration writer.
+RPC paths start at the TOML document root, unlike internal dotted component names.
+Each segment is a literal mapping key, so dots in keys are supported. Lists are
+read and replaced as whole values, not indexed. Omit `path` or pass `[]` to read
+the complete effective snapshot, including read-only startup settings and their
+runner defaults. `exists` distinguishes a missing key from an explicit null.
+Consumer-specific defaults and resolved LLM profiles are not materialized.
+
+Only `components` and its descendants are editable. Root replacement/reset and
+edits to startup directories, logging, retention, environment, or other root keys
+return `read_only`. Component values can be arbitrary finite JSON, including
+invalid or incomplete settings; validation happens when consumers read them.
+Reset removes runtime overrides and restores startup TOML, not necessarily shared
+inheritance. If absent there, the consumer supplies its own default.
+
+Suggestions include Connect model/provider names and enum values from known LLM
+and built-in workflow schemas. Unknown paths return an empty inventory. Suggestions
+are advisory and do not restrict writes or require valid current settings.
+
+All clients of the same worker share these overrides. A successful write response
+means new reads see the value immediately. Cached values, existing resources,
+in-flight generations, and replay snapshots are unchanged; no resource or runner
+is reinitialized. Requests are independent, without batches or revisions.
+Use the running worker's API rather than a second configuration writer.
 
 Workflow code continues to call `get_config(ctx, ...)`. New reads see the current
 effective settings; replayed reads retain their recorded values. Updating a model

@@ -110,6 +110,23 @@ async def test_completed_children_replay_old_settings(workspace: Path) -> None:
     assert isinstance(updated, dict) and updated["model"] == "second"
 
 
+async def test_api_updates_fresh_reads_without_reinitializing(workspace: Path) -> None:
+    (workspace / "config.toml").write_text('[components.llm]\nmodel = "first"\n')
+    async with RunnerService(workspace) as service:
+        project = await service.runner.project()
+        first = await service.runner.run("configuration:main")
+        await service.dispatch(
+            "configuration.set",
+            {"path": ["components", "llm", "model"], "value": "second"},
+        )
+        assert await service.runner.project() is project
+        assert project.configuration.get("llm.model") == "second"
+        assert isinstance(first, dict) and first["model"] == "first"
+        assert await service.runner.resume() == first
+        fresh = await service.runner.run("configuration:main")
+        assert isinstance(fresh, dict) and fresh["model"] == "second"
+
+
 async def test_resume_replays_old_read_then_reads_fresh_settings(
     workspace: Path,
 ) -> None:

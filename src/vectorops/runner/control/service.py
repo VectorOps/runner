@@ -11,6 +11,7 @@ import pydantic
 
 from vectorops.runner import diagnostics, input_schema
 from vectorops.runner import configuration as config_api, global_config
+from vectorops.runner import configuration_suggestions
 from vectorops.runner.authentication import models as am
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.mcp import management as mcp_management
@@ -470,28 +471,38 @@ class RunnerService:
         *,
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
-        if method in ("configuration.get", "configuration.set", "configuration.reset"):
+        if method in (
+            "configuration.get",
+            "configuration.set",
+            "configuration.reset",
+            "configuration.suggest",
+        ):
             async with self._lock:
                 if self.shutdown_requested.is_set():
                     raise p.RemoteError("runner_stopping", "runner is shutting down")
                 configuration = (await self.runner.project()).configuration
                 try:
                     if method == "configuration.set":
-                        update = config_api.Update.model_validate(params)
-                        value = await configuration.set(
-                            update.name, update.value, permanent=update.permanent
+                        await configuration.set_path(
+                            config_api.PathUpdate.model_validate(params)
                         )
-                    else:
-                        config_query = config_api.Query.model_validate(params)
-                        value = (
-                            await configuration.reset(config_query.name)
-                            if method == "configuration.reset"
-                            else configuration.inspect(config_query.name)
-                        )
-                    return value.model_dump(mode="json")
+                        return None
+                    if method == "configuration.suggest":
+                        return configuration_suggestions.suggest(
+                            config_api.SuggestQuery.model_validate(params)
+                        ).model_dump(mode="json")
+                    config_query = config_api.PathQuery.model_validate(params)
+                    if method == "configuration.reset":
+                        await configuration.reset_path(config_query)
+                        return None
+                    return configuration.snapshot(config_query).model_dump(mode="json")
                 except ValueError:
                     raise p.RemoteError(
                         "invalid_argument", "invalid configuration parameters"
+                    ) from None
+                except PermissionError:
+                    raise p.RemoteError(
+                        "read_only", "startup configuration is read-only"
                     ) from None
                 except OSError:
                     raise p.RemoteError(

@@ -128,7 +128,9 @@ async def test_service_and_embedded_forward_workspace_selection(
         assert project.workspace_path == workspace
         await project.configuration.set("test.value", "persisted", permanent=True)
     async with client.embedded(tmp_path, workspace_directory=directory) as connection:
-        assert (await connection.get_configuration("test.value")).value == "persisted"
+        assert (
+            await connection.get_configuration(["components", "test", "value"])
+        ).value == "persisted"
     assert not (workspace / ".voc").exists()
 
 
@@ -172,7 +174,9 @@ async def test_daemon_workspace_selection(
         endpoint = json.loads(line)
         assert endpoint["workspace"] == str(tmp_path.resolve())
         async with await client.RunnerClient.tcp(endpoint["port"]) as connection:
-            await connection.set_configuration("test.value", 1, permanent=True)
+            await connection.set_configuration(
+                ["components", "test", "value"], 1, permanent=True
+            )
             await connection.shutdown()
         async with asyncio.timeout(10):
             await process.wait()

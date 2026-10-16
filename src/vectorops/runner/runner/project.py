@@ -118,7 +118,9 @@ class Configuration:
         database: typing.Optional[WorkspaceDatabase] = None,
     ) -> None:
         self.path = path
-        self._defaults = deepcopy(config.components)
+        self._defaults = typing.cast(
+            dict[str, pydantic.JsonValue], config.model_dump(mode="json")
+        )
         self._overrides: dict[str, overrides.Override] = {}
         self._values = deepcopy(self._defaults)
         self._store = overrides.Store(
@@ -132,15 +134,16 @@ class Configuration:
 
     def inspect(self, name: str) -> overrides.Value:
         overrides.Query(name=name)
-        exists, value = overrides.lookup(self._values, name)
+        selected = overrides.path_name(["components", *name.split(".")])
+        exists, value = overrides.lookup(self._values, selected)
         source: typing.Literal["toml", "temporary", "permanent", "mixed", "missing"] = (
             "toml" if exists else "missing"
         )
         for key, item in self._overrides.items():
-            if key == name or name.startswith(key + "."):
+            if key == selected or selected.startswith(key + "."):
                 source = "permanent" if item.permanent else "temporary"
                 break
-            if key.startswith(name + "."):
+            if key.startswith(selected + "."):
                 source = "mixed"
         return overrides.Value(
             name=name, exists=exists, value=json_value(value), source=source
@@ -149,9 +152,33 @@ class Configuration:
     async def set(
         self, name: str, value: pydantic.JsonValue, *, permanent: bool = False
     ) -> overrides.Value:
-        update = overrides.Update(
-            name=name, value=json_value(value), permanent=permanent
+        overrides.Query(name=name)
+        await self.set_path(
+            overrides.PathUpdate(
+                path=["components", *name.split(".")],
+                value=value,
+                permanent=permanent,
+            )
         )
+        return self.inspect(name)
+
+    def snapshot(self, query: overrides.PathQuery) -> overrides.Snapshot:
+        if not query.path:
+            return overrides.Snapshot(exists=True, value=json_value(self._values))
+        exists, value = overrides.lookup(self._values, overrides.path_name(query.path))
+        return overrides.Snapshot(
+            path=query.path, exists=exists, value=json_value(value)
+        )
+
+    @staticmethod
+    def _editable_path(query: overrides.PathQuery) -> str:
+        if not query.path or query.path[0] != "components":
+            raise PermissionError("startup configuration is read-only")
+        return overrides.path_name(query.path)
+
+    async def set_path(self, update: overrides.PathUpdate) -> None:
+        name = self._editable_path(update)
+        value = json_value(update.value)
         async with self._lock:
             items = {
                 key: item
@@ -159,15 +186,21 @@ class Configuration:
                 if not overrides.overlaps(key, name)
             }
             items[name] = overrides.Override(
-                value=update.value,
+                value=value,
                 permanent=update.permanent,
                 baseline=overrides.fingerprint(self._defaults, name),
             )
             await self._publish(items)
-            return self.inspect(name)
 
     async def reset(self, name: str) -> overrides.Value:
         overrides.Query(name=name)
+        await self.reset_path(
+            overrides.PathQuery(path=["components", *name.split(".")])
+        )
+        return self.inspect(name)
+
+    async def reset_path(self, query: overrides.PathQuery) -> None:
+        name = self._editable_path(query)
         async with self._lock:
             items = {
                 key: item
@@ -175,7 +208,6 @@ class Configuration:
                 if not overrides.overlaps(key, name)
             }
             await self._publish(items)
-            return self.inspect(name)
 
     async def _publish(
         self,
@@ -204,7 +236,7 @@ class Configuration:
         validate_name(name)
         fallback = json_value(default)
         value: pydantic.JsonValue = self._values
-        for part in name.split("."):
+        for part in ["components", *name.split(".")]:
             if not isinstance(value, dict) or part not in value:
                 return fallback
             value = value[part]

@@ -100,6 +100,10 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `events.unsubscribe` | `subscription_id` | Null |
 | `logs.list` | None | Retained log filenames/sizes and dropped/write-error counters |
 | `logs.download` | `file`, `offset`, `limit`, optional `end` | Base64 bytes, `next_offset`, `end`, `eof` |
+| `configuration.get` | Optional string-array `path`, default `[]` | `path`, `exists`, effective JSON `value` |
+| `configuration.set` | String-array `path`, required JSON `value`, strict boolean `permanent` (default false) | Null acknowledgment after application |
+| `configuration.reset` | String-array `path` | Null acknowledgment after removing overlapping overrides |
+| `configuration.suggest` | String-array `path`, optional string `prefix` (default empty) | Advisory `values` array |
 
 There is no static workflow catalog. `reference` is an explicit `path:callable` relative to the configured workflows directory, without `.py`, or `python:package.module:callable` for an importable library workflow. Paths must remain inside the workflows directory after symlink resolution. The callable must be an async workflow entry point. Resolution failures reject the request before acceptance; execution failures are reported through lifecycle events. The former `file` and `callable` fields are rejected. Discovery imports trusted Python code and is not a sandbox.
 
@@ -134,6 +138,38 @@ and views can change between requests. Existing `executions.list` and
 Start and resume receipts are persisted before launch. Repeating the same idempotency key and arguments returns the original acceptance, even after restart; different arguments produce `idempotency_conflict`. Acceptance is not proof of successful execution. A crash between receipt persistence and launch can leave an accepted ID without execution history; retries do not automatically execute it. Retention can also remove history without removing its receipt. Use a new key only for an intentional new attempt.
 
 Stop is cooperative and addresses the specific active execution. It returns before cleanup; wait for `execution.cancelled`, `execution.completed`, or `execution.failed`. Workflows that block the event loop or suppress cancellation can delay shutdown. Forced termination is not supported.
+
+### Configuration reads and overrides
+
+Paths contain literal mapping keys rooted at `config.toml`; dots inside a segment
+are not separators. Omitted or empty paths select the entire snapshot, including
+startup defaults. Missing paths return `exists: false, value: null`; an explicit
+null returns `exists: true`. Snapshots contain raw effective values, not resolved
+consumer settings or built-in LLM profiles. Arrays are whole values, not indexed.
+
+```json
+{"kind":"request","id":"config-1","method":"configuration.set","params":{"path":["components","llm","model"],"value":"o3","permanent":true}}
+```
+
+Only `components` and descendants are editable. Root writes/resets and startup
+settings such as directories, logging, retention, and environment return
+`read_only`. Malformed requests return `invalid_argument`; persistence failures
+return `configuration_error`. Values must be finite JSON; component schema
+validation is deferred to consumers, so invalid configuration remains inspectable
+and editable. Suggestions return known Connect model/provider names and enum
+values from known LLM/workflow schemas, filtered by prefix; unknown paths return
+`values: []`. Suggestions never restrict accepted values.
+
+Writes return null only after application. Subsequent fresh reads see the new
+value without restarting or reinitializing resources. Cached consumer state,
+in-flight operations, and recorded workflow/replay snapshots remain unchanged.
+Requests have no revision or batch contract. Temporary writes replace permanent
+overrides rather than masking them. Reset removes overlapping overrides and
+restores startup TOML; an absent key leaves defaults to its consumer. Permanent
+overrides survive restart only while their startup TOML baseline is unchanged.
+Parent and child overrides replace each other using the same rules as internal
+configuration writes. See [Component configuration](../config/components.md#override-component-settings)
+for persistence, inheritance, and Python client examples.
 
 ### Concurrent execution lifecycle
 

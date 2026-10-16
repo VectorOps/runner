@@ -178,27 +178,36 @@ class RunnerClient:
             await self.request("workflows.state", query.model_dump(mode="json"))
         )
 
-    async def get_configuration(self, name: str) -> config_api.Value:
-        return config_api.Value.model_validate(
+    async def get_configuration(
+        self, path: typing.Optional[list[str]] = None
+    ) -> config_api.Snapshot:
+        return config_api.Snapshot.model_validate(
             await self.request(
-                "configuration.get", config_api.Query(name=name).model_dump(mode="json")
+                "configuration.get",
+                config_api.PathQuery(path=[] if path is None else path).model_dump(
+                    mode="json"
+                ),
             )
         )
 
     async def set_configuration(
-        self, name: str, value: pydantic.JsonValue, *, permanent: bool = False
-    ) -> config_api.Value:
-        update = config_api.Update(name=name, value=value, permanent=permanent)
-        return config_api.Value.model_validate(
-            await self.request("configuration.set", update.model_dump(mode="json"))
+        self, path: list[str], value: pydantic.JsonValue, *, permanent: bool = False
+    ) -> None:
+        update = config_api.PathUpdate(path=path, value=value, permanent=permanent)
+        await self.request("configuration.set", update.model_dump(mode="json"))
+
+    async def reset_configuration(self, path: list[str]) -> None:
+        await self.request(
+            "configuration.reset",
+            config_api.PathQuery(path=path).model_dump(mode="json"),
         )
 
-    async def reset_configuration(self, name: str) -> config_api.Value:
-        return config_api.Value.model_validate(
-            await self.request(
-                "configuration.reset",
-                config_api.Query(name=name).model_dump(mode="json"),
-            )
+    async def suggest_configuration(
+        self, path: list[str], prefix: str = ""
+    ) -> config_api.Suggestions:
+        query = config_api.SuggestQuery(path=path, prefix=prefix)
+        return config_api.Suggestions.model_validate(
+            await self.request("configuration.suggest", query.model_dump(mode="json"))
         )
 
     async def logs(self) -> diagnostics.LogListing:
