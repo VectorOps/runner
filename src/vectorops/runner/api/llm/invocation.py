@@ -29,6 +29,8 @@ async def invoke(
     request: Union[connect.GenerateRequest, Callable[[], connect.GenerateRequest]],
     policy: models.RetryPolicy,
     finalize: Optional[Finalizer] = None,
+    *,
+    buffer_output: bool = False,
 ) -> pydantic.JsonValue:
     async def stream(
         ctx: ActivityExecutionContext,
@@ -39,6 +41,8 @@ async def invoke(
             retry.stream(backend, ctx, settings, selected, policy, observation)
         ) as items:
             async for item in items:
+                if buffer_output and isinstance(item, streaming.ActivityDelta):
+                    item = streaming.ActivityDelta(None, item.metrics)
                 if isinstance(item, streaming.ActivityFinal) and finalize is not None:
                     item = finalize(item, ctx)
                 yield item

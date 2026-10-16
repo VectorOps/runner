@@ -141,6 +141,54 @@ replay reuses both the approval gate and child result without running them again
 Custom workflow-side tools can implement `tools.WorkflowToolBinding`; their
 `execute_workflow` method must keep nondeterministic work inside activities.
 
+## Answer with a workflow choice
+
+Use `LLM.run_with_choice` on an existing conversation to return a `ChoiceResult`
+with `answer` and `choice`. Choices map stable names to descriptions. Like
+`LLM.run`, this loop executes in the caller's persistent workflow context and
+records individual generations and tool executions; it is not a catalog entry
+or a separate child workflow.
+
+```python
+from vectorops.runner.api import llm
+
+
+async def review(conversation: llm.LLM, task: str) -> llm.ChoiceResult:
+    conversation.add_user_message(task)
+    return await conversation.run_with_choice(
+        choices={"ready": "Ready to proceed", "blocked": "Needs more information"},
+        max_retries=2,
+    )
+```
+
+The method reuses the LLM's history, settings, provider, compaction, usage
+accounting, and inbox. Pass ordinary tool bindings with `tools` and optional
+dynamic bindings with `tool_set`, just as with `run`. Tool execution retains
+the existing approval, concurrency, and error handling behavior.
+
+The loop temporarily appends completion instructions to the system prompt and requires one
+`__finish_choice__` call containing a nonblank answer and an allowed choice.
+That tool name is reserved. Mixed finish/work calls and multiple finish calls are
+rejected without executing any of those calls. The original system prompt is
+restored on success, failure, or cancellation. Accepted and rejected control calls
+receive tool results in conversation history, allowing later calls on the same LLM.
+
+`max_rounds` inherits the LLM configuration when omitted and limits all loop rounds,
+including repairs, just as with `run`.
+`max_retries` defaults to 2 and allows 0 through 20 completion repairs after the
+first missing or invalid finish. During repairs only the finish tool is offered;
+ordinary tool calls are rejected without execution. Exhaustion raises
+`llm.ChoiceLimitError` or `RoundLimitError`. Provider retries remain independently
+configured. Choice names must contain only letters, digits, underscores, or hyphens.
+
+Partial response content is withheld for this call, but progress heartbeats are retained.
+Raw completed responses, including control calls and rejected attempts, remain
+available in activity history and diagnostic events; they are not private data.
+The caller receives only the validated answer and choice, without a control-tool
+envelope. Replay reconstructs the loop from recorded generations and tool results
+rather than repeating completed work. Use `result.model_dump(mode="json")` when
+returning the result across a workflow boundary.
+
 ## Workflow contracts
 
 The workflow decorator accepts the same `kind`, `namespace`, and positive `version` options as [activity contracts](activities.md#payload-contracts).

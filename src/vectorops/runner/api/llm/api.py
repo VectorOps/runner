@@ -1,6 +1,6 @@
 """Workflow-local conversations reconstructed by deterministic activity replay."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 import asyncio
 import hashlib
@@ -16,6 +16,7 @@ from vectorops.runner.api import composition as c
 from vectorops.runner.api import inbox as inbox_api
 from vectorops.runner.api.llm import models, provider, tools as tool_api
 from vectorops.runner.api.llm import invocation
+from vectorops.runner.api.llm import choice as choice_api
 from vectorops.runner.api.llm import compaction as compaction_api
 from vectorops.runner.api.llm.configuration import (
     explicit_options,
@@ -73,6 +74,7 @@ class LLM:
         self._compaction_history = compaction_api.History()
         self._usage = connect.Usage()
         self._busy = False
+        self._buffer_output = False
         self._inbox = inbox
 
     def _check_context(self) -> None:
@@ -227,6 +229,7 @@ class LLM:
             provider_request,
             self._retry,
             finalize,
+            buffer_output=self._buffer_output,
         )
 
     def _account(self, response: connect.AssistantMessage) -> None:
@@ -342,6 +345,55 @@ class LLM:
         Optional immutable tool sets advance after complete rounds, including
         replayed results, and expose new bindings only to the following round.
         """
+        result = await self._run(tools=tools, tool_set=tool_set, max_rounds=max_rounds)
+        assert isinstance(result, connect.AssistantMessage)
+        return result
+
+    async def run_with_choice(
+        self,
+        choices: Mapping[str, str],
+        *,
+        tools: Sequence[tool_api.ToolBinding] = (),
+        tool_set: Optional[tool_api.ToolSet] = None,
+        max_rounds: Optional[int] = None,
+        max_retries: int = 2,
+    ) -> choice_api.ChoiceResult:
+        """Run a durable choice loop on this conversation, without a child workflow.
+
+        Completion repairs disable work tools and share the total round budget.
+        Prompt changes and output buffering are scoped to this call. Protocol
+        exchanges remain in history for continuation and deterministic replay.
+        """
+        completion = choice_api.Completion(choices, max_retries)
+        result = await self._run(
+            tools=tools, tool_set=tool_set, max_rounds=max_rounds, completion=completion
+        )
+        assert isinstance(result, choice_api.ChoiceResult)
+        return result
+
+    @contextmanager
+    def _choice_scope(
+        self, completion: Optional[choice_api.Completion]
+    ) -> Iterator[None]:
+        prompt, buffered = self._system_prompt, self._buffer_output
+        if completion is not None:
+            self._system_prompt = "\n\n".join(
+                part for part in (prompt, completion.instruction()) if part
+            )
+            self._buffer_output = True
+        try:
+            yield
+        finally:
+            self._system_prompt, self._buffer_output = prompt, buffered
+
+    async def _run(
+        self,
+        *,
+        tools: Sequence[tool_api.ToolBinding],
+        tool_set: Optional[tool_api.ToolSet],
+        max_rounds: Optional[int],
+        completion: Optional[choice_api.Completion] = None,
+    ) -> typing.Union[connect.AssistantMessage, choice_api.ChoiceResult]:
         if max_rounds is not None and (
             isinstance(max_rounds, bool)
             or not isinstance(max_rounds, int)
@@ -361,17 +413,34 @@ class LLM:
             return bindings, [tool.definition for tool in available]
 
         bindings, definitions = resolve(selected)
-        with self._mutation():
+        if completion is not None:
+            completion.definitions(definitions)
+        with self._mutation(), self._choice_scope(completion):
             resolved = await self._configure()
             limit = resolved.max_rounds if max_rounds is None else max_rounds
             for index in range(limit):
                 if index:
                     await self._configure()
                 await self._steer()
-                response = await self._round(definitions)
+                response = await self._round(
+                    definitions
+                    if completion is None
+                    else completion.definitions(definitions)
+                )
                 calls = [
                     block for block in response.content if block.type == "tool_call"
                 ]
+                if completion is not None and completion.handles(calls):
+                    try:
+                        choice = completion.accept(calls)
+                    except ValueError as exc:
+                        self._messages.extend(completion.feedback(calls, str(exc)))
+                        self._messages.append(completion.repair(str(exc)))
+                        continue
+                    self._messages.extend(completion.feedback(calls))
+                    if index + 1 < limit and await self._steer():
+                        continue
+                    return choice
                 if not calls:
                     if index + 1 < limit and await self._steer():
                         continue

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from .api import LLM as LLM
 from . import models
+from .choice import ChoiceResult as ChoiceResult, ChoiceLimitError as ChoiceLimitError
 from .configuration import resolve_settings as resolve_settings
 from .provider import ConnectProvider as ConnectProvider, Provider as Provider
 from . import tools
