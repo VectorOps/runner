@@ -45,6 +45,8 @@ class SQLiteHistory:
         batch_size: int = 128,
         usage_store: typing.Optional[UsageStore] = None,
         change_sink: typing.Optional[events.HistoryChangeSink] = None,
+        event_sink: typing.Optional[events.StepEventSink] = None,
+        mailbox_sink: typing.Optional[mailbox.EventSink] = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("replay batch size must be positive")
@@ -56,6 +58,8 @@ class SQLiteHistory:
         self._closed = False
         self._usage_store = usage_store
         self._change_sink = change_sink
+        self._event_sink = event_sink
+        self._mailbox_sink = mailbox_sink
 
     async def __aenter__(self) -> typing.Self:
         if self._closed or self._writer is not None:
@@ -154,15 +158,24 @@ class SQLiteHistory:
         account: bool = False,
         workflow_ids: tuple[str, ...] = (),
         notify: bool = False,
+        notifications: typing.Optional[
+            list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
+        ] = None,
     ) -> T:
-        if self._change_sink is not None and (notify or workflow_ids or account):
+        if notifications is not None or (
+            self._change_sink is not None and (notify or workflow_ids or account)
+        ):
             changed: typing.Optional[tuple[str, ...]] = None
+            committed: tuple[
+                typing.Union[events.StepEvent, mailbox.InputsCancelled], ...
+            ] = ()
 
             def tracked(connection: sqlite3.Connection) -> T:
-                nonlocal changed
+                nonlocal changed, committed
                 before = connection.total_changes
                 result = operation(connection)
-                if connection.total_changes != before:
+                committed = tuple(notifications or ())
+                if self._change_sink is not None and connection.total_changes != before:
                     identifiers = set(workflow_ids)
                     if account:
                         for identifier in workflow_ids:
@@ -175,6 +188,19 @@ class SQLiteHistory:
             try:
                 return await self._accounted(tracked, account=account)
             finally:
+                for event in committed:
+                    try:
+                        if isinstance(event, events.StepEvent):
+                            if self._event_sink is not None:
+                                self._event_sink(event)
+                        elif self._mailbox_sink is not None:
+                            self._mailbox_sink(event.model_dump(mode="json"))
+                    except Exception as exc:
+                        diagnostics.log(
+                            "history.sink_failed",
+                            level=diagnostics.Level.ERROR,
+                            error=exc,
+                        )
                 if changed is not None:
                     assert self._change_sink is not None
                     try:
@@ -403,19 +429,19 @@ class SQLiteHistory:
 
     async def stop_execution(self) -> None:
         """Cancel an unloaded execution and its requests in one transaction."""
+        notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
+            []
+        )
 
         def stop(connection: sqlite3.Connection) -> None:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 if self._execution(connection).status not in ("running", "paused"):
                     raise ValueError("execution is not active")
-                connection.execute(
-                    "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
-                    "WHERE json_extract(payload, '$.status') = 'pending'"
-                )
+                self._cancel_inputs(connection, notifications)
                 self._set_status(connection, "cancelled")
 
-        await self._run(stop, notify=True)
+        await self._run(stop, notify=True, notifications=notifications)
 
     def _branch_plan(
         self, connection: sqlite3.Connection, operation: branching.Operation
@@ -479,6 +505,9 @@ class SQLiteHistory:
 
     async def apply_branch(self) -> typing.Optional[branching.Operation]:
         """Commit path selection and synthetic input atomically after writer cleanup."""
+        notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
+            []
+        )
 
         def apply(
             connection: sqlite3.Connection,
@@ -498,13 +527,10 @@ class SQLiteHistory:
                         update={"status": "failed", "error": str(exc)}
                     )
                 else:
-                    connection.execute(
-                        "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
-                        "WHERE json_extract(payload, '$.status') = 'pending'"
-                    )
+                    self._cancel_inputs(connection, notifications)
                     step = plan.input_step
                     if step is not None:
-                        connection.execute(
+                        cursor = connection.execute(
                             "INSERT INTO steps VALUES (?, ?, ?, ?)",
                             (
                                 step.id,
@@ -512,6 +538,15 @@ class SQLiteHistory:
                                 step.previous_step_id,
                                 step.model_dump_json(),
                             ),
+                        )
+                        assert cursor.lastrowid is not None
+                        notifications.append(
+                            events.StepEvent(
+                                kind="step.completed",
+                                execution_id=operation.request.execution_id,
+                                step=step,
+                                position=cursor.lastrowid,
+                            )
                         )
                         assert plan.input_request is not None
                         connection.execute(
@@ -541,7 +576,7 @@ class SQLiteHistory:
                 )
                 return operation
 
-        return await self._run(apply, notify=True)
+        return await self._run(apply, notify=True, notifications=notifications)
 
     async def get_execution(self) -> state.ExecutionRecord:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -948,17 +983,37 @@ class SQLiteHistory:
 
         return await self._run(respond, notify=True)
 
+    @staticmethod
+    def _cancel_inputs(
+        connection: sqlite3.Connection,
+        notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]],
+        request_id: typing.Optional[str] = None,
+    ) -> None:
+        rows = connection.execute(
+            "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
+            "WHERE json_extract(payload, '$.status') = 'pending' AND (? IS NULL OR request_id = ?) "
+            "RETURNING request_id",
+            (request_id, request_id),
+        ).fetchall()
+        if rows:
+            notifications.append(
+                mailbox.InputsCancelled(
+                    execution_id=SQLiteHistory._execution(connection).id,
+                    request_ids=sorted(row[0] for row in rows),
+                )
+            )
+
     async def cancel_inputs(self, request_id: typing.Optional[str] = None) -> None:
+        notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
+            []
+        )
+
         def cancel(connection: sqlite3.Connection) -> None:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
-                    "WHERE json_extract(payload, '$.status') = 'pending' AND (? IS NULL OR request_id = ?)",
-                    (request_id, request_id),
-                )
+                self._cancel_inputs(connection, notifications, request_id)
 
-        await self._run(cancel, notify=True)
+        await self._run(cancel, notify=True, notifications=notifications)
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         payload = step.model_dump_json()

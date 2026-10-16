@@ -140,6 +140,12 @@ class RequestPage(Model):
     next_after: typing.Optional[str] = None
 
 
+class InputsCancelled(Model):
+    kind: typing.Literal["mailbox.cancelled"] = "mailbox.cancelled"
+    execution_id: str
+    request_ids: list[str]
+
+
 class MailboxConflict(ValueError):
     pass
 

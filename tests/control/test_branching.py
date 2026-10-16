@@ -74,7 +74,16 @@ async def test_structured_branch_validation_and_receipt(workspace: Path) -> None
 
 async def test_insert_at_second_input_preserves_prefix(workspace: Path) -> None:
     async with client.embedded(workspace) as connection:
-        await connection.subscribe(p.Subscribe(kinds=["execution.state_updated"]))
+        await connection.subscribe(
+            p.Subscribe(
+                kinds=[
+                    "execution.state_updated",
+                    "step.completed",
+                    "execution.branch_applied",
+                    "mailbox.cancelled",
+                ]
+            )
+        )
         accepted = await connection.start(
             p.Start(
                 reference="branch_inputs:two_inputs",
@@ -106,13 +115,27 @@ async def test_insert_at_second_input_preserves_prefix(workspace: Path) -> None:
                 action=branching.InsertInput(response="second"),
             )
         )
+        snapshots: dict[str, events.StepEvent] = {}
+        cancelled_ids: set[str] = set()
+        synthetic_id = ""
         async with asyncio.timeout(5):
             while True:
-                pushed = events.ExecutionStateUpdated.model_validate(
-                    (await connection.next_event()).event
-                )
-                if pushed.execution.status == "completed":
-                    break
+                event = (await connection.next_event()).event
+                if event["kind"] == "step.completed":
+                    snapshot = events.StepEvent.model_validate(event)
+                    snapshots[snapshot.step.id] = snapshot
+                elif event["kind"] == "mailbox.cancelled":
+                    cancellation = mailbox.InputsCancelled.model_validate(event)
+                    assert cancellation.execution_id == identifier
+                    cancelled_ids.update(cancellation.request_ids)
+                elif event["kind"] == "execution.branch_applied":
+                    synthetic_id = str(event["input_step_id"])
+                    assert synthetic_id in snapshots
+                    assert second.request_id in cancelled_ids
+                else:
+                    pushed = events.ExecutionStateUpdated.model_validate(event)
+                    if pushed.execution.status == "completed":
+                        break
         record = pushed.execution
         assert record == await connection.execution(identifier)
         selected = await connection.history(
@@ -123,6 +146,10 @@ async def test_insert_at_second_input_preserves_prefix(workspace: Path) -> None:
         )
         assert selected.items[0].step == old_prefix.items[0].step
         assert selected.items[1].step.id != second.request_id
+        assert selected.items[1].step.id == synthetic_id
+        assert snapshots[synthetic_id].step == selected.items[1].step
+        assert snapshots[synthetic_id].position == selected.items[1].position
+        assert first.request_id not in cancelled_ids
         assert selected.items[-1].step.outcome.model_dump() == {
             "kind": "completed",
             "result": ["first", "second"],

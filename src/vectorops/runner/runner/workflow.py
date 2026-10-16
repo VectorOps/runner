@@ -409,6 +409,8 @@ class WorkflowRunner:
                     SQLiteHistory(
                         history_path,
                         usage_store=project.usage,
+                        event_sink=self.event_sink,
+                        mailbox_sink=self.mailbox_sink,
                         change_sink=(
                             partial(self.change_sink, execution_id)
                             if self.change_sink is not None
@@ -666,6 +668,8 @@ class WorkflowRunner:
         return SQLiteHistory(
             path,
             usage_store=project.usage,
+            event_sink=self.event_sink,
+            mailbox_sink=self.mailbox_sink,
             change_sink=(
                 partial(self.change_sink, execution_id)
                 if self.change_sink is not None
