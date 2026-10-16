@@ -199,11 +199,6 @@ class UsageHistory:
                 if value is None:
                     return usage.Context(step_id=step.id)
                 metrics = observability.Metrics.model_validate(value)
-                return usage.Context(
-                    step_id=step.id,
-                    **metrics.model_dump(
-                        include=set(usage.Context.model_fields) - {"step_id"}
-                    ),
-                )
+                return metrics.context(step.id)
             current = step.previous_step_id
         return None

@@ -1,7 +1,7 @@
 """Serializable usage totals and context projections shared by runner APIs."""
 
 from decimal import Decimal
-from typing import Optional, Self
+from typing import Literal, Optional, Self
 
 import pydantic
 
@@ -90,6 +90,7 @@ class Context(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
     step_id: str
+    input_tokens_source: Optional[Literal["provider_usage", "token_estimate"]] = None
     input_tokens_estimate: Optional[int] = None
     output_tokens_estimate: Optional[int] = None
     context_window: Optional[int] = None

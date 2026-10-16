@@ -72,3 +72,41 @@ async def test_post_reset_execution_is_counted_without_old_history(
     async with client.embedded(tmp_path) as connection:
         counters = await connection.runner_usage()
         assert counters.generation == 1 and counters.totals.calls == 1
+
+
+async def test_context_api_reports_measured_image_usage_after_restart(
+    tmp_path: Path,
+) -> None:
+    history = SQLiteHistory(tmp_path / "data/executions/execution/history.sqlite3")
+    await seed(history)
+    step = generation("image-call")
+    metrics = {
+        "llm": {
+            "input_tokens_estimate": None,
+            "context_window": 1050000,
+            "provider_usage": {
+                "input_tokens": 2438,
+                "cache_read_tokens": 303616,
+                "completeness": "final",
+            },
+        }
+    }
+    step = step.model_copy(update={"metrics": metrics})
+    await history.append_step(step)
+    await history.save_execution(
+        execution_state.ExecutionRecord(
+            id="execution",
+            root_workflow_id="root",
+            status="completed",
+        )
+    )
+    async with client.embedded(tmp_path) as connection:
+        summary = await connection.execution_summary("execution")
+        assert summary.usage is not None and summary.usage.root_context is not None
+        assert summary.usage.root_context.input_tokens_estimate == 306054
+        assert summary.usage.root_context.input_tokens_source == "provider_usage"
+        assert summary.usage.root_context.context_window == 1050000
+        assert (await connection.execution_summaries()).executions[
+            0
+        ].usage == summary.usage
+    assert (await history.get_step("image-call")).metrics == step.metrics

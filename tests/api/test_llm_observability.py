@@ -195,6 +195,39 @@ def test_overflow_and_multimodal_are_not_false_precision(
     assert result.cost_estimate_usd is None
 
 
+def test_multimodal_context_uses_measured_usage_without_changing_metrics(
+    catalog: connect.ModelSpec,
+) -> None:
+    image = connect.GenerateRequest(
+        messages=[
+            connect.UserMessage(
+                content=[connect.ImageBlock(mime_type="image/png", data="YQ==")]
+            )
+        ]
+    )
+    response = answer("done")
+    response.usage = connect.Usage(
+        input_tokens=100,
+        cache_read_tokens=500,
+        cache_write_tokens=100,
+        output_tokens=20,
+        completeness="final",
+    )
+    metrics = obs.Metrics.model_validate(
+        obs.Observation(llm.Settings(model="small"), image).snapshot(
+            response.model_dump(mode="json"), 1
+        )["llm"]
+    )
+    before = metrics.model_dump()
+    context = metrics.context("image-call")
+    assert context.input_tokens_estimate == 700
+    assert context.input_tokens_source == "provider_usage"
+    assert context.context_remaining_estimate == 300
+    assert context.remaining_output_headroom_estimate == 180
+    assert metrics.input_tokens_estimate is None
+    assert metrics.model_dump() == before
+
+
 @pytest.mark.parametrize("fail", [False, True])
 async def test_retry_events_persistence_and_replay(
     history: MemoryHistory, catalog: connect.ModelSpec, tmp_path: Path, fail: bool

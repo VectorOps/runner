@@ -30,6 +30,22 @@ New workflow usage fields are optional for compatibility with older records.
 - Execution `usage.totals` counts each recorded LLM step once across all retained branches and child workflows. Do not sum workflow subtree totals together: that would count descendants multiple times.
 - Execution `usage.root_context` describes the latest generation request on the authoritative root path. It is not a sum of turns or a prediction of the next request. Child requests do not replace it.
 
+## Current context size
+
+`root_context.input_tokens_estimate` retains its wire name but uses final provider
+input usage when available, including cache-read and cache-write tokens. These
+normalized cache categories occupy context even though totals report them
+separately. `input_tokens_source` distinguishes `provider_usage` from
+`token_estimate`; null means the count is unknown. Final measured usage takes
+precedence even when a text estimate exists. Remaining context and output
+headroom are projected consistently from the measured count.
+
+Without final usage, the local text estimate remains the fallback. Requests with
+images have no local estimate and remain unknown until final usage arrives.
+An in-flight request never borrows the previous request's count. This projection
+also applies to existing stored histories without rewriting their metrics,
+provider usage, replay outcomes, or usage totals.
+
 ## Accuracy and reset behavior
 
 Provider token usage takes precedence over fallback estimates. USD costs reuse the per-step estimate and serialize as decimal strings.

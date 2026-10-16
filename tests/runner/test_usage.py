@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 from contextlib import closing
+from typing import Optional
 
 import pydantic
 import pytest
@@ -176,6 +177,101 @@ async def test_all_branches_cost_but_only_active_root_context(tmp_path: Path) ->
     assert summary.usage.totals.cost_estimate_usd == Decimal("0.04")
     assert summary.usage.root_context.step_id == "branch"
     assert summary.usage.root_context.input_tokens_estimate == 200
+
+
+@pytest.mark.parametrize("estimate", [None, 123])
+@pytest.mark.parametrize(
+    "incoming,cached,written,expected",
+    [(100, 500, 100, 700), (0, 0, 0, 0), (1200, 0, 0, 1200)],
+)
+async def test_root_context_prefers_final_cache_inclusive_usage(
+    tmp_path: Path,
+    estimate: Optional[int],
+    incoming: int,
+    cached: int,
+    written: int,
+    expected: int,
+) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(history)
+    step = generation("call")
+    metrics = {
+        "llm": {
+            "input_tokens_estimate": estimate,
+            "output_tokens_estimate": 5,
+            "context_window": 1000,
+            "output_budget": 200,
+            "input_budget": 800,
+            "provider_usage": {
+                "input_tokens": incoming,
+                "cache_read_tokens": cached,
+                "cache_write_tokens": written,
+                "output_tokens": 20,
+                "completeness": "final",
+            },
+        }
+    }
+    step = step.model_copy(update={"metrics": metrics})
+    await history.append_step(step)
+    before = await history.usage_snapshot()
+    for owner in (history, SQLiteHistory(history.path)):
+        summary = await owner.execution_summary()
+        assert summary.usage is not None and summary.usage.root_context is not None
+        context = summary.usage.root_context
+        assert context.input_tokens_estimate == expected
+        assert context.input_tokens_source == "provider_usage"
+        assert context.context_remaining_estimate == max(0, 1000 - expected)
+        assert context.context_overflow_estimate == max(0, expected + 200 - 1000)
+        assert context.remaining_output_headroom_estimate == max(
+            0, min(180, 1000 - expected - 20)
+        )
+        assert await owner.get_step("call") == step
+        assert await owner.usage_snapshot() == before
+
+
+@pytest.mark.parametrize("completeness", ["none", "partial"])
+@pytest.mark.parametrize("estimate", [None, 100])
+async def test_root_context_partial_usage_does_not_replace_estimate(
+    tmp_path: Path, completeness: str, estimate: Optional[int]
+) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(history)
+    step = generation("call", streaming=True)
+    metrics = {
+        "llm": {
+            "input_tokens_estimate": estimate,
+            "context_window": 1000,
+            "provider_usage": {"input_tokens": 600, "completeness": completeness},
+        }
+    }
+    step = step.model_copy(update={"metrics": metrics})
+    await history.append_step(step)
+    summary = await history.execution_summary()
+    assert summary.usage is not None and summary.usage.root_context is not None
+    assert summary.usage.root_context.input_tokens_estimate == estimate
+    assert summary.usage.root_context.input_tokens_source == (
+        None if estimate is None else "token_estimate"
+    )
+
+
+async def test_latest_unknown_context_does_not_reuse_previous_measurement(
+    tmp_path: Path,
+) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(history)
+    await history.append_step(generation("first"))
+    latest = generation("latest", previous="first", streaming=True, provider=False)
+    latest = latest.model_copy(
+        update={
+            "metrics": {"llm": {"input_tokens_estimate": None, "context_window": 1000}}
+        }
+    )
+    await history.append_step(latest)
+    summary = await history.execution_summary()
+    assert summary.usage is not None and summary.usage.root_context is not None
+    assert summary.usage.root_context.step_id == "latest"
+    assert summary.usage.root_context.input_tokens_estimate is None
+    assert summary.usage.root_context.input_tokens_source is None
 
 
 def test_unknown_and_estimated_usage() -> None:
