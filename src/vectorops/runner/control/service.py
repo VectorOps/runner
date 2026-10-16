@@ -18,6 +18,7 @@ from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.mcp.transport import MCPError
 from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
+from vectorops.runner.control.updates import SnapshotPublisher
 from vectorops.runner.runner import events, history_query, mailbox
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import inbox
@@ -61,6 +62,7 @@ class RunnerService:
         self._logs: typing.Optional[diagnostics.DiagnosticLog] = None
         self.mcp_pool = SharedPool(self.authentication, self._emit)
         self._mcp: typing.Optional[mcp_management.Management] = None
+        self._updates: typing.Optional[SnapshotPublisher] = None
 
     async def __aenter__(self) -> typing.Self:
         await self.configuration.load()
@@ -91,6 +93,10 @@ class RunnerService:
             authentication=self.authentication,
             mcp_pool=self.mcp_pool,
             project=project,
+            change_sink=self._changed,
+        )
+        self._updates = SnapshotPublisher(
+            self._summary, self.runner.workflow_state, self._emit
         )
         try:
             await self.runner.initialize_usage()
@@ -100,6 +106,7 @@ class RunnerService:
                 accepted = p.Accepted(execution_id=candidate.id)
                 self._schedule(accepted, None, None)
         except BaseException:
+            await self._updates.close()
             await self._logs.aclose()
             await self._store.__aexit__()
             self._runner = None
@@ -133,6 +140,8 @@ class RunnerService:
             await asyncio.gather(*self._tasks.values())
         finally:
             try:
+                if self._updates is not None:
+                    await self._updates.close()
                 await self.mcp.close()
                 await self.mcp_pool.close()
                 if self._logs is not None:
@@ -183,7 +192,11 @@ class RunnerService:
                         "status": "paused" if kind == "execution.paused" else "running"
                     }
                 )
-        if isinstance(kind, str) and kind.startswith(("execution.", "mailbox.")):
+        if (
+            isinstance(kind, str)
+            and kind.startswith(("execution.", "mailbox."))
+            and kind != "execution.updated"
+        ):
             with diagnostics.bind(
                 execution_id=execution_id if isinstance(execution_id, str) else None
             ):
@@ -197,6 +210,17 @@ class RunnerService:
                 )
         for listener in tuple(self._listeners):
             listener(event)
+        if (
+            isinstance(execution_id, str)
+            and isinstance(kind, str)
+            and kind.startswith("execution.")
+            and kind != "execution.updated"
+        ):
+            self._changed(execution_id, ())
+
+    def _changed(self, execution_id: str, workflow_ids: tuple[str, ...]) -> None:
+        if self._updates is not None and self._listeners:
+            self._updates.changed(execution_id, workflow_ids)
 
     def _step(self, event: events.StepEvent) -> None:
         self._emit(event.model_dump(mode="json"))
@@ -207,6 +231,7 @@ class RunnerService:
             return
         started = active.status != "starting"
         self._active[execution_id] = active.model_copy(update={"status": "stopping"})
+        self._changed(execution_id, ())
         if started:
             self._tasks[execution_id].cancel()
         else:
@@ -222,6 +247,7 @@ class RunnerService:
         if reference is not None:
             self._references[identifier] = reference
         self._active[identifier] = p.Active(execution_id=identifier)
+        self._changed(identifier, ())
         self._tasks[identifier] = asyncio.create_task(
             self._execute(accepted, start, reference)
         )

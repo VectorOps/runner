@@ -173,6 +173,28 @@ The live feed is not a durable event journal. Reconnect, resubscribe, and refres
 
 Protocol-backed executions persist streaming snapshots before emitting updates. Ordinary local runner execution retains write-behind caching.
 
+### Workflow and execution updates
+
+Connected subscribers receive full replacement snapshots without polling:
+
+| Event kind | Payload fields | Meaning |
+| --- | --- | --- |
+| `workflow.updated` | `execution_id`, `workflow` | Full workflow state, including its generated `name` and usage |
+| `execution.updated` | `execution_id`, `summary` | Full execution summary, including name, status, active flag, pending-input count, and usage |
+
+Persistence changes trigger publication after successful commit. This includes
+generated titles even when no subsequent step runs, child workflow usage changes,
+input changes, and lifecycle transitions. Rapid changes are coalesced and identical
+snapshots are suppressed; intermediate states are not guaranteed. Existing step
+and lifecycle events remain available and unchanged.
+
+Apply these payloads directly, keyed by execution ID and workflow ID; an event is
+not an instruction to refetch. Include these kinds when using filtered subscriptions.
+Subscribe before fetching initial summaries and workflow state, buffer events during
+the fetch, and apply buffered snapshots afterward so an older response cannot replace
+a newer push. Repeat this synchronization after reconnect; updates are not a durable
+event journal. Changes made by external database writers are not observed.
+
 ### History query
 
 ```json

@@ -28,6 +28,7 @@ from vectorops.runner.runner.execution_index import ExecutionIndex
 from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEventSink
+from vectorops.runner.runner import events
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
@@ -60,11 +61,13 @@ class WorkflowRunner:
         mcp_pool: typing.Optional[SharedPool] = None,
         project: typing.Optional[RunnerProject] = None,
         workspace_directory: typing.Optional[str] = None,
+        change_sink: typing.Optional[events.ExecutionChangeSink] = None,
     ) -> None:
         self.path = Path(path)
         self.workspace_directory = workspace_directory
         self.history = history
         self.event_sink = event_sink
+        self.change_sink = change_sink
         self._state_store = state_store
         self._diagnostic_log = diagnostic_log
         self.authentication = authentication or AuthenticationService()
@@ -403,7 +406,15 @@ class WorkflowRunner:
                 ):
                     raise FileNotFoundError("execution history is missing")
                 async with (
-                    SQLiteHistory(history_path, usage_store=project.usage) as database,
+                    SQLiteHistory(
+                        history_path,
+                        usage_store=project.usage,
+                        change_sink=(
+                            partial(self.change_sink, execution_id)
+                            if self.change_sink is not None
+                            else None
+                        ),
+                    ) as database,
                     CachedHistory(
                         database,
                         write_through=self._state_store is not None,
@@ -652,7 +663,15 @@ class WorkflowRunner:
             raise ValueError("execution history escapes project data")
         if not await asyncio.to_thread(path.is_file):
             raise FileNotFoundError("execution history is missing")
-        return SQLiteHistory(path, usage_store=project.usage)
+        return SQLiteHistory(
+            path,
+            usage_store=project.usage,
+            change_sink=(
+                partial(self.change_sink, execution_id)
+                if self.change_sink is not None
+                else None
+            ),
+        )
 
     async def execution_state(
         self, execution_id: str

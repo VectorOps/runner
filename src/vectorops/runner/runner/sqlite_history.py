@@ -16,6 +16,8 @@ from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import branching
+from vectorops.runner.runner import events
+from vectorops.runner import diagnostics
 from vectorops.runner.runner.sqlite_writer import SQLiteWriter
 from vectorops.runner.runner.usage_history import UsageHistory
 from vectorops.runner.runner.usage_store import UsageStore
@@ -42,6 +44,7 @@ class SQLiteHistory:
         *,
         batch_size: int = 128,
         usage_store: typing.Optional[UsageStore] = None,
+        change_sink: typing.Optional[events.HistoryChangeSink] = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("replay batch size must be positive")
@@ -52,6 +55,7 @@ class SQLiteHistory:
         self._writer: typing.Optional[SQLiteWriter] = None
         self._closed = False
         self._usage_store = usage_store
+        self._change_sink = change_sink
 
     async def __aenter__(self) -> typing.Self:
         if self._closed or self._writer is not None:
@@ -144,7 +148,47 @@ class SQLiteHistory:
                 UsageHistory.initialize(connection)
 
     async def _run(
-        self, operation: Callable[[sqlite3.Connection], T], *, account: bool = False
+        self,
+        operation: Callable[[sqlite3.Connection], T],
+        *,
+        account: bool = False,
+        workflow_ids: tuple[str, ...] = (),
+        notify: bool = False,
+    ) -> T:
+        if self._change_sink is not None and (notify or workflow_ids or account):
+            changed: typing.Optional[tuple[str, ...]] = None
+
+            def tracked(connection: sqlite3.Connection) -> T:
+                nonlocal changed
+                before = connection.total_changes
+                result = operation(connection)
+                if connection.total_changes != before:
+                    identifiers = set(workflow_ids)
+                    if account:
+                        for identifier in workflow_ids:
+                            identifiers.update(
+                                UsageHistory.ancestors(connection, identifier)
+                            )
+                    changed = tuple(sorted(identifiers))
+                return result
+
+            try:
+                return await self._accounted(tracked, account=account)
+            finally:
+                if changed is not None:
+                    assert self._change_sink is not None
+                    try:
+                        self._change_sink(changed)
+                    except Exception as exc:
+                        diagnostics.log(
+                            "history.sink_failed",
+                            level=diagnostics.Level.ERROR,
+                            error=exc,
+                        )
+        return await self._accounted(operation, account=account)
+
+    async def _accounted(
+        self, operation: Callable[[sqlite3.Connection], T], *, account: bool
     ) -> T:
         if self._usage_store is None or not account:
             return await self._invoke(operation)
@@ -216,7 +260,7 @@ class SQLiteHistory:
                     "INSERT INTO workflows VALUES (?, ?)", (workflow.id, payload)
                 )
 
-        await self._run(save)
+        await self._run(save, workflow_ids=(workflow.id,))
 
     async def get_workflow(self, workflow_id: str) -> models.Workflow:
         return await self._run(
@@ -241,7 +285,7 @@ class SQLiteHistory:
                 )
                 return updated
 
-        return await self._run(update)
+        return await self._run(update, workflow_ids=(workflow_id,))
 
     async def first_input(
         self, workflow_id: str, request_type: str
@@ -315,7 +359,7 @@ class SQLiteHistory:
                         execution.checkpoint.heads.items(),
                     )
 
-        await self._run(save)
+        await self._run(save, notify=True)
 
     async def set_paused(self, requests: set[str]) -> bool:
         """Pause only if every observed dependency is still unanswered at commit."""
@@ -334,7 +378,7 @@ class SQLiteHistory:
                 self._set_status(connection, "paused")
                 return True
 
-        return await self._run(pause)
+        return await self._run(pause, notify=True)
 
     @staticmethod
     def _set_status(
@@ -355,7 +399,7 @@ class SQLiteHistory:
                 self._set_status(connection, "running")
                 return True
 
-        return await self._run(wake)
+        return await self._run(wake, notify=True)
 
     async def stop_execution(self) -> None:
         """Cancel an unloaded execution and its requests in one transaction."""
@@ -371,7 +415,7 @@ class SQLiteHistory:
                 )
                 self._set_status(connection, "cancelled")
 
-        await self._run(stop)
+        await self._run(stop, notify=True)
 
     def _branch_plan(
         self, connection: sqlite3.Connection, operation: branching.Operation
@@ -497,7 +541,7 @@ class SQLiteHistory:
                 )
                 return operation
 
-        return await self._run(apply)
+        return await self._run(apply, notify=True)
 
     async def get_execution(self) -> state.ExecutionRecord:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -777,7 +821,7 @@ class SQLiteHistory:
                 )
                 return request.public()
 
-        return await self._run(register)
+        return await self._run(register, notify=True)
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
         return await self._run(
@@ -890,7 +934,7 @@ class SQLiteHistory:
                         )
                 return request.public()
 
-        return await self._run(respond)
+        return await self._run(respond, notify=True)
 
     async def cancel_inputs(self, request_id: typing.Optional[str] = None) -> None:
         def cancel(connection: sqlite3.Connection) -> None:
@@ -902,7 +946,7 @@ class SQLiteHistory:
                     (request_id, request_id),
                 )
 
-        await self._run(cancel)
+        await self._run(cancel, notify=True)
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         payload = step.model_dump_json()
@@ -937,7 +981,7 @@ class SQLiteHistory:
                 UsageHistory.link(connection, step)
                 UsageHistory.update(connection, step)
 
-        await self._run(append, account=True)
+        await self._run(append, account=True, workflow_ids=(step.workflow_id,))
 
     async def update_step(self, step: models.WorkflowStep) -> None:
         await self.update_steps((step,))
@@ -975,7 +1019,11 @@ class SQLiteHistory:
                     )
                     UsageHistory.update(connection, step, previous)
 
-        await self._run(update, account=True)
+        await self._run(
+            update,
+            account=True,
+            workflow_ids=tuple({step.workflow_id for step in steps}),
+        )
 
     def _snapshot_path(self, workflow_id: str, head_step_id: str) -> sqlite3.Connection:
         """Materialize the selected path in SQLite temporary storage, not Python lists."""
