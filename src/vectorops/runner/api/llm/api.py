@@ -74,7 +74,6 @@ class LLM:
         self._compaction_history = compaction_api.History()
         self._usage = connect.Usage()
         self._busy = False
-        self._buffer_output = False
         self._inbox = inbox
 
     def _check_context(self) -> None:
@@ -229,7 +228,6 @@ class LLM:
             provider_request,
             self._retry,
             finalize,
-            buffer_output=self._buffer_output,
         )
 
     def _account(self, response: connect.AssistantMessage) -> None:
@@ -360,9 +358,9 @@ class LLM:
     ) -> choice_api.ChoiceResult:
         """Run a durable choice loop on this conversation, without a child workflow.
 
-        Completion repairs disable work tools and share the total round budget.
-        Prompt changes and output buffering are scoped to this call. Protocol
-        exchanges remain in history for continuation and deterministic replay.
+        The choice tool records an outcome without ending the ordinary tool loop.
+        A final assistant message supplies the answer. Repairs share the round
+        budget, and protocol exchanges remain in history for deterministic replay.
         """
         completion = choice_api.Completion(choices, max_retries)
         result = await self._run(
@@ -375,16 +373,15 @@ class LLM:
     def _choice_scope(
         self, completion: Optional[choice_api.Completion]
     ) -> Iterator[None]:
-        prompt, buffered = self._system_prompt, self._buffer_output
+        prompt = self._system_prompt
         if completion is not None:
             self._system_prompt = "\n\n".join(
                 part for part in (prompt, completion.instruction()) if part
             )
-            self._buffer_output = True
         try:
             yield
         finally:
-            self._system_prompt, self._buffer_output = prompt, buffered
+            self._system_prompt = prompt
 
     async def _run(
         self,
@@ -415,6 +412,17 @@ class LLM:
         bindings, definitions = resolve(selected)
         if completion is not None:
             completion.definitions(definitions)
+
+        async def invoke(request: connect.ToolCallBlock) -> connect.ToolResultMessage:
+            if completion is not None and completion.handles(request):
+                return completion.select(request)
+            return await tool_api.invoke_tool(
+                bindings.get(request.name),
+                request,
+                instance=self._identity,
+                raise_errors=self._raise_tool_errors,
+            )
+
         with self._mutation(), self._choice_scope(completion):
             resolved = await self._configure()
             limit = resolved.max_rounds if max_rounds is None else max_rounds
@@ -430,31 +438,18 @@ class LLM:
                 calls = [
                     block for block in response.content if block.type == "tool_call"
                 ]
-                if completion is not None and completion.handles(calls):
-                    try:
-                        choice = completion.accept(calls)
-                    except ValueError as exc:
-                        self._messages.extend(completion.feedback(calls, str(exc)))
-                        self._messages.append(completion.repair(str(exc)))
-                        continue
-                    self._messages.extend(completion.feedback(calls))
-                    if index + 1 < limit and await self._steer():
-                        continue
-                    return choice
                 if not calls:
                     if index + 1 < limit and await self._steer():
                         continue
+                    if completion is not None:
+                        try:
+                            return completion.accept(response)
+                        except ValueError as exc:
+                            self._messages.append(completion.repair(str(exc)))
+                            continue
                     return response
                 results = await asyncio.gather(
-                    *(
-                        tool_api.invoke_tool(
-                            bindings.get(request.name),
-                            request,
-                            instance=self._identity,
-                            raise_errors=self._raise_tool_errors,
-                        )
-                        for request in calls
-                    ),
+                    *(invoke(request) for request in calls),
                     return_exceptions=True,
                 )
                 for result in results:
@@ -465,13 +460,25 @@ class LLM:
                     for result in results
                     if isinstance(result, connect.ToolResultMessage)
                 ]
-                if selected is not None:
+                work_results = [
+                    result
+                    for request, result in zip(calls, completed)
+                    if completion is None or not completion.handles(request)
+                ]
+                if selected is not None and work_results:
                     next_set = selected.advance(
-                        tuple(result.model_copy(deep=True) for result in completed)
+                        tuple(result.model_copy(deep=True) for result in work_results)
                     )
                     bindings, definitions = resolve(next_set)
                     selected = next_set
                 self._messages.extend(completed)
+                if completion is not None and any(
+                    completion.handles(request) and result.is_error
+                    for request, result in zip(calls, completed)
+                ):
+                    self._messages.append(
+                        completion.repair("Invalid choice arguments.")
+                    )
         raise models.RoundLimitError(f"LLM exceeded max_rounds={limit}")
 
     async def _maybe_compact(self, definitions: Sequence[connect.ToolSpec]) -> None:

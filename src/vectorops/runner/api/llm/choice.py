@@ -22,6 +22,12 @@ class ChoiceLimitError(RuntimeError):
     """The model exhausted its completion repair budget."""
 
 
+class Selection(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+
+    choice: ChoiceName
+
+
 class Policy(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
@@ -35,55 +41,63 @@ class Completion:
     def __init__(self, choices: Mapping[str, str], max_retries: int) -> None:
         self.policy = Policy(choices=dict(choices), max_retries=max_retries)
         self.repairs = 0
+        self.selected: Optional[str] = None
 
     def instruction(self) -> str:
         return (
             "Complete the user's task using the available tools as needed. "
-            f"Finish by calling {FINISH_TOOL} exactly once, alone in its round. "
-            "Put the complete user-facing response in answer and select one choice. "
-            "Plain text alone does not complete this task. Available choices "
+            f"Before your final response, call {FINISH_TOOL} to select a workflow "
+            "outcome. This tool only records the choice; it does not finish the task. "
+            "You may continue using tools and update the choice if needed. "
+            "Then provide the complete user-facing answer as a normal final "
+            "assistant message, not as tool arguments. Available choices "
             "(names mapped to descriptions):\n" + json.dumps(self.policy.choices)
         )
 
     def definitions(self, tools: Sequence[connect.ToolSpec]) -> list[connect.ToolSpec]:
         if any(tool.name == FINISH_TOOL for tool in tools):
             raise ValueError(f"reserved choice tool name: {FINISH_TOOL}")
-        schema = ChoiceResult.model_json_schema()
+        schema = Selection.model_json_schema()
         schema["properties"]["choice"]["enum"] = list(self.policy.choices)
         finish = connect.ToolSpec.external(
             name=FINISH_TOOL,
-            description="Return the complete answer and exactly one workflow choice.",
+            description="Select a workflow outcome, then continue to your final response.",
             input_schema=schema,
         )
-        return [finish] if self.repairs else [*tools, finish]
+        return [*tools, finish]
 
-    def handles(self, calls: Sequence[connect.ToolCallBlock]) -> bool:
-        return bool(
-            self.repairs or not calls or any(call.name == FINISH_TOOL for call in calls)
+    def handles(self, call: connect.ToolCallBlock) -> bool:
+        return call.name == FINISH_TOOL
+
+    def select(self, call: connect.ToolCallBlock) -> connect.ToolResultMessage:
+        error: Optional[str] = None
+        try:
+            selection = Selection.model_validate(call.arguments)
+            if selection.choice not in self.policy.choices:
+                raise ValueError("choice must be one of the configured names")
+            self.selected = selection.choice
+        except ValueError as exc:
+            error = str(exc)
+        return connect.ToolResultMessage(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            content=[
+                connect.TextBlock(
+                    text=error or "Choice recorded. Continue to your final response."
+                )
+            ],
+            is_error=error is not None,
         )
 
-    def accept(self, calls: Sequence[connect.ToolCallBlock]) -> ChoiceResult:
-        if len(calls) != 1 or calls[0].name != FINISH_TOOL:
-            raise ValueError(
-                f"Call {FINISH_TOOL} exactly once without other tool calls."
-            )
-        result = ChoiceResult.model_validate(calls[0].arguments)
-        if result.choice not in self.policy.choices:
-            raise ValueError("choice must be one of the configured names")
-        return result
-
-    def feedback(
-        self, calls: Sequence[connect.ToolCallBlock], error: Optional[str] = None
-    ) -> list[connect.Message]:
-        return [
-            connect.ToolResultMessage(
-                tool_call_id=call.id,
-                tool_name=call.name,
-                content=[connect.TextBlock(text=error or "Completion accepted.")],
-                is_error=error is not None,
-            )
-            for call in calls
-        ]
+    def accept(self, response: connect.AssistantMessage) -> ChoiceResult:
+        if self.selected is None:
+            raise ValueError(f"Select an outcome with {FINISH_TOOL} before finishing.")
+        return ChoiceResult(
+            answer="".join(
+                block.text for block in response.content if block.type == "text"
+            ),
+            choice=self.selected,
+        )
 
     def repair(self, reason: str) -> connect.UserMessage:
         if self.repairs >= self.policy.max_retries:
@@ -94,8 +108,8 @@ class Completion:
         return connect.UserMessage(
             content=(
                 f"Completion was rejected: {reason}\n"
-                f"Do not repeat work or call ordinary tools. Call {FINISH_TOOL} alone "
-                "with the complete answer and a valid choice. Allowed choices: "
-                + json.dumps(list(self.policy.choices))
+                f"Use {FINISH_TOOL} to select a valid outcome if needed, then provide "
+                "a nonblank final assistant answer outside tool arguments. "
+                "Allowed choices: " + json.dumps(list(self.policy.choices))
             )
         )

@@ -16,13 +16,13 @@ from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import events
 
 
-def finish(choice: str = "ready", text: str = "Completed.") -> connect.AssistantMessage:
+def finish(choice: str = "ready") -> connect.AssistantMessage:
     return connect.AssistantMessage(
         content=[
             connect.ToolCallBlock(
                 id="finish",
                 name=FINISH_TOOL,
-                arguments={"answer": text, "choice": choice},
+                arguments={"choice": choice},
             )
         ],
         finish_reason="tool_call",
@@ -32,7 +32,9 @@ def finish(choice: str = "ready", text: str = "Completed.") -> connect.Assistant
 async def test_shared_history_prompt_restoration_and_replay(
     history: MemoryHistory,
 ) -> None:
-    backend = FakeProvider([answer("earlier"), finish(), answer("later")])
+    backend = FakeProvider(
+        [answer("earlier"), finish(), answer("Completed."), answer("later")]
+    )
     snapshots: list[tuple[connect.Message, ...]] = []
     observed: list[events.StepEvent] = []
 
@@ -47,12 +49,13 @@ async def test_shared_history_prompt_restoration_and_replay(
             {"ready": "Proceed", "blocked": "Need input"}
         )
         assert result == llm.ChoiceResult(answer="Completed.", choice="ready")
-        assert agent.history[-1].role == "tool"
-        assert agent.history[-1].is_error is False
+        assert agent.history[-1] == answer("Completed.")
+        assert agent.history[-2].role == "tool"
+        assert agent.history[-2].is_error is False
         snapshots.append(agent.history)
         agent.add_user_message("Continue")
         await agent.run()
-        assert agent.usage.total_tokens == 24
+        assert agent.usage.total_tokens == 36
         return result.model_dump(mode="json")
 
     first = await replay.run(history, workflow, event_sink=observed.append)
@@ -61,15 +64,25 @@ async def test_shared_history_prompt_restoration_and_replay(
     )
     assert await replay.run(history, workflow, first.id) == first
     assert snapshots[0] == snapshots[1]
-    assert len(backend.requests) == 3
+    assert len(backend.requests) == 4
     assert backend.requests[1].messages[1] == answer("earlier")
     assert str(backend.requests[1].system_prompt).startswith("Original.\n\n")
-    assert backend.requests[2].system_prompt == "Original."
-    assert backend.requests[0].session == backend.requests[2].session
+    assert backend.requests[3].system_prompt == "Original."
+    assert backend.requests[0].session == backend.requests[3].session
+    schema = backend.requests[1].tools[-1].input_schema
+    assert set(schema["properties"]) == {"choice"}
+    assert schema["required"] == ["choice"]
+    assert backend.requests[2].messages[-1].role == "tool"
     choice_events = [
-        event for event in observed if event.step.id == backend.step_ids[1]
+        event for event in observed if event.step.id == backend.step_ids[2]
     ]
-    assert "partial" not in str(choice_events)
+    assert "partial" in str(choice_events)
+    assert any(
+        event.kind == "step.completed"
+        and event.step.outcome
+        == models.StepCompleted(result=answer("Completed.").model_dump(mode="json"))
+        for event in choice_events
+    )
 
 
 @pytest.mark.parametrize(
@@ -77,23 +90,17 @@ async def test_shared_history_prompt_restoration_and_replay(
     [
         answer("Missing finish"),
         finish("unknown"),
-        finish(text=" "),
         connect.AssistantMessage(
-            content=[
-                connect.ToolCallBlock(
-                    id="a", name=FINISH_TOOL, arguments={"choice": "ready"}
-                )
-            ],
+            content=[connect.ToolCallBlock(id="a", name=FINISH_TOOL, arguments={})],
             finish_reason="tool_call",
         ),
         connect.AssistantMessage(
             content=[
                 connect.ToolCallBlock(
-                    id=str(i),
+                    id="a",
                     name=FINISH_TOOL,
                     arguments={"answer": "Done", "choice": "ready"},
                 )
-                for i in range(2)
             ],
             finish_reason="tool_call",
         ),
@@ -102,7 +109,7 @@ async def test_shared_history_prompt_restoration_and_replay(
 async def test_completion_repairs_and_replay(
     history: MemoryHistory, invalid: connect.AssistantMessage
 ) -> None:
-    backend = FakeProvider([invalid, finish()])
+    backend = FakeProvider([invalid, finish(), answer("Completed.")])
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("chat", model="test", backend=backend)
@@ -114,15 +121,15 @@ async def test_completion_repairs_and_replay(
     first = await replay.run(history, workflow)
     assert first.outcome.kind == "completed", first.outcome
     assert await replay.run(history, workflow, first.id) == first
-    assert len(backend.requests) == 2
-    messages = backend.requests[-1].messages
+    assert len(backend.requests) == 3
+    messages = backend.requests[1].messages
     assert messages[1] == invalid
     assert "Completion was rejected" in str(messages[-1])
     assert all(message.is_error for message in messages if message.role == "tool")
 
 
 @pytest.mark.parametrize("mixed", [False, True])
-async def test_work_tools_not_repeated_during_repairs(
+async def test_work_tools_continue_after_selection_and_during_repairs(
     history: MemoryHistory, mixed: bool
 ) -> None:
     class Arguments(pydantic.BaseModel):
@@ -147,7 +154,7 @@ async def test_work_tools_not_repeated_during_repairs(
         if mixed
         else answer("Missing finish")
     )
-    backend = FakeProvider([work, invalid, work, finish()])
+    backend = FakeProvider([work, invalid, work, finish(), answer("Completed.")])
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("chat", model="test", backend=backend)
@@ -160,14 +167,21 @@ async def test_work_tools_not_repeated_during_repairs(
     first = await replay.run(history, workflow)
     assert first.outcome.kind == "completed", first.outcome
     assert await replay.run(history, workflow, first.id) == first
-    assert len(executed) == 1
-    assert len(backend.requests) == 4
-    assert [tool.name for tool in backend.requests[2].tools] == [FINISH_TOOL]
+    assert len(executed) == (3 if mixed else 2)
+    assert len(backend.requests) == 5
+    assert [tool.name for tool in backend.requests[2].tools] == ["work", FINISH_TOOL]
     results = [
         message for message in backend.requests[-1].messages if message.role == "tool"
     ]
-    assert sum(not message.is_error for message in results) == 1
-    assert results[-1].is_error
+    assert all(not message.is_error for message in results)
+    if mixed:
+        assert [result.tool_name for result in results] == [
+            "work",
+            FINISH_TOOL,
+            "work",
+            "work",
+            FINISH_TOOL,
+        ]
 
 
 @pytest.mark.parametrize("retries", [0, 2])
@@ -207,6 +221,95 @@ async def test_round_budget_includes_repairs(history: MemoryHistory) -> None:
 
     assert (await replay.run(history, workflow)).outcome.kind == "completed"
     assert len(backend.requests) == 1
+
+
+async def test_selection_does_not_finish_at_round_limit(history: MemoryHistory) -> None:
+    backend = FakeProvider([finish()])
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", model="test", backend=backend)
+        with pytest.raises(RoundLimitError, match="max_rounds=1"):
+            agent.add_user_message("Choose")
+            await agent.run_with_choice({"ready": "Proceed"}, max_rounds=1)
+        assert agent.history[-1].role == "tool"
+        assert not agent.history[-1].is_error
+        return None
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed", first.outcome
+    assert await replay.run(history, workflow, first.id) == first
+    assert len(backend.requests) == 1
+
+
+async def test_blank_final_answer_is_repaired_without_reselecting(
+    history: MemoryHistory,
+) -> None:
+    backend = FakeProvider([finish(), answer(" "), answer("Visible answer")])
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", model="test", backend=backend)
+        agent.add_user_message("Choose")
+        result = await agent.run_with_choice({"ready": "Proceed"})
+        assert result == llm.ChoiceResult(answer="Visible answer", choice="ready")
+        return result.model_dump(mode="json")
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed", first.outcome
+    assert await replay.run(history, workflow, first.id) == first
+    assert len(backend.requests) == 3
+
+
+async def test_latest_selection_and_final_text_are_authoritative(
+    history: MemoryHistory,
+) -> None:
+    selected = finish("blocked")
+    selected.content.insert(0, connect.TextBlock(text="Still working"))
+    final = connect.AssistantMessage(
+        content=[connect.TextBlock(text="Visible "), connect.TextBlock(text="answer")],
+        finish_reason="stop",
+    )
+    backend = FakeProvider([finish(), selected, final])
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", model="test", backend=backend)
+        agent.add_user_message("Choose")
+        result = await agent.run_with_choice(
+            {"ready": "Proceed", "blocked": "Need input"}
+        )
+        assert result == llm.ChoiceResult(answer="Visible answer", choice="blocked")
+        assert agent.history[-1] == final
+        return result.model_dump(mode="json")
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed", first.outcome
+    assert await replay.run(history, workflow, first.id) == first
+    assert len(backend.requests) == 3
+
+
+async def test_selection_is_scoped_to_each_run(history: MemoryHistory) -> None:
+    backend = FakeProvider(
+        [
+            finish(),
+            answer("First"),
+            answer("Missing selection"),
+            finish(),
+            answer("Second"),
+        ]
+    )
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("chat", model="test", backend=backend)
+        agent.add_user_message("Choose")
+        await agent.run_with_choice({"ready": "Proceed"})
+        agent.add_user_message("Choose again")
+        result = await agent.run_with_choice({"ready": "Proceed"})
+        assert result.answer == "Second"
+        return result.model_dump(mode="json")
+
+    first = await replay.run(history, workflow)
+    assert first.outcome.kind == "completed", first.outcome
+    assert await replay.run(history, workflow, first.id) == first
+    assert len(backend.requests) == 5
 
 
 @pytest.mark.parametrize(
@@ -264,7 +367,7 @@ async def test_overlap_and_cancellation_restore_conversation(
 async def test_interrupted_choice_replays_same_generation(
     history: MemoryHistory,
 ) -> None:
-    backend = FakeProvider([finish()])
+    backend = FakeProvider([finish(), answer("Completed.")])
     backend.release = asyncio.Event()
 
     async def workflow() -> pydantic.JsonValue:
@@ -286,14 +389,23 @@ async def test_interrupted_choice_replays_same_generation(
     assert result.outcome == models.StepCompleted(
         result={"answer": "Completed.", "choice": "ready"}
     )
-    assert backend.step_ids == [head, head]
+    assert backend.step_ids[:2] == [head, head]
+    assert len(backend.step_ids) == 3
     assert backend.requests[0].model_dump(exclude={"session"}) == backend.requests[
         1
     ].model_dump(exclude={"session"})
 
 
 async def test_choice_compaction_and_replay(history: MemoryHistory) -> None:
-    backend = FakeProvider([answer("old answer"), answer("summary"), finish()])
+    backend = FakeProvider(
+        [
+            answer("old answer"),
+            answer("summary"),
+            finish(),
+            answer("updated summary"),
+            answer("Completed."),
+        ]
+    )
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM(
@@ -312,11 +424,14 @@ async def test_choice_compaction_and_replay(history: MemoryHistory) -> None:
     first = await replay.run(history, workflow)
     assert first.outcome.kind == "completed", first.outcome
     assert await replay.run(history, workflow, first.id) == first
-    assert len(backend.requests) == 3
+    assert len(backend.requests) == 5
     assert "summary" in str(backend.requests[-1].messages)
 
 
-async def test_dynamic_parallel_tools_replay(history: MemoryHistory) -> None:
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_dynamic_parallel_tools_replay(
+    history: MemoryHistory, mixed: bool
+) -> None:
     class Arguments(pydantic.BaseModel):
         value: int
 
@@ -352,10 +467,12 @@ async def test_dynamic_parallel_tools_replay(history: MemoryHistory) -> None:
                         id=str(i), name="work", arguments={"value": i}
                     )
                     for i in (1, 2)
-                ],
+                ]
+                + (finish().content if mixed else []),
                 finish_reason="tool_call",
             ),
-            finish(),
+            *([] if mixed else [finish()]),
+            answer("Completed."),
         ]
     )
 
