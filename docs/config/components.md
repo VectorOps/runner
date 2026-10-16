@@ -12,13 +12,18 @@ file once at startup. There is no central component schema or global digest.
 
 ```toml
 [components.llm]
-model = "gpt-4.1"
-provider = "openai"
+model = "openai/gpt-4.1"
 ```
 
 This is enough for the built-in coding agent. Its `strong`, `medium`, and `weak`
 profiles inherit these shared settings unless explicitly overridden; no profile
 tables are required. Other LLM options use their built-in defaults.
+
+Select models with one `<provider>/<model>` value. The provider prefix selects
+both the generation backend and its credentials; no separate provider setting is
+needed. The model portion can contain additional slashes, for example
+`openrouter/anthropic/claude-sonnet-4`. Credential profiles remain optional account
+selectors, independent of model selection.
 
 ```python
 from vectorops.runner.api import llm
@@ -119,8 +124,8 @@ Hosts can change workflow settings without editing TOML or restarting the worker
 
 ```python
 config = (await runner.project()).configuration
-await config.set("llm.model", "gpt-4.1", permanent=True)
-await config.set("llm.model", "o3")
+await config.set("llm.model", "openai/gpt-4.1", permanent=True)
+await config.set("llm.model", "openai/o3")
 current = config.inspect("llm.model")
 await config.reset("llm.model")
 ```
@@ -132,7 +137,7 @@ JSON-compatible data; component owners still validate their own schemas on read.
 
 There is one override per key, not separate temporary and permanent layers.
 The latest write replaces the previous override. In the example, the temporary
-`o3` override removes the persisted `gpt-4.1` override; after restart the TOML value
+`openai/o3` override removes the persisted `openai/gpt-4.1` override; after restart the TOML value
 applies. Temporary overrides ignore TOML edits and disappear at worker restart.
 Setting or resetting a subtree also removes overlapping ancestor/descendant
 overrides. Setting `llm.model` after overriding `llm` removes the whole `llm`
@@ -158,10 +163,10 @@ TCP connections:
 
 ```python
 name = "components.llm.model"
-await client.set_configuration(name, "gpt-4.1", permanent=True)
+await client.set_configuration(name, "openai/gpt-4.1", permanent=True)
 current = await client.get_configuration(name)
 snapshot = await client.get_configuration()
-suggestions = await client.suggest_configuration(name, prefix="gpt")
+suggestions = await client.suggest_configuration(name, prefix="openai/")
 await client.reset_configuration(name)
 ```
 
@@ -188,7 +193,9 @@ invalid or incomplete settings; validation happens when consumers read them.
 Reset removes runtime overrides and restores startup TOML, not necessarily shared
 inheritance. If absent there, the consumer supplies its own default.
 
-Suggestions include Connect model/provider names and enum values from known LLM
+Model suggestions use qualified `<provider>/<model>` references, including for
+LLM profiles, compaction summarizers, and workflow tier settings. Suggestions also
+include legacy provider names and enum values from known LLM
 and built-in workflow schemas. Unknown paths return an empty inventory. Suggestions
 are advisory and do not restrict writes or require valid current settings.
 
@@ -255,6 +262,9 @@ LLM precedence is built-in defaults, workspace values, the selected profile,
 then explicit options.
 Its owner merges nested mappings recursively; scalars and lists replace lower
 layers. Explicit `None` clears optional settings rather than inheriting them.
+An overriding qualified `model` replaces an inherited legacy `provider` unless
+the same override explicitly sets `provider`. Conflicting explicit provider and
+model-prefix selections fail validation instead of silently choosing a backend.
 Pydantic option models contribute only explicitly supplied fields. Pydantic here
 validates LLM-specific options, not the shape of general workspace configuration.
 
@@ -266,7 +276,7 @@ async def main(ctx):
     agent = llm.LLM(
         "reviewer",
         llm.SettingsOverrides(temperature=0),
-        model="o3",
+        model="openai/o3",
         reasoning=connect.ReasoningConfig(effort="low"),
         compaction=None,
     )
@@ -305,8 +315,8 @@ not work inside an activity; resolve before entering its recorded callback.
 
 | Workspace field | Built-in default | Validation/meaning |
 | --- | --- | --- |
-| `model` | Required after merging | Nonblank model name |
-| `provider` | None | Optional provider name |
+| `model` | Required after merging | Model reference in `<provider>/<model>` form; legacy bare names remain accepted |
+| `provider` | None | Legacy optional provider for bare model names; must match any model prefix |
 | `credential_profile` | None (`default` profile) | Non-secret runner credential profile reference |
 | `temperature` | None | Number from 0 through 2 |
 | `max_output_tokens` | None | Positive integer |
@@ -339,16 +349,15 @@ Use `LLM("agent", profile="strong")` to select a partial configuration under
 
 ```toml
 [components.llm]
-model = "gpt-4.1"
-provider = "openai"
+model = "openai/gpt-4.1"
 max_output_tokens = 4096
 reasoning = {effort = "high"}
 
 [components.llm.profiles.strong]
-model = "o3"
+model = "openai/o3"
 
 [components.llm.profiles.weak]
-model = "gpt-4.1-mini"
+model = "openai/gpt-4.1-mini"
 reasoning = {effort = "low"}
 ```
 
@@ -366,14 +375,14 @@ Profile selection is separate from `credential_profile`, which references runtim
 credentials. A settings profile can select a credential profile by name, but must
 not contain secrets. The entire `llm` subtree, including the catalog, is recorded
 in the existing per-round configuration snapshot. Runtime overrides such as
-`await config.set("llm.profiles.strong.model", "o3", permanent=True)` use the same
+`await config.set("llm.profiles.strong.model", "openai/o3", permanent=True)` use the same
 storage and lifetime rules as other component settings. Fresh rounds see updates;
 replayed or interrupted generations use their recorded snapshot.
 
 ### Migrate the coding agent
 
 The coding agent selects `profile=model_tier.value`; its default tier is `strong`.
-Configure only `components.llm.model` and, if needed, `provider` to use one shared
+Configure only `components.llm.model = "openai/gpt-4.1"` to use one shared
 model for every tier. No profile tables are required. To retain distinct tier models,
 move `workflows.defaults.strong_model`, `medium_model`, and `weak_model` to the
 corresponding `llm.profiles.<tier>.model` fields for the coding agent. Move its shared
@@ -384,6 +393,13 @@ still use `workflows.defaults`; retain their settings when those workflows need 
 The agent no longer reads or translates workflow defaults after every user message.
 Its LLM refreshes the selected profile before each generation, including tool rounds,
 without clearing conversation history. Prompt and tool settings remain workflow-owned.
+
+For legacy split settings, replace `model = "gpt-4.1"` and `provider = "openai"`
+with `model = "openai/gpt-4.1"`, then remove `provider`. Apply this to profile and
+summary settings as well. Bare model names with an explicit or inherited provider
+remain supported for compatibility. Remove an old shared provider before changing
+the shared model to a different provider prefix. Existing serialized settings are
+not rewritten, preserving request digests for supported legacy selections.
 
 This changes the agent's recorded activity sequence, so `builtin.agent` now uses
 workflow contract version 2. Start a new agent execution after migrating settings.
@@ -406,11 +422,12 @@ the next request or reserve output headroom for this trigger.
 | `keep_recent_tokens` | None | Positive recent-tail token target; takes precedence over the ratio |
 | `keep_recent_ratio` | 0.25 | Recent-tail target as a fraction of context; below the trigger when no absolute target is set |
 | `summary_max_output_tokens` | 4096 | Positive summary output cap, independent of generation's output cap |
-| `summary_settings` | Inherit generation | Partial generation settings, including model, provider, reasoning, temperature, timeouts, and output cap |
+| `summary_settings` | Inherit generation | Partial generation settings, including qualified model, reasoning, temperature, timeouts, and output cap |
 | `instruction` | Built-in continuation instructions | Summary instructions; structured update instructions are appended |
 
 For a dedicated summarizer, add `[components.llm.compaction.summary_settings]`
-with `model` and, if necessary, `provider`. Set `keep_recent_tokens = 16000` to
+with `model = "openai/gpt-4.1-mini"`. A qualified summary model replaces the
+generation provider selection. Set `keep_recent_tokens = 16000` to
 retain a fixed target rather than a fraction. A null summary output override falls
 back to `summary_max_output_tokens`; it never disables the cap.
 

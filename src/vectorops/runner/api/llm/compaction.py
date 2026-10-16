@@ -8,7 +8,7 @@ from typing import Optional
 import connect
 import pydantic
 
-from vectorops.runner.api.llm import models, observability
+from vectorops.runner.api.llm import configuration, models, observability
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner import streaming
 
@@ -205,9 +205,11 @@ class History:
         generation: models.Settings,
         before: connect.GenerateRequest,
     ) -> Summary:
-        values = generation.model_dump()
+        values = generation.model_dump(mode="json")
         values["max_output_tokens"] = policy.summary_max_output_tokens
-        values.update(policy.summary_settings.model_dump(exclude_unset=True))
+        values = configuration.merge_settings(
+            values, policy.summary_settings.model_dump(mode="json", exclude_unset=True)
+        )
         if values["max_output_tokens"] is None:
             values["max_output_tokens"] = policy.summary_max_output_tokens
         settings = models.Settings.model_validate(values)

@@ -7,6 +7,8 @@ from typing import Optional
 import connect
 import pydantic
 
+from vectorops.runner import model_reference
+
 
 class Reasoning(connect.ReasoningConfig):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
@@ -47,9 +49,20 @@ class Settings(GenerationOptions):
             raise ValueError("model must not be blank")
         return value
 
+    @pydantic.model_validator(mode="after")
+    def validate_model_reference(self) -> typing.Self:
+        model_reference.provider(self.model, self.provider)
+        return self
+
 
 class SettingsOverrides(GenerationOptions):
     model: Optional[str] = pydantic.Field(default=None, min_length=1)
+
+    @pydantic.model_validator(mode="after")
+    def validate_model_reference(self) -> typing.Self:
+        if self.model is not None:
+            model_reference.provider(self.model, self.provider)
+        return self
 
 
 class SettingsParameters(typing.TypedDict, total=False):

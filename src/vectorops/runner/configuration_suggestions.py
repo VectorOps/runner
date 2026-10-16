@@ -68,7 +68,8 @@ def suggest(query: configuration.SuggestQuery) -> configuration.Suggestions:
             ["weak_model"],
         ):
             values = [
-                item.model for item in connect.default_model_registry.list_models()
+                f"{item.provider}/{item.model}"
+                for item in connect.default_model_registry.list_models()
             ]
         elif field[-1] == "provider":
             values = list(connect.default_model_registry.providers())

@@ -6,7 +6,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import errors
+from vectorops.runner import errors, model_reference
 from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import models
@@ -38,7 +38,7 @@ def explicit_options(
     explicit = models.SettingsOverrides.model_validate(overrides).model_dump(
         mode="json", exclude_unset=True
     )
-    supplied.update(explicit)
+    supplied = merge_settings(supplied, explicit)
     if compaction is not models.Unset.VALUE:
         supplied["compaction"] = (
             None
@@ -48,14 +48,22 @@ def explicit_options(
     return supplied
 
 
-def _merge(
+def merge_settings(
     base: dict[str, pydantic.JsonValue], override: dict[str, pydantic.JsonValue]
 ) -> dict[str, pydantic.JsonValue]:
+    """Merge policy layers, letting qualified model overrides replace provider selection."""
     result = deepcopy(base)
+    model = override.get("model")
+    if (
+        isinstance(model, str)
+        and "provider" not in override
+        and model_reference.qualified(model)
+    ):
+        result.pop("provider", None)
     for key, value in override.items():
         previous = result.get(key)
         result[key] = (
-            _merge(previous, value)
+            merge_settings(previous, value)
             if isinstance(previous, dict) and isinstance(value, dict)
             else deepcopy(value)
         )
@@ -88,6 +96,7 @@ def interpret_configuration(
         path=source_path,
         section="components.llm",
         subject=None if profile is None else f"profile {profile!r}",
+        hint="Select model as '<provider>/<model>'; any legacy provider must match its prefix.",
     )
     if not isinstance(values, dict):
         error = ValueError("configuration llm must be a mapping")
@@ -116,9 +125,10 @@ def interpret_configuration(
             raise ConfigurationError(
                 errors.format_error(error, context=context)
             ) from error
-        defaults = _merge(defaults, profiles.get(profile, {}))
     try:
-        return models.Configuration.model_validate(_merge(defaults, supplied))
+        if profile is not None:
+            defaults = merge_settings(defaults, profiles.get(profile, {}))
+        return models.Configuration.model_validate(merge_settings(defaults, supplied))
     except pydantic.ValidationError as exc:
         if any(
             issue["loc"] == ("model",) and issue["type"] == "missing"

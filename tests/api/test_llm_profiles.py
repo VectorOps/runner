@@ -9,7 +9,7 @@ from tests.api.test_llm import FakeProvider, answer
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner.api import llm
-from vectorops.runner.api.llm import configuration
+from vectorops.runner.api.llm import compaction, configuration
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.streaming import StreamItem
@@ -175,6 +175,91 @@ async def test_builtin_profiles_inherit_shared_settings_and_replay(
     assert (
         await replay.run(history, workflow, first.id, workspace=tmp_path)
     ).outcome == first.outcome
+    assert len(backend.requests) == 1
+
+
+def test_qualified_model_overrides_replace_inherited_provider() -> None:
+    shared: dict[str, pydantic.JsonValue] = {
+        "model": "legacy",
+        "provider": "openai",
+        "credential_profile": "work",
+        "profiles": {"strong": {"model": "anthropic/claude"}},
+    }
+    selected = configuration.interpret_configuration(shared, {}, profile="strong")
+    assert selected.model == "anthropic/claude"
+    assert selected.provider is None
+    assert selected.credential_profile == "work"
+    explicit = configuration.explicit_options(
+        llm.SettingsOverrides(model="legacy", provider="openai"),
+        model="anthropic/claude",
+    )
+    assert "provider" not in explicit
+    selected = configuration.interpret_configuration(shared, explicit)
+    assert selected.model == "anthropic/claude"
+    assert selected.provider is None
+    legacy = configuration.interpret_configuration(shared, {"model": "other"})
+    assert legacy.model == "other"
+    assert legacy.provider == "openai"
+    with pytest.raises(configuration.ConfigurationError, match="provider must match"):
+        configuration.interpret_configuration(
+            {"model": "anthropic/claude", "provider": "openai"}, {}
+        )
+
+
+def test_nested_summary_model_overrides_replace_inherited_provider() -> None:
+    selected = configuration.interpret_configuration(
+        {
+            "model": "legacy",
+            "provider": "openai",
+            "compaction": {"summary_settings": {"model": "old", "provider": "openai"}},
+            "profiles": {
+                "weak": {
+                    "compaction": {"summary_settings": {"model": "anthropic/claude"}}
+                }
+            },
+        },
+        {},
+        profile="weak",
+    )
+    assert selected.compaction is not None
+    assert selected.compaction.summary_settings.model == "anthropic/claude"
+    assert selected.compaction.summary_settings.provider is None
+    messages: list[connect.Message] = [
+        connect.UserMessage(content="history"),
+        connect.UserMessage(content="recent"),
+    ]
+    summary = compaction.History().prepare(
+        messages,
+        compaction.Selection(anchor_id="anchor", cut=1, prefix_tokens=100),
+        selected.compaction,
+        selected.generation_settings(),
+        connect.GenerateRequest(messages=messages),
+    )
+    assert summary.settings.model == "anthropic/claude"
+    assert summary.settings.provider is None
+
+
+async def test_qualified_profile_switch_and_replay(
+    history: MemoryHistory, tmp_path: Path
+) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[components.llm]\nmodel = "legacy"\nprovider = "openai"\n'
+        '[components.llm.profiles.strong]\nmodel = "anthropic/claude"\n'
+    )
+    backend = FakeProvider([answer("done")])
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("qualified", profile="strong", backend=backend)
+        agent.add_user_message("hello")
+        await agent.generate()
+        assert agent.settings.model == "anthropic/claude"
+        assert agent.settings.provider is None
+        return None
+
+    first = await replay.run(history, workflow, workspace=tmp_path)
+    assert first.outcome.kind == "completed", first.outcome
+    (tmp_path / "config.toml").write_text('[components.llm]\nmodel = "openai/new"\n')
+    assert await replay.run(history, workflow, first.id, workspace=tmp_path) == first
     assert len(backend.requests) == 1
 
 

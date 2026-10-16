@@ -5,6 +5,8 @@ from typing import Final, Optional
 
 import connect
 
+from vectorops.runner import model_reference
+
 from . import contracts, models, oauth
 
 _PROVIDER_NAMES: Final[dict[str, str]] = {
@@ -54,10 +56,13 @@ async def transport(
     profile: str = "default",
     execution_id: Optional[str] = None,
 ) -> "ProviderAuth":
-    name = provider or model.partition("/")[0]
-    if not provider and "/" not in model:
+    try:
+        name = model_reference.provider(model, provider)
+    except ValueError as exc:
+        raise models.AuthenticationError(str(exc)) from None
+    if name is None:
         raise models.AuthenticationError(
-            "provider must be explicit or included in the model name"
+            "set model to <provider>/<model>, or supply a legacy provider setting"
         )
     selected = models.Profile(provider=name, profile=profile)
     value = await resolver.acquire(selected, execution_id)

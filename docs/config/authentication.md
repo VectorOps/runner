@@ -103,7 +103,13 @@ model = "chatgpt/gpt-5.4"
 credential_profile = "work"
 ```
 
-Profile names contain 1-64 ASCII letters, digits, underscores, or hyphens. Provider names are lower-case identifiers. The provider is explicit or taken from the `provider/model` model prefix. Profile references participate in recorded settings; credentials do not.
+Profile names contain 1-64 ASCII letters, digits, underscores, or hyphens. Provider
+names are lower-case identifiers. Select the provider and model together with
+`model = "<provider>/<model>"`; the same prefix selects generation and credentials.
+The legacy separate `provider` setting remains accepted for bare model names, but
+conflicting provider and model-prefix selections are rejected. Model selection
+does not change the active or pinned credential profile. Profile references
+participate in recorded settings; credentials do not.
 
 The default LLM adapter uses the runner's store instead of provider environment variables. Explicit custom `ConnectProvider(auth=...)` remains available. API-key headers support OpenAI/OpenRouter bearer tokens, Anthropic `x-api-key`, and Gemini `x-goog-api-key`; other API-key providers use bearer authentication. ChatGPT is the interactive LLM OAuth provider. MCP public-client OAuth uses the same host coordination with resource-bound adapters; see [MCP credentials and OAuth](mcp.md#credentials-and-oauth).
 

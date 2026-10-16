@@ -137,17 +137,35 @@ async def test_suggestions_are_advisory(
         [
             connect.ModelSpec(provider="test", model="sample-a", api_family="test"),
             connect.ModelSpec(provider="other", model="sample-b", api_family="test"),
+            connect.ModelSpec(provider="other", model="sample-a", api_family="test"),
+            connect.ModelSpec(
+                provider="router", model="vendor/nested", api_family="test"
+            ),
         ]
     )
     monkeypatch.setattr(connect, "default_model_registry", registry)
     async with client.embedded(tmp_path) as connection:
         path = "components.llm.profiles.strong.model"
-        assert (await connection.suggest_configuration(path, "sample-a")).values == [
-            "sample-a"
+        assert (await connection.suggest_configuration(path, "test/")).values == [
+            "test/sample-a"
         ]
+        assert (await connection.suggest_configuration(path)).values == [
+            "other/sample-a",
+            "other/sample-b",
+            "router/vendor/nested",
+            "test/sample-a",
+        ]
+        for name in (
+            "components.llm.model",
+            "components.llm.compaction.summary_settings.model",
+            "components.workflows.defaults.strong_model",
+        ):
+            assert (await connection.suggest_configuration(name, "router/")).values == [
+                "router/vendor/nested"
+            ]
         assert (
             await connection.suggest_configuration("components.llm.provider")
-        ).values == ["other", "test"]
+        ).values == ["other", "router", "test"]
         assert (
             await connection.suggest_configuration(
                 "components.llm.reasoning.effort", "hi"

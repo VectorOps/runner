@@ -13,7 +13,10 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 
-async def test_provider_resolves_injected_profile_before_io(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_provider_resolves_injected_profile_before_io(
+    tmp_path: Path, legacy: bool
+) -> None:
     authentication = AuthenticationService(global_config.GlobalConfiguration(tmp_path))
     await authentication.provision(
         am.Credential(
@@ -32,6 +35,8 @@ async def test_provider_resolves_injected_profile_before_io(tmp_path: Path) -> N
             options: Optional[connect.RequestOptions] = None,
         ) -> connect.StreamHandle:
             assert options is not None
+            assert model == ("model" if legacy else "openai/model")
+            assert provider == ("openai" if legacy else None)
             calls.append(options)
             raise RuntimeError("test transport boundary")
 
@@ -40,12 +45,17 @@ async def test_provider_resolves_injected_profile_before_io(tmp_path: Path) -> N
         "execution", "workflow", "step", authentication=authentication
     )
     request = connect.GenerateRequest(messages=[connect.UserMessage(content="hello")])
-    settings = models.Settings(model="openai/model", credential_profile="work")
+    settings = models.Settings(
+        model="model" if legacy else "openai/model",
+        provider="openai" if legacy else None,
+        credential_profile="work",
+    )
     with pytest.raises(RuntimeError, match="test transport"):
         async for _ in backend.stream(context, settings, request):
             pass
     assert len(calls) == 1
     assert calls[0].idempotency_key == "step"
+    assert calls[0].auth is not None
     assert (await calls[0].auth.resolve()).headers[
         "Authorization"
     ] == "Bearer private-api-key"
@@ -98,3 +108,11 @@ async def test_authentication_exceptions_do_not_record_provider_payloads() -> No
         ):
             pass
     assert "private" not in str(error.value)
+
+
+async def test_authentication_rejects_conflicting_provider_before_credentials(
+    tmp_path: Path,
+) -> None:
+    authentication = AuthenticationService(global_config.GlobalConfiguration(tmp_path))
+    with pytest.raises(am.AuthenticationError, match="conflicts"):
+        await authentication.transport("openai", "anthropic/claude")
