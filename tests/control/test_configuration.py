@@ -165,7 +165,7 @@ async def test_suggestions_are_advisory(
             ]
         assert (
             await connection.suggest_configuration("components.llm.provider")
-        ).values == ["other", "router", "test"]
+        ).values == []
         assert (
             await connection.suggest_configuration(
                 "components.llm.reasoning.effort", "hi"

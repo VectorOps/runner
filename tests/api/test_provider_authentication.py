@@ -13,10 +13,7 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_provider_resolves_injected_profile_before_io(
-    tmp_path: Path, legacy: bool
-) -> None:
+async def test_provider_resolves_injected_profile_before_io(tmp_path: Path) -> None:
     authentication = AuthenticationService(global_config.GlobalConfiguration(tmp_path))
     await authentication.provision(
         am.Credential(
@@ -35,8 +32,8 @@ async def test_provider_resolves_injected_profile_before_io(
             options: Optional[connect.RequestOptions] = None,
         ) -> connect.StreamHandle:
             assert options is not None
-            assert model == ("model" if legacy else "openai/model")
-            assert provider == ("openai" if legacy else None)
+            assert model == "openai/model"
+            assert provider is None
             calls.append(options)
             raise RuntimeError("test transport boundary")
 
@@ -46,8 +43,7 @@ async def test_provider_resolves_injected_profile_before_io(
     )
     request = connect.GenerateRequest(messages=[connect.UserMessage(content="hello")])
     settings = models.Settings(
-        model="model" if legacy else "openai/model",
-        provider="openai" if legacy else None,
+        model="openai/model",
         credential_profile="work",
     )
     with pytest.raises(RuntimeError, match="test transport"):
@@ -63,12 +59,13 @@ async def test_provider_resolves_injected_profile_before_io(
     assert "private-api-key" not in settings.model_dump_json()
 
 
-def test_default_profile_preserves_legacy_request_digest() -> None:
+def test_request_digest_uses_model_and_credential_profile() -> None:
     llm = object.__new__(api.LLM)
     llm._identity = "identity"
     llm._settings = models.Settings(model="openai/model")
     request = connect.GenerateRequest(messages=[connect.UserMessage(content="hello")])
     old_settings = llm._settings.model_dump(mode="json", exclude={"credential_profile"})
+    assert "provider" not in old_settings
     encoded = json.dumps(
         {"request": request.model_dump(mode="json"), "settings": old_settings},
         sort_keys=True,
@@ -110,9 +107,9 @@ async def test_authentication_exceptions_do_not_record_provider_payloads() -> No
     assert "private" not in str(error.value)
 
 
-async def test_authentication_rejects_conflicting_provider_before_credentials(
+async def test_authentication_requires_qualified_model_before_credentials(
     tmp_path: Path,
 ) -> None:
     authentication = AuthenticationService(global_config.GlobalConfiguration(tmp_path))
-    with pytest.raises(am.AuthenticationError, match="conflicts"):
-        await authentication.transport("openai", "anthropic/claude")
+    with pytest.raises(am.AuthenticationError, match="<provider>/<model>"):
+        await authentication.transport("claude")

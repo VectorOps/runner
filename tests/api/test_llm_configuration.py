@@ -22,7 +22,7 @@ async def test_omitted_options_and_explicit_overrides(
     history: MemoryHistory, tmp_path: Path
 ) -> None:
     (tmp_path / "config.toml").write_text(
-        '[components.llm]\nmodel = "workspace-model"\nprovider = "openai"\ntemperature = 0.7\nmax_output_tokens = 500\ntimeout = 30\n[components.llm.reasoning]\neffort = "high"\nsummary = "detailed"\n'
+        '[components.llm]\nmodel = "workspace-model"\ntemperature = 0.7\nmax_output_tokens = 500\ntimeout = 30\n[components.llm.reasoning]\neffort = "high"\nsummary = "detailed"\n'
     )
     backend = FakeProvider([answer("ok")])
 
@@ -45,9 +45,9 @@ async def test_omitted_options_and_explicit_overrides(
         assert settings.reasoning.effort == "low"
         assert settings.reasoning.summary == "detailed"
         cleared = await llm.resolve_settings(
-            llm.Settings(model="other", reasoning=None, provider=None)
+            llm.Settings(model="other", reasoning=None)
         )
-        assert cleared.reasoning is None and cleared.provider is None
+        assert cleared.reasoning is None
         assert cleared.max_output_tokens == 500
         return None
 

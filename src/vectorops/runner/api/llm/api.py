@@ -248,7 +248,6 @@ class LLM:
         return _digest(
             {
                 "model": self._settings.model,
-                "provider": self._settings.provider,
                 "system_prompt": self._system_prompt,
                 "tools": [
                     definition.model_dump(mode="json") for definition in definitions

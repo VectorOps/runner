@@ -142,9 +142,7 @@ class Observation:
     ) -> None:
         try:
             self.model: Optional[connect.ModelSpec] = (
-                connect.default_model_registry.resolve(
-                    settings.model, settings.provider
-                )
+                connect.default_model_registry.resolve(settings.model)
             )
         except connect.RegistryError:
             self.model = None

@@ -86,7 +86,6 @@ class ConnectProvider:
             authentication = context.authentication or AuthenticationService()
             with deadlines.suspend():
                 auth = await authentication.transport(
-                    settings.provider,
                     settings.model,
                     settings.credential_profile,
                     context.execution_id,
@@ -99,9 +98,7 @@ class ConnectProvider:
         )
         snapshot = snapshots.Accumulator()
         async with self._client_factory() as client:
-            stream = client.stream(
-                settings.model, request, provider=settings.provider, options=options
-            )
+            stream = client.stream(settings.model, request, options=options)
             async for event in stream:
                 if event.type == "error":
                     if event.error.status_code in (401, 403):

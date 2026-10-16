@@ -334,7 +334,7 @@ async def test_summary_settings_workspace_and_catalog_replay(
     )
     monkeypatch.setattr(connect, "default_model_registry", registry)
     (tmp_path / "config.toml").write_text(
-        '[components.llm]\nmodel="test/main"\n[components.llm.compaction]\nkeep_recent_tokens=200\nsummary_max_output_tokens=80\n[components.llm.compaction.summary_settings]\nmodel="summary"\nprovider="other"\ntemperature=0\n'
+        '[components.llm]\nmodel="test/main"\n[components.llm.compaction]\nkeep_recent_tokens=200\nsummary_max_output_tokens=80\n[components.llm.compaction.summary_settings]\nmodel="other/summary"\ntemperature=0\n'
     )
     backend = Backend(
         [answer("first", 300), answer("second", 750), answer("summary", 400, 50)]
@@ -354,8 +354,7 @@ async def test_summary_settings_workspace_and_catalog_replay(
     assert (
         await replay.run(history, workflow, first.id, workspace=tmp_path)
     ).outcome == first.outcome
-    assert backend.settings[-1].model == "summary"
-    assert backend.settings[-1].provider == "other"
+    assert backend.settings[-1].model == "other/summary"
     assert backend.requests[-1].max_output_tokens == 80
     assert backend.requests[-1].temperature == 0
     assert backend.requests[-1].tools == []

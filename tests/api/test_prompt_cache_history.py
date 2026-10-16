@@ -41,9 +41,7 @@ class Prompt:
     def from_request(
         cls, label: str, settings: llm.Settings, request: connect.GenerateRequest
     ) -> "Prompt":
-        model = connect.default_model_registry.resolve(
-            settings.model, settings.provider
-        )
+        model = connect.default_model_registry.resolve(settings.model)
         assert model.provider == "chatgpt", "This audit targets ChatGPT serialization"
         payload = ChatGPTProvider().build_payload(
             model, request, connect.RequestOptions()

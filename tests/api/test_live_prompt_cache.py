@@ -96,7 +96,7 @@ async def test_chatgpt_uses_configured_auth_and_optional_session(
     async with aiohttp.ClientSession() as session:
         with pytest.raises(RuntimeError, match="transport boundary"):
             await live_prompt_cache.send_chatgpt(session, body, "configured-profile")
-    transport.assert_awaited_once_with("chatgpt", "gpt-6.1-sol", "configured-profile")
+    transport.assert_awaited_once_with("chatgpt/gpt-6.1-sol", "configured-profile")
     stream.assert_awaited_once()
     assert stream.call_args.args == (
         "POST",

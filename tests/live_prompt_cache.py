@@ -124,7 +124,7 @@ async def send_chatgpt(
     model_name = body["model"]
     assert isinstance(model_name, str)
     model = connect.default_model_registry.resolve(model_name, "chatgpt")
-    auth = await AuthenticationService().transport("chatgpt", model_name, profile)
+    auth = await AuthenticationService().transport(f"chatgpt/{model_name}", profile)
     resolved = await auth.resolve(
         connect.AuthContext(
             provider="chatgpt", model=model_name, api_family=model.api_family

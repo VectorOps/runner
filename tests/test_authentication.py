@@ -78,7 +78,7 @@ def service(tmp_path: Path, adapter: OAuth) -> AuthenticationService:
 async def test_missing_api_key_fails_without_interaction(tmp_path: Path) -> None:
     auth = service(tmp_path, OAuth())
     with pytest.raises(m.AuthenticationError, match="not configured"):
-        await auth.transport(None, "openai/gpt-test")
+        await auth.transport("openai/gpt-test")
     assert auth.pending() == []
 
 
@@ -94,9 +94,7 @@ async def test_concurrent_rejected_tokens_refresh_once(tmp_path: Path) -> None:
             expires_at=time.time() + 3600,
         )
     )
-    transports = await asyncio.gather(
-        *(auth.transport(None, "chatgpt/X") for _ in range(4))
-    )
+    transports = await asyncio.gather(*(auth.transport("chatgpt/X") for _ in range(4)))
     assert adapter.refreshes == 0
     assert all(await asyncio.gather(*(item.refresh() for item in transports)))
     assert adapter.refreshes == 1
@@ -110,11 +108,11 @@ async def test_api_key_header_and_profile_selection(tmp_path: Path) -> None:
             provider="anthropic", profile="work", kind="api_key", secret="private-key"
         )
     )
-    transport = await auth.transport("anthropic", "model", "work")
+    transport = await auth.transport("anthropic/model", "work")
     assert (await transport.resolve()).headers == {"x-api-key": "private-key"}
     assert not await transport.refresh()
     with pytest.raises(m.AuthenticationError):
-        await auth.transport("anthropic", "model")
+        await auth.transport("anthropic/model")
 
 
 async def test_refresh_is_shared_across_services_and_durable(tmp_path: Path) -> None:
@@ -135,7 +133,7 @@ async def test_refresh_is_shared_across_services_and_durable(tmp_path: Path) -> 
     assert all(value.secret == "refreshed-access" for value in results)
     stored = await second.store.load(value)
     assert stored is not None and stored.refresh_token == "rotated-refresh"
-    transport = await second.transport(None, "chatgpt/X")
+    transport = await second.transport("chatgpt/X")
     assert (await transport.resolve()).headers[
         "Authorization"
     ] == "Bearer refreshed-access"
@@ -174,7 +172,7 @@ async def test_explicit_login_claim_disconnect_callback_and_restart(
     assert await auth.login("chatgpt") == requirement
     assert requirement.execution_ids == []
     with pytest.raises(m.LoginRequired):
-        await auth.transport(None, "chatgpt/X")
+        await auth.transport("chatgpt/X")
     claim = auth.claim(requirement.id, "host-one")
     assert auth.claim(requirement.id, "host-one") == claim
     with pytest.raises(m.AuthenticationConflict):
@@ -202,9 +200,7 @@ async def test_explicit_login_claim_disconnect_callback_and_restart(
         "host-two",
     )
     async with asyncio.timeout(3):
-        results = await asyncio.gather(
-            *(auth.transport(None, "chatgpt/X") for _ in range(3))
-        )
+        results = await asyncio.gather(*(auth.transport("chatgpt/X") for _ in range(3)))
     assert adapter.exchanges == 1
     assert auth.pending() == []
     assert all(
@@ -213,7 +209,7 @@ async def test_explicit_login_claim_disconnect_callback_and_restart(
             for result in results
         ]
     )
-    restored = await service(tmp_path, adapter).transport(None, "chatgpt/X")
+    restored = await service(tmp_path, adapter).transport("chatgpt/X")
     assert (await restored.resolve()).headers[
         "Authorization"
     ] == "Bearer private-access"
@@ -282,7 +278,7 @@ async def test_host_helper_runs_callback_on_host(
 
                 await oauth_host.authenticate(host, requirement.id, launch=launch)
                 assert (
-                    await runner.authentication.transport(None, "chatgpt/X")
+                    await runner.authentication.transport("chatgpt/X")
                 ).value.secret == "private-access"
                 with pytest.raises(p.RemoteError) as error:
                     await host.request(

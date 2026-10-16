@@ -17,7 +17,6 @@ class Reasoning(connect.ReasoningConfig):
 class GenerationOptions(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    provider: Optional[str] = None
     credential_profile: Optional[str] = pydantic.Field(
         default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$"
     )
@@ -51,7 +50,7 @@ class Settings(GenerationOptions):
 
     @pydantic.model_validator(mode="after")
     def validate_model_reference(self) -> typing.Self:
-        model_reference.provider(self.model, self.provider)
+        model_reference.provider(self.model)
         return self
 
 
@@ -61,13 +60,12 @@ class SettingsOverrides(GenerationOptions):
     @pydantic.model_validator(mode="after")
     def validate_model_reference(self) -> typing.Self:
         if self.model is not None:
-            model_reference.provider(self.model, self.provider)
+            model_reference.provider(self.model)
         return self
 
 
 class SettingsParameters(typing.TypedDict, total=False):
     model: str
-    provider: Optional[str]
     credential_profile: Optional[str]
     temperature: Optional[float]
     max_output_tokens: Optional[int]

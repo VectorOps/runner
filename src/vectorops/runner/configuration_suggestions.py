@@ -71,8 +71,6 @@ def suggest(query: configuration.SuggestQuery) -> configuration.Suggestions:
                 f"{item.provider}/{item.model}"
                 for item in connect.default_model_registry.list_models()
             ]
-        elif field[-1] == "provider":
-            values = list(connect.default_model_registry.providers())
         else:
             schema = typing.cast(
                 dict[str, pydantic.JsonValue], model.model_json_schema()

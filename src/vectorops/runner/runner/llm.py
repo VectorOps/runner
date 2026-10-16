@@ -39,7 +39,7 @@ class RunnerLLM:
             source_path=self.configuration.path,
         ).generation_settings()
         auth = await self.authentication.transport(
-            settings.provider, settings.model, settings.credential_profile
+            settings.model, settings.credential_profile
         )
         request = connect.GenerateRequest(
             messages=[message],
@@ -52,7 +52,6 @@ class RunnerLLM:
             response = await client.generate(
                 settings.model,
                 request,
-                provider=settings.provider,
                 options=connect.RequestOptions(timeout=settings.timeout, auth=auth),
             )
         if response.finish_reason != "stop" or any(

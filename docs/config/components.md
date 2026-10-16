@@ -20,8 +20,8 @@ profiles inherit these shared settings unless explicitly overridden; no profile
 tables are required. Other LLM options use their built-in defaults.
 
 Select models with one `<provider>/<model>` value. The provider prefix selects
-both the generation backend and its credentials; no separate provider setting is
-needed. The model portion can contain additional slashes, for example
+both the generation backend and its credentials. A separate `provider` setting is
+not supported. The model portion can contain additional slashes, for example
 `openrouter/anthropic/claude-sonnet-4`. Credential profiles remain optional account
 selectors, independent of model selection.
 
@@ -195,7 +195,7 @@ inheritance. If absent there, the consumer supplies its own default.
 
 Model suggestions use qualified `<provider>/<model>` references, including for
 LLM profiles, compaction summarizers, and workflow tier settings. Suggestions also
-include legacy provider names and enum values from known LLM
+include enum values from known LLM
 and built-in workflow schemas. Unknown paths return an empty inventory. Suggestions
 are advisory and do not restrict writes or require valid current settings.
 
@@ -262,9 +262,7 @@ LLM precedence is built-in defaults, workspace values, the selected profile,
 then explicit options.
 Its owner merges nested mappings recursively; scalars and lists replace lower
 layers. Explicit `None` clears optional settings rather than inheriting them.
-An overriding qualified `model` replaces an inherited legacy `provider` unless
-the same override explicitly sets `provider`. Conflicting explicit provider and
-model-prefix selections fail validation instead of silently choosing a backend.
+Overriding `model` replaces the complete provider/model selection.
 Pydantic option models contribute only explicitly supplied fields. Pydantic here
 validates LLM-specific options, not the shape of general workspace configuration.
 
@@ -315,8 +313,7 @@ not work inside an activity; resolve before entering its recorded callback.
 
 | Workspace field | Built-in default | Validation/meaning |
 | --- | --- | --- |
-| `model` | Required after merging | Model reference in `<provider>/<model>` form; legacy bare names remain accepted |
-| `provider` | None | Legacy optional provider for bare model names; must match any model prefix |
+| `model` | Required after merging | Model reference in `<provider>/<model>` form; custom injected backends can use their own identifiers |
 | `credential_profile` | None (`default` profile) | Non-secret runner credential profile reference |
 | `temperature` | None | Number from 0 through 2 |
 | `max_output_tokens` | None | Positive integer |
@@ -396,10 +393,11 @@ without clearing conversation history. Prompt and tool settings remain workflow-
 
 For legacy split settings, replace `model = "gpt-4.1"` and `provider = "openai"`
 with `model = "openai/gpt-4.1"`, then remove `provider`. Apply this to profile and
-summary settings as well. Bare model names with an explicit or inherited provider
-remain supported for compatibility. Remove an old shared provider before changing
-the shared model to a different provider prefix. Existing serialized settings are
-not rewritten, preserving request digests for supported legacy selections.
+summary settings as well. Separate provider settings, including explicit nulls,
+are rejected rather than translated or ignored. Start new executions after this
+migration: recorded configurations containing `provider` are no longer accepted,
+and removing the field changes generation request digests and compaction signatures.
+Existing histories are not rewritten or automatically migrated.
 
 This changes the agent's recorded activity sequence, so `builtin.agent` now uses
 workflow contract version 2. Start a new agent execution after migrating settings.

@@ -310,12 +310,9 @@ class AuthenticationService:
 
     async def transport(
         self,
-        provider: Optional[str],
         model: str,
         profile: Optional[str] = None,
         execution_id: Optional[str] = None,
     ) -> "ProviderAuth":
         selected = await self.profiles.resolve(profile)
-        return await provider_auth.transport(
-            self, provider, model, selected, execution_id
-        )
+        return await provider_auth.transport(self, model, selected, execution_id)

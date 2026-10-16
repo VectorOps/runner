@@ -20,7 +20,7 @@ async def test_profile_precedence_and_settings_replacement(
 ) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
-        '[components.llm]\nmodel = "default"\nprovider = "openai"\n'
+        '[components.llm]\nmodel = "default"\n'
         "temperature = 0.8\ntimeout = 30\nmax_output_tokens = 500\n"
         'reasoning = {effort = "low", summary = "detailed"}\n'
         '[components.llm.profiles.strong]\nmodel = "strong"\n'
@@ -39,7 +39,6 @@ async def test_profile_precedence_and_settings_replacement(
             profile="strong",
             model="explicit",
             reasoning=None,
-            provider=None,
             backend=backend,
         )
         agent.add_user_message("hello")
@@ -47,7 +46,6 @@ async def test_profile_precedence_and_settings_replacement(
         assert agent.settings.model == "explicit"
         assert agent.settings.temperature == 0.2
         assert agent.settings.reasoning is None
-        assert agent.settings.provider is None
         assert agent.settings.credential_profile == "work"
         agent.set_settings(llm.SettingsOverrides())
         agent.add_user_message("continue")
@@ -56,7 +54,6 @@ async def test_profile_precedence_and_settings_replacement(
         assert agent.settings == selected
         assert selected.model == "strong"
         assert selected.temperature == 0.4
-        assert selected.provider == "openai"
         assert selected.timeout == 30
         assert selected.max_output_tokens == 500
         assert selected.reasoning is not None
@@ -152,7 +149,7 @@ async def test_builtin_profiles_inherit_shared_settings_and_replay(
 ) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
-        '[components.llm]\nmodel = "default"\nprovider = "openai"\n'
+        '[components.llm]\nmodel = "default"\n'
         'reasoning = {effort = "high"}\nmax_rounds = 7\n'
         "retry = {max_retries = 0}\ncompaction = {context_window = 1000}\n" + catalog
     )
@@ -178,40 +175,37 @@ async def test_builtin_profiles_inherit_shared_settings_and_replay(
     assert len(backend.requests) == 1
 
 
-def test_qualified_model_overrides_replace_inherited_provider() -> None:
+def test_qualified_model_overrides_replace_model_selection() -> None:
     shared: dict[str, pydantic.JsonValue] = {
-        "model": "legacy",
-        "provider": "openai",
+        "model": "openai/gpt-4.1",
         "credential_profile": "work",
         "profiles": {"strong": {"model": "anthropic/claude"}},
     }
     selected = configuration.interpret_configuration(shared, {}, profile="strong")
     assert selected.model == "anthropic/claude"
-    assert selected.provider is None
     assert selected.credential_profile == "work"
     explicit = configuration.explicit_options(
-        llm.SettingsOverrides(model="legacy", provider="openai"),
+        llm.SettingsOverrides(model="openai/gpt-4.1"),
         model="anthropic/claude",
     )
     assert "provider" not in explicit
     selected = configuration.interpret_configuration(shared, explicit)
     assert selected.model == "anthropic/claude"
-    assert selected.provider is None
-    legacy = configuration.interpret_configuration(shared, {"model": "other"})
-    assert legacy.model == "other"
-    assert legacy.provider == "openai"
-    with pytest.raises(configuration.ConfigurationError, match="provider must match"):
+    with pytest.raises(configuration.ConfigurationError, match="unknown setting"):
         configuration.interpret_configuration(
             {"model": "anthropic/claude", "provider": "openai"}, {}
         )
+    with pytest.raises(configuration.ConfigurationError, match="unknown setting"):
+        configuration.interpret_configuration(
+            {**shared, "provider": "openai"}, {"model": "anthropic/claude"}
+        )
 
 
-def test_nested_summary_model_overrides_replace_inherited_provider() -> None:
+def test_nested_summary_model_overrides_replace_model_selection() -> None:
     selected = configuration.interpret_configuration(
         {
-            "model": "legacy",
-            "provider": "openai",
-            "compaction": {"summary_settings": {"model": "old", "provider": "openai"}},
+            "model": "openai/gpt-4.1",
+            "compaction": {"summary_settings": {"model": "openai/gpt-4.1-mini"}},
             "profiles": {
                 "weak": {
                     "compaction": {"summary_settings": {"model": "anthropic/claude"}}
@@ -223,7 +217,6 @@ def test_nested_summary_model_overrides_replace_inherited_provider() -> None:
     )
     assert selected.compaction is not None
     assert selected.compaction.summary_settings.model == "anthropic/claude"
-    assert selected.compaction.summary_settings.provider is None
     messages: list[connect.Message] = [
         connect.UserMessage(content="history"),
         connect.UserMessage(content="recent"),
@@ -236,14 +229,14 @@ def test_nested_summary_model_overrides_replace_inherited_provider() -> None:
         connect.GenerateRequest(messages=messages),
     )
     assert summary.settings.model == "anthropic/claude"
-    assert summary.settings.provider is None
+    assert "provider" not in summary.settings.model_dump()
 
 
 async def test_qualified_profile_switch_and_replay(
     history: MemoryHistory, tmp_path: Path
 ) -> None:
     (tmp_path / "config.toml").write_text(
-        '[components.llm]\nmodel = "legacy"\nprovider = "openai"\n'
+        '[components.llm]\nmodel = "openai/gpt-4.1"\n'
         '[components.llm.profiles.strong]\nmodel = "anthropic/claude"\n'
     )
     backend = FakeProvider([answer("done")])
@@ -253,7 +246,7 @@ async def test_qualified_profile_switch_and_replay(
         agent.add_user_message("hello")
         await agent.generate()
         assert agent.settings.model == "anthropic/claude"
-        assert agent.settings.provider is None
+        assert "provider" not in agent.settings.model_dump()
         return None
 
     first = await replay.run(history, workflow, workspace=tmp_path)

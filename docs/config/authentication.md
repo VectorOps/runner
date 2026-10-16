@@ -106,8 +106,8 @@ credential_profile = "work"
 Profile names contain 1-64 ASCII letters, digits, underscores, or hyphens. Provider
 names are lower-case identifiers. Select the provider and model together with
 `model = "<provider>/<model>"`; the same prefix selects generation and credentials.
-The legacy separate `provider` setting remains accepted for bare model names, but
-conflicting provider and model-prefix selections are rejected. Model selection
+The separate LLM `provider` setting is not supported. Runner-managed model
+authentication requires a qualified model reference. Model selection
 does not change the active or pinned credential profile. Profile references
 participate in recorded settings; credentials do not.
 

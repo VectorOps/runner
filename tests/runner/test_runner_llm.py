@@ -76,7 +76,7 @@ async def test_runner_llm_defaults_to_weak_and_uses_live_configuration(
     assert request.max_output_tokens == 64
     assert request.tools == []
     assert options is not None
-    transport.assert_awaited_once_with(None, "weak-model", None)
+    transport.assert_awaited_once_with("weak-model", None)
     await project.configuration.set("llm", {"model": "updated"})
     await helper.generate(message, profile="strong")
     assert client.calls[1][0] == "updated"

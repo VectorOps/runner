@@ -51,19 +51,16 @@ def adapters() -> dict[str, oauth.OAuthAdapter]:
 
 async def transport(
     resolver: contracts.CredentialResolver,
-    provider: Optional[str],
     model: str,
     profile: str = "default",
     execution_id: Optional[str] = None,
 ) -> "ProviderAuth":
     try:
-        name = model_reference.provider(model, provider)
+        name = model_reference.provider(model)
     except ValueError as exc:
         raise models.AuthenticationError(str(exc)) from None
     if name is None:
-        raise models.AuthenticationError(
-            "set model to <provider>/<model>, or supply a legacy provider setting"
-        )
+        raise models.AuthenticationError("set model to <provider>/<model>")
     selected = models.Profile(provider=name, profile=profile)
     value = await resolver.acquire(selected, execution_id)
     return ProviderAuth(resolver, selected, execution_id, value)

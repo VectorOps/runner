@@ -98,7 +98,7 @@ def test_estimates_include_system_and_tools_not_metadata(
     original.messages[0].provider_meta["credential"] = "secret" * 10000
     assert obs.input_tokens(original) == larger
     observation = obs.Observation(
-        llm.Settings(model="small", provider="test", credential_profile="secret"),
+        llm.Settings(model="test/small", credential_profile="secret"),
         original,
     )
     value: dict[str, pydantic.JsonValue] = {
@@ -238,8 +238,7 @@ async def test_retry_events_persistence_and_replay(
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM(
             "chat",
-            model="small",
-            provider="test",
+            model="test/small",
             backend=backend,
             retry=llm.RetryPolicy(max_retries=2, initial_delay=0),
         )

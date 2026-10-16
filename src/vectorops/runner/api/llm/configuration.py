@@ -6,7 +6,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import errors, model_reference
+from vectorops.runner import errors
 from vectorops.runner.api import composition
 from vectorops.runner.api.configuration import get_config
 from vectorops.runner.api.llm import models
@@ -51,15 +51,8 @@ def explicit_options(
 def merge_settings(
     base: dict[str, pydantic.JsonValue], override: dict[str, pydantic.JsonValue]
 ) -> dict[str, pydantic.JsonValue]:
-    """Merge policy layers, letting qualified model overrides replace provider selection."""
+    """Merge nested policy mappings while replacing scalar and list values."""
     result = deepcopy(base)
-    model = override.get("model")
-    if (
-        isinstance(model, str)
-        and "provider" not in override
-        and model_reference.qualified(model)
-    ):
-        result.pop("provider", None)
     for key, value in override.items():
         previous = result.get(key)
         result[key] = (
@@ -96,7 +89,7 @@ def interpret_configuration(
         path=source_path,
         section="components.llm",
         subject=None if profile is None else f"profile {profile!r}",
-        hint="Select model as '<provider>/<model>'; any legacy provider must match its prefix.",
+        hint="Select model as '<provider>/<model>'; a separate provider setting is not supported.",
     )
     if not isinstance(values, dict):
         error = ValueError("configuration llm must be a mapping")

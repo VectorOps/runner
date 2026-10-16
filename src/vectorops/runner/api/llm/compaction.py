@@ -151,11 +151,7 @@ def summary_tokens(
     summary: models.Settings,
     generation: models.Settings,
 ) -> Optional[int]:
-    if (
-        response.usage.completeness == "final"
-        and summary.model == generation.model
-        and summary.provider == generation.provider
-    ):
+    if response.usage.completeness == "final" and summary.model == generation.model:
         return response.usage.output_tokens
     return None
 
@@ -166,9 +162,7 @@ def context_window(
     if policy.context_window is not None:
         return policy.context_window
     try:
-        return connect.default_model_registry.resolve(
-            settings.model, settings.provider
-        ).context_window
+        return connect.default_model_registry.resolve(settings.model).context_window
     except connect.RegistryError:
         return None
 

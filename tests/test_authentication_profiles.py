@@ -48,21 +48,21 @@ async def test_active_selection_explicit_override_and_inflight_pinning(
     await auth.provision(
         m.Credential(provider="openai", kind="api_key", secret="default-key")
     )
-    original = await auth.transport("openai", "model")
+    original = await auth.transport("openai/model")
     await auth.profiles.add("work")
     await auth.profiles.switch("work")
     with pytest.raises(m.AuthenticationError, match="not configured"):
-        await auth.transport("openai", "model")
+        await auth.transport("openai/model")
     await auth.provision(
         m.Credential(provider="openai", kind="api_key", secret="work-key")
     )
-    selected = await auth.transport(None, "openai/model")
+    selected = await auth.transport("openai/model")
     assert selected.profile.profile == "work"
     assert (await selected.resolve()).headers == {"Authorization": "Bearer work-key"}
     assert (await original.resolve()).headers == {"Authorization": "Bearer default-key"}
-    explicit = await auth.transport("openai", "model", "default")
+    explicit = await auth.transport("openai/model", "default")
     assert explicit.profile.profile == "default"
-    restarted = await service(tmp_path).transport("openai", "model")
+    restarted = await service(tmp_path).transport("openai/model")
     assert restarted.value.secret == "work-key"
 
 
@@ -88,7 +88,7 @@ async def test_deletion_removes_all_provider_credentials_and_readd_is_empty(
         )
     await auth.profiles.add("work")
     with pytest.raises(m.AuthenticationError, match="not configured"):
-        await auth.transport("openai", "model", "work")
+        await auth.transport("openai/model", "work")
 
 
 async def test_delete_waits_for_credential_publication(tmp_path: Path) -> None:
@@ -189,7 +189,7 @@ async def test_profile_rpc_and_shell(
             m.Credential(provider="openai", kind="api_key", secret="private")
         )
         assert (
-            await service(config).transport("openai", "model")
+            await service(config).transport("openai/model")
         ).value.secret == "private"
         await commands.execute(
             connection,
@@ -229,7 +229,7 @@ async def test_explicit_login_stays_on_selected_profile(tmp_path: Path) -> None:
     await auth.profiles.switch("work")
     assert auth.pending()[0].profile == "default"
     with pytest.raises(m.LoginRequired):
-        await auth.transport(None, "chatgpt/model")
+        await auth.transport("chatgpt/model")
     assert len(auth.pending()) == 1
 
 
