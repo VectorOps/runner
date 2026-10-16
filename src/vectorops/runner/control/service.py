@@ -97,7 +97,10 @@ class RunnerService:
             change_sink=self._changed,
         )
         self._updates = SnapshotPublisher(
-            self._summary, self.runner.workflow_state, self._emit
+            self._summary,
+            self.runner.workflow_state,
+            self._emit,
+            execution=self.runner.execution_state,
         )
         try:
             await self.runner.initialize_usage()
@@ -196,7 +199,7 @@ class RunnerService:
         if (
             isinstance(kind, str)
             and kind.startswith(("execution.", "mailbox."))
-            and kind != "execution.updated"
+            and kind not in ("execution.updated", "execution.state_updated")
         ):
             with diagnostics.bind(
                 execution_id=execution_id if isinstance(execution_id, str) else None
@@ -215,7 +218,7 @@ class RunnerService:
             isinstance(execution_id, str)
             and isinstance(kind, str)
             and kind.startswith("execution.")
-            and kind != "execution.updated"
+            and kind not in ("execution.updated", "execution.state_updated")
         ):
             self._changed(execution_id, ())
 

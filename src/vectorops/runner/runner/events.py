@@ -6,7 +6,7 @@ import typing
 import pydantic
 
 from vectorops.runner import models
-from vectorops.runner.runner import inspection
+from vectorops.runner.runner import execution_state, inspection
 
 
 class StepEvent(pydantic.BaseModel):
@@ -16,6 +16,7 @@ class StepEvent(pydantic.BaseModel):
     ]
     execution_id: typing.Optional[str] = None
     step: models.WorkflowStep
+    position: typing.Optional[int] = None
 
 
 StepEventSink: typing.TypeAlias = Callable[[StepEvent], None]
@@ -33,6 +34,13 @@ class ExecutionUpdated(pydantic.BaseModel):
     kind: typing.Literal["execution.updated"] = "execution.updated"
     execution_id: str
     summary: inspection.ExecutionSummary
+
+
+class ExecutionStateUpdated(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+    kind: typing.Literal["execution.state_updated"] = "execution.state_updated"
+    execution_id: str
+    execution: execution_state.ExecutionRecord
 
 
 HistoryChangeSink: typing.TypeAlias = Callable[[tuple[str, ...]], None]

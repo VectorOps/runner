@@ -19,6 +19,7 @@ class CountingHistory(MemoryHistory):
         super().__init__()
         self.workflow_reads = 0
         self.step_reads = 0
+        self.position_reads = 0
         self.workflow_saves = 0
         self.flushed = asyncio.Event()
 
@@ -29,6 +30,10 @@ class CountingHistory(MemoryHistory):
     async def get_step(self, step_id: str) -> m.WorkflowStep:
         self.step_reads += 1
         return await super().get_step(step_id)
+
+    async def get_step_position(self, step_id: str) -> int:
+        self.position_reads += 1
+        return await super().get_step_position(step_id)
 
     async def save_workflow(self, workflow: m.Workflow) -> None:
         self.workflow_saves += 1
@@ -82,6 +87,25 @@ async def test_stream_updates_coalesce_and_terminal_write_is_immediate() -> None
         assert backend.updated == 1
         assert backend.steps["stream"] == completed
     assert backend.updated == 1
+
+
+async def test_positions_are_cached_without_flushing_streams() -> None:
+    backend = CountingHistory()
+    await seed(backend)
+    async with CachedHistory(backend, cache_size=1, flush_interval=60) as cache:
+        assert await cache.get_step_position("stream") == 1
+        await cache.update_step(active(state=7))
+        assert await cache.get_step_position("stream") == 1
+        assert backend.position_reads == 1
+        assert backend.updated == 0
+        await cache.append_step(active("other"))
+        assert await cache.get_step_position("other") == 2
+        assert await cache.get_step_position("stream") == 1
+        assert backend.position_reads == 3
+        with pytest.raises(KeyError):
+            await cache.get_step_position("missing")
+    with pytest.raises(RuntimeError, match="closed"):
+        await cache.get_step_position("stream")
 
 
 async def test_explicit_and_shutdown_flush_latest_state() -> None:

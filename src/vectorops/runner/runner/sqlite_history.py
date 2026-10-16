@@ -758,6 +758,18 @@ class SQLiteHistory:
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return await self._run(lambda connection: self._step(connection, step_id))
 
+    async def get_step_position(self, step_id: str) -> int:
+        def read(connection: sqlite3.Connection) -> int:
+            row = connection.execute(
+                "SELECT rowid FROM steps WHERE id = ?", (step_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(step_id)
+            position: int = row[0]
+            return position
+
+        return await self._run(read)
+
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         def record(connection: sqlite3.Connection) -> models.WorkflowStep:
             with connection:

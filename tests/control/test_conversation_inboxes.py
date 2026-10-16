@@ -182,6 +182,49 @@ async def test_subagent_has_no_root_inbox(tmp_path: Path) -> None:
         await settled(host, accepted.execution_id)
 
 
+async def test_inbox_events_support_query_free_steering(tmp_path: Path) -> None:
+    async with client.embedded(tmp_path) as host:
+        await host.subscribe(
+            protocol.Subscribe(
+                kinds=["mailbox.state_updated", "mailbox.enqueued", "mailbox.removed"]
+            )
+        )
+        accepted = await host.start(
+            protocol.Start(reference="builtin:agent", idempotency_key="inbox-events")
+        )
+        async with asyncio.timeout(5):
+            opened = (await host.next_event()).event
+        assert opened["kind"] == "mailbox.state_updated"
+        assert opened["status"] == "open"
+        assert opened["queued_messages"] == 0
+        address = inbox.Address.model_validate(opened["address"])
+        assert address.execution_id == accepted.execution_id
+        await pending(host, accepted.execution_id)
+        message = await host.send_message(
+            inbox.Send(**address.model_dump(), payload=payload("steer"))
+        )
+        async with asyncio.timeout(5):
+            enqueued = (await host.next_event()).event
+        assert enqueued["kind"] == "mailbox.enqueued"
+        assert enqueued["message_id"] == message.id
+        assert inbox.Message.model_validate(enqueued["message"]) == message
+        await host.remove_message(
+            inbox.MessageRef(**address.model_dump(), message_id=message.id)
+        )
+        async with asyncio.timeout(5):
+            removed = (await host.next_event()).event
+        assert removed["kind"] == "mailbox.removed"
+        assert removed["message_id"] == message.id
+        assert "message" not in removed
+        assert removed["queued_messages"] == 0
+        await host.stop(accepted.execution_id)
+        async with asyncio.timeout(5):
+            closed = (await host.next_event()).event
+        assert closed["kind"] == "mailbox.state_updated"
+        assert closed["status"] == "closed"
+        assert closed["address"] == opened["address"]
+
+
 async def test_legacy_agent_history_retains_original_activity_order(
     tmp_path: Path,
 ) -> None:

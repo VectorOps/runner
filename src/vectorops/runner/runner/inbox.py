@@ -97,22 +97,29 @@ class Inbox:
             raise InboxConflict("conversation inbox is closed")
 
     def _emit(
-        self, kind: str, message: Message, reason: typing.Optional[RemovalReason] = None
+        self,
+        kind: str,
+        message: typing.Optional[Message] = None,
+        reason: typing.Optional[RemovalReason] = None,
     ) -> None:
         if self._sink is not None:
             try:
-                self._sink(
-                    {
-                        "kind": kind,
-                        "execution_id": self.address.execution_id,
-                        "address": self.address.model_dump(mode="json"),
-                        "message_id": message.id,
-                        "reason": reason,
-                        "queued_messages": len(self._messages),
-                    }
-                )
+                event: dict[str, pydantic.JsonValue] = {
+                    "kind": kind,
+                    "execution_id": self.address.execution_id,
+                    **self.inspect().model_dump(mode="json"),
+                }
+                if message is not None:
+                    event["message_id"] = message.id
+                    event["reason"] = reason
+                    if kind == "mailbox.enqueued":
+                        event["message"] = message.model_dump(mode="json")
+                self._sink(event)
             except Exception:
                 logging.getLogger(__name__).exception("Inbox event sink failed")
+
+    def publish_state(self) -> None:
+        self._emit("mailbox.state_updated")
 
     def send(self, payload: chat_input.UserMessageInput) -> Message:
         self._require_open()
@@ -174,8 +181,11 @@ class Inbox:
                 return message
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         self._available.set()
+        self.publish_state()
 
 
 class Registry:
@@ -205,6 +215,7 @@ class Registry:
             return self._inboxes[conversation_id]
         inbox = Inbox(address, self._sink)
         self._inboxes[conversation_id] = inbox
+        inbox.publish_state()
         return inbox
 
     def get(self, address: Address) -> Inbox:

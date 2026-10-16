@@ -4,7 +4,9 @@ import pytest
 
 from tests.fixtures.history import MemoryHistory
 from tests.fixtures.probe import ExecutionProbe
+from vectorops.runner.runner import history_query
 from vectorops.runner.runner.events import StepEvent
+from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
 
 
@@ -20,6 +22,7 @@ async def test_activity_events_are_snapshots_of_same_step(
     assert completed.kind == "step.completed"
     assert completed.step.id == first.step.id
     assert completed.step.outcome.kind == "completed"
+    assert first.position == completed.position == 1
     assert StepEvent.model_validate_json(first.model_dump_json()) == first
     before = list(events)
     assert (
@@ -76,6 +79,20 @@ async def test_persistent_events_include_execution_identity(
     await runner.run("composed:streamed")
     assert events
     assert all(event.execution_id == runner.last_execution_id for event in events)
+    assert runner.last_execution_id is not None
+    database = SQLiteHistory(
+        workspace / "data/executions" / runner.last_execution_id / "history.sqlite3"
+    )
+    page = await database.query(
+        history_query.HistoryQuery(execution_id=runner.last_execution_id)
+    )
+    positions = {item.step.id: item.position for item in page.items}
+    assert all(event.position == positions[event.step.id] for event in events)
+    assert any(event.kind == "step.updated" for event in events)
+    for item in page.items:
+        assert await database.get_step_position(item.step.id) == item.position
+    with pytest.raises(KeyError):
+        await database.get_step_position("missing")
 
 
 async def test_sink_failures_are_observational(

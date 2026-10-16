@@ -17,6 +17,7 @@ from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.control.updates import SnapshotPublisher
 from vectorops.runner.runner import events, inspection, mailbox
+from vectorops.runner.runner import execution_state
 from vectorops.runner.runner.llm import RunnerLLM
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 
@@ -217,7 +218,12 @@ async def test_publisher_coalesces_deduplicates_and_drains() -> None:
     async def state(identifier: str, workflow_id: str) -> models.Workflow:
         return workflow
 
-    publisher = SnapshotPublisher(summary, state, pushed.append)
+    record = execution_state.ExecutionRecord(id="execution", root_workflow_id="root")
+
+    async def execution(identifier: str) -> execution_state.ExecutionRecord:
+        return record
+
+    publisher = SnapshotPublisher(summary, state, pushed.append, execution=execution)
     publisher.changed("execution", ("root",))
     await entered.wait()
     current = current.model_copy(update={"status": "completed"})
@@ -229,6 +235,7 @@ async def test_publisher_coalesces_deduplicates_and_drains() -> None:
     assert [event["kind"] for event in pushed] == [
         "workflow.updated",
         "execution.updated",
+        "execution.state_updated",
         "execution.updated",
     ]
     assert (
@@ -259,3 +266,67 @@ async def test_terminal_push_reflects_released_ownership(workspace: Path) -> Non
         assert packet.summary == await connection.execution_summary(
             accepted.execution_id
         )
+
+
+async def test_committed_heads_status_and_checkpoints_push_records(
+    tmp_path: Path,
+) -> None:
+    await store(tmp_path / "data/executions/execution/history.sqlite3")
+    with patch.object(RunnerService, "_schedule"):
+        service = await RunnerService(tmp_path).__aenter__()
+    try:
+        captured: asyncio.Queue[dict[str, pydantic.JsonValue]] = asyncio.Queue()
+        service.listen(captured.put_nowait)
+        database = await service.runner._database(
+            await service.runner.project(), "execution"
+        )
+
+        async def state() -> execution_state.ExecutionRecord:
+            async with asyncio.timeout(5):
+                while True:
+                    event = await captured.get()
+                    if event.get("kind") == "execution.state_updated":
+                        return events.ExecutionStateUpdated.model_validate(
+                            event
+                        ).execution
+
+        initial = await database.get_execution()
+        await database.save_execution(initial)
+        assert await state() == await database.get_execution()
+        summary = await service.runner.execution_summary("execution")
+        await database.append_step(
+            models.WorkflowStep(
+                id="next",
+                workflow_id="workflow",
+                previous_step_id="request",
+                operation=models.StepOperation(kind="activity", name="work"),
+                outcome=models.StepCompleted(result="done"),
+            )
+        )
+        advanced = await state()
+        assert advanced == await database.get_execution()
+        assert advanced.checkpoint.heads == {"workflow": "next"}
+        assert summary == await service.runner.execution_summary("execution")
+        await database.save_execution(initial, replace_heads=True)
+        assert (await state()).checkpoint.heads == {"workflow": "request"}
+        await database.register_input("request", mailbox.InputSpec(channel="approval"))
+        assert await database.set_paused({"request"})
+        paused = await state()
+        if paused.status != "paused":
+            paused = await state()
+        assert paused.status == "paused"
+        assert paused == await database.get_execution()
+        assert await database.wake_execution()
+        assert (await state()).status == "running"
+        current = await database.get_execution()
+        checkpoint = current.checkpoint.model_copy(update={"updated_at": "checkpoint"})
+        await database.save_execution(
+            current.model_copy(update={"checkpoint": checkpoint})
+        )
+        assert (await state()).checkpoint == checkpoint
+        await database.stop_execution()
+        assert (await state()).status == "cancelled"
+        await asyncio.sleep(0)
+        assert captured.empty()
+    finally:
+        await service.aclose()

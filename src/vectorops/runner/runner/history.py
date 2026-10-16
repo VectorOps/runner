@@ -22,6 +22,10 @@ class WorkflowHistory(Protocol):
 
     async def get_step(self, step_id: str) -> models.WorkflowStep: ...
 
+    async def get_step_position(self, step_id: str) -> int:
+        """Return the stable insertion position shared by snapshots of this step."""
+        ...
+
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         """Atomically append delivery metadata to the current branch head."""
         ...

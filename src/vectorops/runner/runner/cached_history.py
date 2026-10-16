@@ -39,6 +39,7 @@ class CachedHistory:
         self.cache_workflows = cache_workflows
         self._workflows: OrderedDict[str, models.Workflow] = OrderedDict()
         self._steps: OrderedDict[str, models.WorkflowStep] = OrderedDict()
+        self._positions: OrderedDict[str, int] = OrderedDict()
         self._pending: dict[str, models.WorkflowStep] = {}
         self._lock = asyncio.Lock()
         self._worker: typing.Optional[asyncio.Task[None]] = None
@@ -96,6 +97,18 @@ class CachedHistory:
         async with self._lock:
             self._check()
             return (await self._get_step(step_id)).model_copy(deep=True)
+
+    async def get_step_position(self, step_id: str) -> int:
+        async with self._lock:
+            self._check()
+            position = self._positions.get(step_id)
+            if position is None:
+                position = await self.backend.get_step_position(step_id)
+                self._positions[step_id] = position
+            self._positions.move_to_end(step_id)
+            if len(self._positions) > self.cache_size:
+                self._positions.popitem(last=False)
+            return position
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         async with self._lock:
@@ -210,6 +223,7 @@ class CachedHistory:
                     error = exc
             self._workflows.clear()
             self._steps.clear()
+            self._positions.clear()
         if worker is not None:
             await asyncio.gather(worker, return_exceptions=True)
         if error is not None:

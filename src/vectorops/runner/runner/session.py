@@ -388,7 +388,7 @@ class ExecutionSession:
             assert self.head is not None
             async with self._history_lock:
                 updated = await self.history.record_delivery(self.head, step.id)
-                self._emit(updated)
+                await self._emit(updated)
                 if self.reporter is not None:
                     self.reporter.record(self.workflow.id, self.head)
         invocation.deliver(response)
@@ -542,7 +542,7 @@ class ExecutionSession:
         await self.history.append_step(step)
         self.head = step.id
         self.durable_head = step.id
-        self._emit(step, created=True)
+        await self._emit(step, created=True)
         if self.reporter is not None:
             self.reporter.record(self.workflow.id, step.id)
         return step
@@ -594,7 +594,7 @@ class ExecutionSession:
                 }
             )
             await self.history.update_step(step)
-            self._emit(step)
+            await self._emit(step)
         if self.reporter is not None and self.durable_head is not None:
             self.reporter.record(self.workflow.id, self.durable_head)
 
@@ -621,7 +621,7 @@ class ExecutionSession:
             scheduler=self.scheduler,
         )
 
-    def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:
+    async def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:
         kind: typing.Literal[
             "step.created", "step.updated", "step.completed", "step.failed"
         ]
@@ -657,6 +657,7 @@ class ExecutionSession:
                     kind=kind,
                     execution_id=self.execution_id,
                     step=step.model_copy(deep=True),
+                    position=await self.history.get_step_position(step.id),
                 )
             )
         except Exception as exc:

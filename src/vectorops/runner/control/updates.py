@@ -8,7 +8,7 @@ from typing import Union
 import pydantic
 
 from vectorops.runner import diagnostics, models
-from vectorops.runner.runner import events, inspection
+from vectorops.runner.runner import events, execution_state, inspection
 
 
 class SnapshotPublisher:
@@ -19,13 +19,16 @@ class SnapshotPublisher:
         summary: Callable[[str], Awaitable[inspection.ExecutionSummary]],
         workflow: Callable[[str, str], Awaitable[models.Workflow]],
         emit: Callable[[dict[str, pydantic.JsonValue]], None],
+        *,
+        execution: Callable[[str], Awaitable[execution_state.ExecutionRecord]],
     ) -> None:
         self._summary = summary
         self._workflow = workflow
+        self._execution = execution
         self._emit = emit
         self._pending: dict[str, set[str]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._snapshots: OrderedDict[tuple[str, str], pydantic.BaseModel] = (
+        self._snapshots: OrderedDict[tuple[str, str, str], pydantic.BaseModel] = (
             OrderedDict()
         )
         self._closed = False
@@ -39,9 +42,13 @@ class SnapshotPublisher:
 
     def _send(
         self,
-        key: tuple[str, str],
+        key: tuple[str, str, str],
         snapshot: pydantic.BaseModel,
-        event: Union[events.WorkflowUpdated, events.ExecutionUpdated],
+        event: Union[
+            events.WorkflowUpdated,
+            events.ExecutionUpdated,
+            events.ExecutionStateUpdated,
+        ],
     ) -> None:
         if self._snapshots.get(key) == snapshot:
             return
@@ -58,7 +65,7 @@ class SnapshotPublisher:
                 for identifier in sorted(identifiers):
                     workflow = await self._workflow(execution_id, identifier)
                     self._send(
-                        (execution_id, identifier),
+                        (execution_id, "workflow.updated", identifier),
                         workflow,
                         events.WorkflowUpdated(
                             execution_id=execution_id, workflow=workflow
@@ -69,9 +76,20 @@ class SnapshotPublisher:
                 except (FileNotFoundError, KeyError):
                     continue
                 self._send(
-                    (execution_id, ""),
+                    (execution_id, "execution.updated", ""),
                     summary,
                     events.ExecutionUpdated(execution_id=execution_id, summary=summary),
+                )
+                try:
+                    execution = await self._execution(execution_id)
+                except (FileNotFoundError, KeyError):
+                    continue
+                self._send(
+                    (execution_id, "execution.state_updated", ""),
+                    execution,
+                    events.ExecutionStateUpdated(
+                        execution_id=execution_id, execution=execution
+                    ),
                 )
         except Exception as exc:
             diagnostics.log(

@@ -10,6 +10,7 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
 from vectorops.runner.runner import context
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.events import StepEvent
 from vectorops.runner.runner.session import ExecutionSession
 
 
@@ -21,8 +22,14 @@ async def test_activity_and_workflow_timestamps(
     workflow = models.Workflow(
         id="w", definition_ref="file:workflow", created_at=created_at
     )
+    events: list[StepEvent] = []
     session = ExecutionSession(
-        history, workflow, unused_child, continue_from_step_id=None, child_heads={}
+        history,
+        workflow,
+        unused_child,
+        continue_from_step_id=None,
+        child_heads={},
+        event_sink=events.append,
     )
     reserved: list[models.WorkflowStep] = []
 
@@ -63,6 +70,10 @@ async def test_activity_and_workflow_timestamps(
         completion.completed_at
     ).utcoffset() == timezone.utc.utcoffset(None)
     assert completion.outcome.kind == ("failed" if failed else "completed")
+    assert events[-1].kind == ("step.failed" if failed else "step.completed")
+    assert events[-1].position == await history.get_step_position(completion.id)
+    for event in events:
+        assert event.position == await history.get_step_position(event.step.id)
     before = dict(history.steps)
     session = ExecutionSession(
         history,
@@ -171,6 +182,9 @@ class GeneratedHistory:
 
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         raise AssertionError("replay must use the stream")
+
+    async def get_step_position(self, step_id: str) -> int:
+        raise AssertionError("replay must not query positions without a listener")
 
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         raise AssertionError("replay must not record delivery")

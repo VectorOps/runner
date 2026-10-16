@@ -37,6 +37,11 @@ class MemoryHistory:
     async def get_step(self, step_id: str) -> models.WorkflowStep:
         return self.steps[step_id]
 
+    async def get_step_position(self, step_id: str) -> int:
+        if step_id not in self.steps:
+            raise KeyError(step_id)
+        return list(self.steps).index(step_id) + 1
+
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         if self.fail_update:
             raise OSError("delivery storage failed")

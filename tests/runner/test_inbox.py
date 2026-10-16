@@ -33,7 +33,15 @@ def test_queue_management_and_snapshots() -> None:
     assert queue.drain() == (third,)
     assert queue.pop() is None
     assert queue.drain() == ()
-    assert all("payload" not in event for event in events)
+    enqueued = [event for event in events if event["kind"] == "mailbox.enqueued"]
+    assert [inbox.Message.model_validate(event["message"]) for event in enqueued] == [
+        first,
+        second,
+        third,
+    ]
+    assert all(
+        "message" not in event for event in events if event["kind"] == "mailbox.removed"
+    )
     assert events[-1]["reason"] == "llm_drain"
     assert events[-1]["queued_messages"] == 0
 
@@ -53,6 +61,43 @@ async def test_blocking_receive_and_close() -> None:
     assert queue.inspect().status == "closed"
     with pytest.raises(inbox.InboxConflict, match="closed"):
         queue.send(payload("late"))
+
+
+def test_state_events_and_payloads_are_isolated() -> None:
+    events: list[dict[str, pydantic.JsonValue]] = []
+    owner = inbox.Registry("execution", "root", events.append)
+    queue = owner.register("chat")
+    assert events == [
+        {
+            "kind": "mailbox.state_updated",
+            "execution_id": "execution",
+            **queue.inspect().model_dump(mode="json"),
+        }
+    ]
+    assert owner.register("chat") is queue
+    assert len(events) == 1
+    original = payload("hello")
+    message = queue.send(original)
+    original.content.clear()
+    event = events[-1]
+    assert inbox.Message.model_validate(event["message"]) == message
+    serialized = event["message"]
+    assert isinstance(serialized, dict)
+    serialized["payload"] = {"content": []}
+    assert queue.messages(
+        inbox.MessageQuery(**queue.address.model_dump())
+    ).messages == (message,)
+    owner.close()
+    assert events[-1] == {
+        "kind": "mailbox.state_updated",
+        "execution_id": "execution",
+        **queue.inspect().model_dump(mode="json"),
+    }
+    assert events[-1]["status"] == "closed"
+    count = len(events)
+    owner.close()
+    queue.close()
+    assert len(events) == count
 
 
 def test_targeting_and_registration() -> None:

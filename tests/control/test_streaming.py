@@ -16,6 +16,7 @@ async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> Non
             p.Start(reference="stream:main", idempotency_key="stream")
         )
         steps: dict[str, list[models.WorkflowStep]] = {}
+        positions: dict[str, list[int]] = {}
         async with asyncio.timeout(5):
             while True:
                 event = (await connection.next_event()).event
@@ -25,12 +26,16 @@ async def test_stream_revisions_match_persisted_snapshots(tmp_path: Path) -> Non
                 if "step" in event:
                     step = models.WorkflowStep.model_validate(event["step"])
                     steps.setdefault(step.id, []).append(step)
+                    position = event["position"]
+                    assert isinstance(position, int)
+                    positions.setdefault(step.id, []).append(position)
         page = await connection.history(
             h.HistoryQuery(execution_id=accepted.execution_id)
         )
         assert page.items
         for item in page.items:
             assert item.step == steps[item.step.id][-1]
+            assert set(positions[item.step.id]) == {item.position}
             revisions = [step.revision for step in steps[item.step.id]]
             assert revisions == list(range(1, len(revisions) + 1))
         assert any(len(updates) >= 4 for updates in steps.values())

@@ -5,6 +5,7 @@ import pytest
 
 from vectorops.runner.control import client, protocol as p
 from vectorops.runner.runner import branching, mailbox, history_query
+from vectorops.runner.runner import events
 
 
 async def pending(
@@ -73,6 +74,7 @@ async def test_structured_branch_validation_and_receipt(workspace: Path) -> None
 
 async def test_insert_at_second_input_preserves_prefix(workspace: Path) -> None:
     async with client.embedded(workspace) as connection:
+        await connection.subscribe(p.Subscribe(kinds=["execution.state_updated"]))
         accepted = await connection.start(
             p.Start(
                 reference="branch_inputs:two_inputs",
@@ -105,9 +107,14 @@ async def test_insert_at_second_input_preserves_prefix(workspace: Path) -> None:
             )
         )
         async with asyncio.timeout(5):
-            while (await connection.execution(identifier)).status != "completed":
-                await asyncio.sleep(0.01)
-        record = await connection.execution(identifier)
+            while True:
+                pushed = events.ExecutionStateUpdated.model_validate(
+                    (await connection.next_event()).event
+                )
+                if pushed.execution.status == "completed":
+                    break
+        record = pushed.execution
+        assert record == await connection.execution(identifier)
         selected = await connection.history(
             history_query.HistoryQuery(
                 execution_id=identifier,
