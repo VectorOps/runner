@@ -26,6 +26,7 @@ from vectorops.runner.runner.session import ExecutionSession
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.resources import CleanupRegistry
 from vectorops.runner.runner.resolver import WorkflowCallable, WorkflowEntryPoint
+from vectorops.runner.runner.scheduler import Scheduler
 
 
 class WorkflowExecutor:
@@ -41,6 +42,7 @@ class WorkflowExecutor:
         environment: typing.Optional[TargetEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
+        scheduler: typing.Optional[Scheduler] = None,
     ) -> None:
         self.project = project
         self.history = history
@@ -52,6 +54,7 @@ class WorkflowExecutor:
         self.environment = environment
         self.resources = resources
         self.mcp = mcp
+        self.scheduler = scheduler if scheduler is not None else Scheduler()
         self._configured: dict[str, WorkflowEntryPoint] = {}
 
     async def configure(self, configuration: models.Workflow) -> models.Workflow:
@@ -104,6 +107,7 @@ class WorkflowExecutor:
             environment=self.environment,
             resources=self.resources,
             mcp=self.mcp,
+            scheduler=self.scheduler,
         )
         inboxes = self.mailbox.inboxes if self.mailbox is not None else None
         context = WorkflowExecutionContext(

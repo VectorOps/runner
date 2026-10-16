@@ -43,6 +43,7 @@ from vectorops.runner.runner.llm import RunnerLLM
 from vectorops.runner.runner.naming import WorkflowNaming
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.resources import ExecutionResources, finish_cleanup
+from vectorops.runner.runner.scheduler import Scheduler
 
 
 class WorkflowRunner:
@@ -80,6 +81,7 @@ class WorkflowRunner:
         self._naming: typing.Optional[WorkflowNaming] = None
         self._usage_ready = False
         self._usage_lock = asyncio.Lock()
+        self._scheduler = Scheduler()
 
     async def project(self) -> RunnerProject:
         async with self._project_lock:
@@ -621,6 +623,7 @@ class WorkflowRunner:
                 environment=environment,
                 resources=resources,
                 mcp=mcp,
+                scheduler=self._scheduler,
             )
             if continue_from_step_id is None and execution_id is None:
                 configuration = await executor.configure(configuration)

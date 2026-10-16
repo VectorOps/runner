@@ -31,6 +31,7 @@ from vectorops.runner.runner.execution_state import timestamp
 from vectorops.runner.runner.history import WorkflowHistory
 from vectorops.runner.runner.events import StepEvent, StepEventSink
 from vectorops.runner.runner.resources import CleanupRegistry, finish_cleanup
+from vectorops.runner.runner.scheduler import Scheduler
 
 
 class ChildExecutor(typing.Protocol):
@@ -82,6 +83,7 @@ class ExecutionSession:
         environment: typing.Optional[TargetEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
+        scheduler: typing.Optional[Scheduler] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -117,6 +119,7 @@ class ExecutionSession:
         self.environment = environment
         self.resources = resources
         self.mcp = mcp
+        self.scheduler = scheduler if scheduler is not None else Scheduler()
         self.handlers = handlers.HandlerRegistry()
         self.handlers.register(context.ActivityRequest, handlers.ActivityHandler(self))
         self.handlers.register(
@@ -614,6 +617,8 @@ class ExecutionSession:
             self.mcp,
             authorized=step.authorized is True,
             persist_authorization=authorize,
+            created_at=step.created_at,
+            scheduler=self.scheduler,
         )
 
     def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

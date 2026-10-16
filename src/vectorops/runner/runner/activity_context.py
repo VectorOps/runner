@@ -10,6 +10,7 @@ from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.resources import CleanupRegistry
 from vectorops.runner.runner.errors import AuthorizationPersistenceError
+from vectorops.runner.runner.scheduler import Scheduler
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class ActivityExecutionContext:
     persist_authorization: Optional[Callable[[], Awaitable[None]]] = field(
         default=None, compare=False, repr=False
     )
+    created_at: Optional[str] = None
+    scheduler: Scheduler = field(default_factory=Scheduler, compare=False, repr=False)
 
     async def record_authorization(self) -> None:
         if self.persist_authorization is None:
