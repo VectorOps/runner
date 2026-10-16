@@ -44,7 +44,7 @@ def _enum_values(
 
 def suggest(query: configuration.SuggestQuery) -> configuration.Suggestions:
     """Offer known values without validating or restricting configuration writes."""
-    path = query.path
+    path = configuration.name_path(configuration.canonical_name(query.name))
     model: typing.Optional[type[pydantic.BaseModel]] = None
     field: list[str] = []
     if path[:2] == ["components", "llm"]:

@@ -63,9 +63,13 @@ The function submits one recorded activity through that context; it does not
 look up ambient workflow context. `get_config` is the canonical workflow getter;
 there is no ambient-context `configuration.get` adapter.
 
-Paths are relative to `[components]`: `llm.reasoning.effort` selects
-`[components.llm.reasoning]`'s `effort` value. Paths must have nonempty segments;
-literal dots in keys and list indexing are not supported. A missing file, missing
+All configuration APIs use dotted string names. The canonical name
+`components.llm.reasoning.effort` selects `[components.llm.reasoning]`'s `effort`
+value; `llm.reasoning.effort` remains accepted as component-relative shorthand.
+The configuration owner normalizes shorthand identically for workflow reads,
+internal access, and control RPCs. Names must have nonempty segments. Within a
+segment, `~1` represents a literal dot and `~0` a literal tilde; lists are accessed
+as whole values rather than indexed. A missing file, missing
 key, or non-mapping intermediate value returns the supplied default (None when
 omitted). False, zero, empty lists, and empty mappings remain actual values.
 Without `model=`, the getter returns the selected value as-is; it does not merge
@@ -121,7 +125,8 @@ current = config.inspect("llm.model")
 await config.reset("llm.model")
 ```
 
-Names are relative to `[components]`. These APIs cannot reconfigure runner-level
+Names use the same canonical dotted paths or component shorthand as reads.
+These APIs cannot reconfigure runner-level
 directories, logging, retention, or environment settings. Values must be finite
 JSON-compatible data; component owners still validate their own schemas on read.
 
@@ -152,24 +157,26 @@ The authenticated control protocol exposes the same operations over embedded and
 TCP connections:
 
 ```python
-path = ["components", "llm", "model"]
-await client.set_configuration(path, "gpt-4.1", permanent=True)
-current = await client.get_configuration(path)
+name = "components.llm.model"
+await client.set_configuration(name, "gpt-4.1", permanent=True)
+current = await client.get_configuration(name)
 snapshot = await client.get_configuration()
-suggestions = await client.suggest_configuration(path, prefix="gpt")
-await client.reset_configuration(path)
+suggestions = await client.suggest_configuration(name, prefix="gpt")
+await client.reset_configuration(name)
 ```
 
 | RPC method | Parameters | Result |
 | --- | --- | --- |
-| `configuration.get` | Optional `path` (array of strings, default `[]`) | `path`, `exists`, `value` |
-| `configuration.set` | `path`, required `value`, optional `permanent` (false) | Null acknowledgment |
-| `configuration.reset` | `path` | Null acknowledgment |
-| `configuration.suggest` | `path`, optional `prefix` (empty string) | Advisory `values` array |
+| `configuration.get` | Optional dotted string `name` (default `""`) | Canonical `name`, `exists`, `value` |
+| `configuration.set` | String `name`, required `value`, optional `permanent` (false) | Null acknowledgment |
+| `configuration.reset` | String `name` | Null acknowledgment |
+| `configuration.suggest` | String `name`, optional `prefix` (empty string) | Advisory `values` array |
 
-RPC paths start at the TOML document root, unlike internal dotted component names.
-Each segment is a literal mapping key, so dots in keys are supported. Lists are
-read and replaced as whole values, not indexed. Omit `path` or pass `[]` to read
+RPC targeting is identical to internal and workflow targeting: canonical names
+start at the TOML document root, such as `components.llm.model`. Existing
+`name: "tools.approval.whitelist"` requests select
+`components.tools.approval.whitelist`; path arrays are not accepted. Omit `name`
+or pass `""` to read
 the complete effective snapshot, including read-only startup settings and their
 runner defaults. `exists` distinguishes a missing key from an explicit null.
 Consumer-specific defaults and resolved LLM profiles are not materialized.
@@ -746,6 +753,10 @@ input replay mismatch. Explicit LLM overrides remain part of the generation
 request digest, so changing code-level overrides can also mismatch old requests.
 Workspace edits do not change those inputs. Keep workflow code and activity order
 stable across replay.
+
+Recorded configuration activities retain the caller's original string name.
+Existing component-relative reads therefore replay unchanged. Use canonical names
+for new code, but do not rewrite names in workflows being resumed from history.
 
 LLM histories created before recorded configuration reads were introduced lack
 these new activities. Start new executions when adopting this version for those

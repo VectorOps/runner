@@ -117,7 +117,7 @@ async def test_api_updates_fresh_reads_without_reinitializing(workspace: Path) -
         first = await service.runner.run("configuration:main")
         await service.dispatch(
             "configuration.set",
-            {"path": ["components", "llm", "model"], "value": "second"},
+            {"name": "components.llm.model", "value": "second"},
         )
         assert await service.runner.project() is project
         assert project.configuration.get("llm.model") == "second"

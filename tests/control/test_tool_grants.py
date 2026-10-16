@@ -109,3 +109,43 @@ async def test_workflow_grant_does_not_answer_existing_parallel_request(
         assert (await pending(host, run.execution_id))[0] == second
         await host.answer_input(answer(second, approved=False))
         await completed(host, run.execution_id)
+
+
+async def test_desktop_workspace_approval_configuration_requests(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/flow.py").write_text(WORKFLOW)
+    async with client.embedded(tmp_path) as host:
+        run = await host.start(p.Start(reference="flow:child", idempotency_key="start"))
+        request = (await pending(host, run.execution_id))[0]
+        selected = await host.request(
+            "configuration.get", {"name": "tools.approval.whitelist"}
+        )
+        assert isinstance(selected, dict) and not selected["exists"]
+        assert isinstance(request.payload, dict)
+        call = request.payload["call"]
+        assert isinstance(call, dict) and isinstance(call["name"], str)
+        await host.request(
+            "configuration.set",
+            {
+                "name": "tools.approval.whitelist",
+                "value": [call["name"]],
+                "permanent": True,
+            },
+        )
+        await host.answer_input(answer(request))
+        await completed(host, run.execution_id)
+        assert (
+            await host.get_configuration("components.tools.approval.whitelist")
+        ).value == [call["name"]]
+    async with client.embedded(tmp_path) as host:
+        fresh = await host.start(
+            p.Start(reference="flow:child", idempotency_key="fresh")
+        )
+        await completed(host, fresh.execution_id)
+        assert not (
+            await host.pending_inputs(
+                mailbox.RequestQuery(execution_id=fresh.execution_id)
+            )
+        ).requests

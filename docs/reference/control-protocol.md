@@ -100,10 +100,10 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `events.unsubscribe` | `subscription_id` | Null |
 | `logs.list` | None | Retained log filenames/sizes and dropped/write-error counters |
 | `logs.download` | `file`, `offset`, `limit`, optional `end` | Base64 bytes, `next_offset`, `end`, `eof` |
-| `configuration.get` | Optional string-array `path`, default `[]` | `path`, `exists`, effective JSON `value` |
-| `configuration.set` | String-array `path`, required JSON `value`, strict boolean `permanent` (default false) | Null acknowledgment after application |
-| `configuration.reset` | String-array `path` | Null acknowledgment after removing overlapping overrides |
-| `configuration.suggest` | String-array `path`, optional string `prefix` (default empty) | Advisory `values` array |
+| `configuration.get` | Optional dotted string `name`, default `""` | Canonical `name`, `exists`, effective JSON `value` |
+| `configuration.set` | String `name`, required JSON `value`, strict boolean `permanent` (default false) | Null acknowledgment after application |
+| `configuration.reset` | String `name` | Null acknowledgment after removing overlapping overrides |
+| `configuration.suggest` | String `name`, optional string `prefix` (default empty) | Advisory `values` array |
 
 There is no static workflow catalog. `reference` is an explicit `path:callable` relative to the configured workflows directory, without `.py`, or `python:package.module:callable` for an importable library workflow. Paths must remain inside the workflows directory after symlink resolution. The callable must be an async workflow entry point. Resolution failures reject the request before acceptance; execution failures are reported through lifecycle events. The former `file` and `callable` fields are rejected. Discovery imports trusted Python code and is not a sandbox.
 
@@ -141,14 +141,20 @@ Stop is cooperative and addresses the specific active execution. It returns befo
 
 ### Configuration reads and overrides
 
-Paths contain literal mapping keys rooted at `config.toml`; dots inside a segment
-are not separators. Omitted or empty paths select the entire snapshot, including
+Names are canonical dotted strings rooted at `config.toml`, such as
+`components.llm.model`. Component-relative shorthand, such as `llm.model` or
+`tools.approval.whitelist`, is normalized by the configuration owner in exactly
+the same way as internal and workflow reads. Startup root names (`data_directory`,
+`workflows_directory`, `environment`, `logging`, `retention`) remain root-relative.
+Path arrays are not accepted. Segments must be nonempty; `~1` encodes a literal
+dot and `~0` a literal tilde within a segment.
+Omitted or empty names select the entire snapshot, including
 startup defaults. Missing paths return `exists: false, value: null`; an explicit
 null returns `exists: true`. Snapshots contain raw effective values, not resolved
 consumer settings or built-in LLM profiles. Arrays are whole values, not indexed.
 
 ```json
-{"kind":"request","id":"config-1","method":"configuration.set","params":{"path":["components","llm","model"],"value":"o3","permanent":true}}
+{"kind":"request","id":"config-1","method":"configuration.set","params":{"name":"components.llm.model","value":"o3","permanent":true}}
 ```
 
 Only `components` and descendants are editable. Root writes/resets and startup

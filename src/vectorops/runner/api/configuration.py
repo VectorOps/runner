@@ -24,7 +24,8 @@ async def get_config(
 ) -> pydantic.JsonValue:
     """Record a dotted-path lookup, preserving old values during activity replay.
 
-    Paths are relative to the workspace's components table. Only the selected
+    Names are canonical dotted paths; component-relative shorthand is accepted.
+    Only the selected
     value is recorded. An optional owner model validates and normalizes inside
     the activity before persistence. Missing values use the supplied default;
     pass {} to apply model defaults. Never use this API for secrets.

@@ -483,17 +483,18 @@ class RunnerService:
                 configuration = (await self.runner.project()).configuration
                 try:
                     if method == "configuration.set":
-                        await configuration.set_path(
-                            config_api.PathUpdate.model_validate(params)
+                        update = config_api.Update.model_validate(params)
+                        await configuration.set(
+                            update.name, update.value, permanent=update.permanent
                         )
                         return None
                     if method == "configuration.suggest":
                         return configuration_suggestions.suggest(
                             config_api.SuggestQuery.model_validate(params)
                         ).model_dump(mode="json")
-                    config_query = config_api.PathQuery.model_validate(params)
+                    config_query = config_api.Query.model_validate(params)
                     if method == "configuration.reset":
-                        await configuration.reset_path(config_query)
+                        await configuration.reset(config_query.name)
                         return None
                     return configuration.snapshot(config_query).model_dump(mode="json")
                 except ValueError:

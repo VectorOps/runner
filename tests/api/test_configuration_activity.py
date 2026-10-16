@@ -13,6 +13,26 @@ from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.project import RunnerProject
 
 
+@pytest.mark.parametrize("name", ["worker.count", "components.worker.count"])
+async def test_canonical_workflow_names_and_replay(
+    tmp_path: Path, history: MemoryHistory, name: str
+) -> None:
+    (tmp_path / "config.toml").write_text("[components.worker]\ncount = 1\n")
+    project = await RunnerProject.open(tmp_path)
+
+    async def workflow() -> pydantic.JsonValue:
+        return await get_config(composition.workflow_context(), name)
+
+    first = await replay.run(history, workflow, project=project)
+    assert first.outcome.kind == "completed" and first.outcome.result == 1
+    await project.configuration.set("components.worker.count", 2)
+    assert (
+        await replay.run(history, workflow, first.id, project=project)
+    ).outcome == first.outcome
+    fresh = await replay.run(history, workflow, project=project)
+    assert fresh.outcome.kind == "completed" and fresh.outcome.result == 2
+
+
 async def test_paths_defaults_and_runtime_override(
     tmp_path: Path, history: MemoryHistory
 ) -> None:

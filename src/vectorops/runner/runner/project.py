@@ -79,10 +79,11 @@ _JSON: typing.Final[pydantic.TypeAdapter[pydantic.JsonValue]] = pydantic.TypeAda
 
 
 def validate_name(name: str) -> None:
-    if not name or any(not part.strip() for part in name.split(".")):
+    if not name:
         raise ValueError(
             "configuration name must contain nonempty dotted path segments"
         )
+    overrides.Query(name=name)
 
 
 def json_value(value: pydantic.JsonValue) -> pydantic.JsonValue:
@@ -134,7 +135,7 @@ class Configuration:
 
     def inspect(self, name: str) -> overrides.Value:
         overrides.Query(name=name)
-        selected = overrides.path_name(["components", *name.split(".")])
+        selected = overrides.canonical_name(name)
         exists, value = overrides.lookup(self._values, selected)
         source: typing.Literal["toml", "temporary", "permanent", "mixed", "missing"] = (
             "toml" if exists else "missing"
@@ -152,62 +153,47 @@ class Configuration:
     async def set(
         self, name: str, value: pydantic.JsonValue, *, permanent: bool = False
     ) -> overrides.Value:
-        overrides.Query(name=name)
-        await self.set_path(
-            overrides.PathUpdate(
-                path=["components", *name.split(".")],
-                value=value,
-                permanent=permanent,
-            )
-        )
-        return self.inspect(name)
-
-    def snapshot(self, query: overrides.PathQuery) -> overrides.Snapshot:
-        if not query.path:
-            return overrides.Snapshot(exists=True, value=json_value(self._values))
-        exists, value = overrides.lookup(self._values, overrides.path_name(query.path))
-        return overrides.Snapshot(
-            path=query.path, exists=exists, value=json_value(value)
-        )
-
-    @staticmethod
-    def _editable_path(query: overrides.PathQuery) -> str:
-        if not query.path or query.path[0] != "components":
-            raise PermissionError("startup configuration is read-only")
-        return overrides.path_name(query.path)
-
-    async def set_path(self, update: overrides.PathUpdate) -> None:
-        name = self._editable_path(update)
+        update = overrides.Update(name=name, value=value, permanent=permanent)
+        selected = self._editable_name(name)
         value = json_value(update.value)
         async with self._lock:
             items = {
                 key: item
                 for key, item in self._overrides.items()
-                if not overrides.overlaps(key, name)
+                if not overrides.overlaps(key, selected)
             }
-            items[name] = overrides.Override(
+            items[selected] = overrides.Override(
                 value=value,
                 permanent=update.permanent,
-                baseline=overrides.fingerprint(self._defaults, name),
+                baseline=overrides.fingerprint(self._defaults, selected),
             )
             await self._publish(items)
+            return self.inspect(name)
+
+    def snapshot(self, query: overrides.Query) -> overrides.Snapshot:
+        if not query.name:
+            return overrides.Snapshot(exists=True, value=json_value(self._values))
+        name = overrides.canonical_name(query.name)
+        exists, value = overrides.lookup(self._values, name)
+        return overrides.Snapshot(name=name, exists=exists, value=json_value(value))
+
+    @staticmethod
+    def _editable_name(name: str) -> str:
+        name = overrides.canonical_name(name)
+        if name != "components" and not name.startswith("components."):
+            raise PermissionError("startup configuration is read-only")
+        return name
 
     async def reset(self, name: str) -> overrides.Value:
-        overrides.Query(name=name)
-        await self.reset_path(
-            overrides.PathQuery(path=["components", *name.split(".")])
-        )
-        return self.inspect(name)
-
-    async def reset_path(self, query: overrides.PathQuery) -> None:
-        name = self._editable_path(query)
+        selected = self._editable_name(name)
         async with self._lock:
             items = {
                 key: item
                 for key, item in self._overrides.items()
-                if not overrides.overlaps(key, name)
+                if not overrides.overlaps(key, selected)
             }
             await self._publish(items)
+            return self.inspect(name)
 
     async def _publish(
         self,
@@ -233,14 +219,12 @@ class Configuration:
             raise
 
     def get(self, name: str, default: pydantic.JsonValue = None) -> pydantic.JsonValue:
-        validate_name(name)
+        overrides.Query(name=name)
         fallback = json_value(default)
-        value: pydantic.JsonValue = self._values
-        for part in ["components", *name.split(".")]:
-            if not isinstance(value, dict) or part not in value:
-                return fallback
-            value = value[part]
-        return json_value(value)
+        if not name:
+            return json_value(self._values)
+        exists, value = overrides.lookup(self._values, overrides.canonical_name(name))
+        return json_value(value) if exists else fallback
 
     def get_validated(self, name: str, model: type[Settings]) -> Settings:
         validate_name(name)

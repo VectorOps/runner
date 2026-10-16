@@ -20,56 +20,13 @@ class Model(pydantic.BaseModel):
     )
 
 
-class PathQuery(Model):
-    path: list[str] = pydantic.Field(default_factory=list, max_length=64)
-
-    @pydantic.field_validator("path")
-    @classmethod
-    def valid_path(cls, value: list[str]) -> list[str]:
-        if any(not part or len(part) > 512 for part in value):
-            raise ValueError("path segments must contain 1-512 characters")
-        return value
-
-
-class PathUpdate(PathQuery):
-    value: pydantic.JsonValue
-    permanent: bool = pydantic.Field(default=False, strict=True)
-
-    @pydantic.field_validator("value")
-    @classmethod
-    def finite(cls, value: pydantic.JsonValue) -> pydantic.JsonValue:
-        json.dumps(value, allow_nan=False)
-        return value
-
-
-class Snapshot(PathQuery):
-    exists: bool
-    value: pydantic.JsonValue = None
-
-
-class SuggestQuery(PathQuery):
-    prefix: str = ""
-
-
-class Suggestions(Model):
-    values: list[pydantic.JsonValue] = pydantic.Field(default_factory=list)
-
-
-def path_name(path: list[str]) -> str:
-    return ".".join(part.replace("~", "~0").replace(".", "~1") for part in path)
-
-
-def name_path(name: str) -> list[str]:
-    return [part.replace("~1", ".").replace("~0", "~") for part in name.split(".")]
-
-
 class Query(Model):
-    name: str = pydantic.Field(min_length=1, max_length=65536)
+    name: str = pydantic.Field(default="", max_length=65536)
 
     @pydantic.field_validator("name")
     @classmethod
-    def valid_name(cls, value: str) -> str:
-        if any(not part for part in value.split(".")):
+    def valid_path(cls, value: str) -> str:
+        if value and any(not part.strip() for part in value.split(".")):
             raise ValueError(
                 "configuration name must contain nonempty dotted path segments"
             )
@@ -85,6 +42,41 @@ class Update(Query):
     def finite(cls, value: pydantic.JsonValue) -> pydantic.JsonValue:
         json.dumps(value, allow_nan=False)
         return value
+
+
+class Snapshot(Query):
+    exists: bool
+    value: pydantic.JsonValue = None
+
+
+class SuggestQuery(Query):
+    prefix: str = ""
+
+
+class Suggestions(Model):
+    values: list[pydantic.JsonValue] = pydantic.Field(default_factory=list)
+
+
+def canonical_name(name: str) -> str:
+    """Resolve component shorthand and TOML-rooted names to one dotted path."""
+    if not name:
+        return name
+    Query(name=name)
+    root = name.split(".", 1)[0]
+    if root in {
+        "components",
+        "data_directory",
+        "workflows_directory",
+        "environment",
+        "logging",
+        "retention",
+    }:
+        return name
+    return "components." + name
+
+
+def name_path(name: str) -> list[str]:
+    return [part.replace("~1", ".").replace("~0", "~") for part in name.split(".")]
 
 
 class Value(Query):
@@ -106,6 +98,8 @@ class Manifest(Model):
     @pydantic.model_validator(mode="after")
     def validate_overrides(self) -> typing.Self:
         for name, item in self.overrides.items():
+            if not name:
+                raise ValueError("persisted override name must not be empty")
             Update(name=name, value=item.value, permanent=item.permanent)
             if not item.permanent:
                 raise ValueError("temporary overrides cannot be persisted")
