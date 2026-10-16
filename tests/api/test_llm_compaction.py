@@ -316,7 +316,10 @@ async def test_interrupted_compaction_or_followup_reuses_commits(
     assert result.outcome.kind == "completed"
     assert len(backend.requests) == 5
     assert backend.identities[pause_at - 1] == backend.identities[pause_at]
-    assert backend.requests[pause_at - 1] == backend.requests[pause_at]
+    assert backend.requests[pause_at - 1].session != backend.requests[pause_at].session
+    assert backend.requests[pause_at - 1].model_dump(
+        exclude={"session"}
+    ) == backend.requests[pause_at].model_dump(exclude={"session"})
 
 
 async def test_summary_settings_workspace_and_catalog_replay(
@@ -573,7 +576,10 @@ async def test_overflow_recovery_restart_replays_failure_and_summary(
     result = await replay.run(history, workflow, backend.identities[-1])
     assert result.outcome.kind == "completed", result.outcome
     assert len(backend.requests) == 6
-    assert backend.requests[pause_at - 1] == backend.requests[pause_at]
+    assert backend.requests[pause_at - 1].session != backend.requests[pause_at].session
+    assert backend.requests[pause_at - 1].model_dump(
+        exclude={"session"}
+    ) == backend.requests[pause_at].model_dump(exclude={"session"})
     assert backend.identities[pause_at - 1] == backend.identities[pause_at]
     assert (await replay.run(history, workflow, result.id)).outcome == result.outcome
     assert len(backend.requests) == 6

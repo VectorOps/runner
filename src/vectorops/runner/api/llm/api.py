@@ -7,6 +7,7 @@ import hashlib
 import json
 import typing
 from typing import Optional
+from uuid import uuid4
 
 import connect
 import pydantic
@@ -57,6 +58,7 @@ class LLM:
             raise ValueError("LLM identity must not be blank")
         self._context = context
         self._identity = identity
+        self._session_id = uuid4().hex
         self._profile = profile
         self._overrides = explicit_options(settings, compaction=compaction, **overrides)
         if retry is not None:
@@ -205,7 +207,9 @@ class LLM:
             self._input(request, selected),
             self._backend,
             selected,
-            request,
+            request.model_copy(
+                update={"session": connect.SessionHints(session_id=self._session_id)}
+            ),
             self._retry,
             finalize,
         )

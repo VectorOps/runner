@@ -357,7 +357,10 @@ async def test_cancellation_restarts_same_round(history: MemoryHistory) -> None:
     result = await replay.run(history, workflow, head)
     assert result.outcome == models.StepCompleted(result=2)
     assert backend.step_ids == [head, head]
-    assert backend.requests[0] == backend.requests[1]
+    assert backend.requests[0].session != backend.requests[1].session
+    assert backend.requests[0].model_dump(exclude={"session"}) == backend.requests[
+        1
+    ].model_dump(exclude={"session"})
 
 
 async def test_failed_response_does_not_mutate_history(history: MemoryHistory) -> None:
@@ -627,7 +630,10 @@ async def test_interrupt_after_compaction_reuses_summary(
     result = await replay.run(history, workflow, backend.step_ids[-1])
     assert result.outcome == models.StepCompleted(result=3)
     assert len(backend.requests) == 4
-    assert backend.requests[2] == backend.requests[3]
+    assert backend.requests[2].session != backend.requests[3].session
+    assert backend.requests[2].model_dump(exclude={"session"}) == backend.requests[
+        3
+    ].model_dump(exclude={"session"})
 
 
 async def test_cross_workflow_state_reuse_rejected(history: MemoryHistory) -> None:
