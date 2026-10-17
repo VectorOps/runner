@@ -6,7 +6,7 @@ import connect
 import pydantic
 
 from vectorops.runner.api.tool_registry import ToolConfig, register_tool
-from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.patch import PatchService, get_system_instruction
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 
@@ -35,7 +35,7 @@ def apply_patch_tool(
     approval: Optional[tools.ToolApproval] = None,
 ) -> tools.Tool[PatchArguments]:
     instruction = get_system_instruction(format)
-    bound_environment: Optional[TargetEnvironment] = None
+    bound_environment: Optional[LocalEnvironment] = None
 
     async def invoke(
         context: ActivityExecutionContext, arguments: PatchArguments
@@ -43,7 +43,10 @@ def apply_patch_tool(
         nonlocal service, bound_environment
         if service is None:
             bound_environment = environment(context)
-            service = PatchService(bound_environment)
+            service = PatchService(
+                bound_environment.root,
+                max_write_bytes=bound_environment.config.max_write_bytes,
+            )
         elif (
             bound_environment is not None
             and context.environment is not bound_environment

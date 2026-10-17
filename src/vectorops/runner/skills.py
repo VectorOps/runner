@@ -1,14 +1,16 @@
-"""Validated, bounded project skill catalogs from an attached environment."""
+"""Validated, bounded project skill catalogs from local project files."""
 
+import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Final
 
 import pydantic
 import yaml
 
-from vectorops.runner.environment import models
-from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
-from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.environment import paths
+from vectorops.runner.environment.errors import EnvironmentError
 
 SKILL_LIMIT: Final = 32
 SKILL_BYTES: Final = 65536
@@ -75,28 +77,37 @@ class SkillCatalog(pydantic.BaseModel):
         return "\n".join(lines)
 
 
-async def discover_skills(target: TargetEnvironment) -> SkillCatalog:
+async def discover_skills(root: Path) -> SkillCatalog:
     """Inspect direct skill directories, skipping invalid or unreadable files."""
+
+    def listing() -> tuple[list[str], bool]:
+        entries: list[str] = []
+        with os.scandir(paths.resolve_path(root, ".vocode/skills")) as iterator:
+            for index, entry in enumerate(iterator):
+                if index == SKILL_LIMIT:
+                    return entries, True
+                if entry.is_dir(follow_symlinks=False):
+                    entries.append(f".vocode/skills/{entry.name}/SKILL.md")
+        return entries, False
+
+    def read(path: str) -> bytes:
+        with paths.open_regular(paths.resolve_path(root, path)) as stream:
+            return stream.read(SKILL_BYTES)
+
     try:
-        listing = await target.list_dir(
-            models.ListRequest(path=".vocode/skills", limit=SKILL_LIMIT)
-        )
-    except EnvironmentError as exc:
-        if exc.code != ErrorCode.MISSING:
-            logger.warning("Cannot discover project skills: %s", exc)
+        entries, truncated = await asyncio.to_thread(listing)
+    except FileNotFoundError:
+        return SkillCatalog()
+    except (EnvironmentError, OSError) as exc:
+        logger.warning("Cannot discover project skills: %s", exc)
         return SkillCatalog()
     skills = []
-    for entry in sorted(listing.entries, key=lambda item: item.path):
-        if entry.kind != "directory":
-            continue
-        path = f"{entry.path}/SKILL.md"
+    for path in sorted(entries):
         try:
-            result = await target.read_file(
-                models.ReadRequest(path=path, limit=SKILL_BYTES)
-            )
-            skill = Skill.from_document(path, result.content)
-        except (EnvironmentError, ValueError, yaml.YAMLError) as exc:
+            content = await asyncio.to_thread(read, path)
+            skill = Skill.from_document(path, content)
+        except (EnvironmentError, OSError, ValueError, yaml.YAMLError) as exc:
             logger.warning("Ignoring skill at %s: %s", path, exc)
             continue
         skills.append(skill)
-    return SkillCatalog(skills=skills, truncated=listing.truncated)
+    return SkillCatalog(skills=skills, truncated=truncated)

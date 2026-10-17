@@ -19,7 +19,7 @@ import pydantic
 from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.authentication.service import AuthenticationService
-from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
@@ -80,7 +80,7 @@ class ExecutionSession:
         ] = None,
         mailbox: typing.Optional[Mailbox] = None,
         authentication: typing.Optional[AuthenticationService] = None,
-        environment: typing.Optional[TargetEnvironment] = None,
+        environment: typing.Optional[LocalEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
         scheduler: typing.Optional[Scheduler] = None,

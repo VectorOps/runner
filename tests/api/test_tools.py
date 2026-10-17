@@ -11,8 +11,6 @@ from tests.fixtures.history import MemoryHistory
 from vectorops.runner import input_schema, models, tool_policy
 from vectorops.runner.api import composition, llm
 from vectorops.runner.api.llm.patch import apply_patch_tool
-from vectorops.runner.environment.configuration import LocalEnvironmentConfig
-from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.patch import PatchService
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
@@ -87,10 +85,7 @@ async def approve(
 async def test_patch_tool_approval_and_replay(
     history: MemoryHistory, tmp_path: Path, approved: bool
 ) -> None:
-    environment = await LocalEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path))
-    )
-    binding = apply_patch_tool(PatchService(environment), approval=llm.ToolApproval())
+    binding = apply_patch_tool(PatchService(tmp_path), approval=llm.ToolApproval())
     store = ApprovalStore()
     box = mailbox.Mailbox(store)
 

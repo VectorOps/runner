@@ -29,11 +29,11 @@ async def launch(ctx: ActivityExecutionContext) -> str:
 
     async def cleanup() -> None:
         assert ctx.environment is not None
-        assert await ctx.environment.list_processes()
+        assert await ctx.environment.processes.list_processes()
         probe.events.append("resource.closed")
 
     ctx.resources.register("test resource", cleanup)
-    result = await ctx.environment.exec(
+    result = await ctx.environment.processes.exec(
         processes.ExecRequest(
             command=processes.ArgvCommand(
                 argv=[
@@ -48,7 +48,7 @@ async def launch(ctx: ActivityExecutionContext) -> str:
     )
     data = b""
     while b"\n" not in data:
-        result = await ctx.environment.poll(
+        result = await ctx.environment.processes.poll(
             processes.PollRequest(
                 process_id=result.process_id, cursor=result.cursor, wait_timeout_ms=100
             )
@@ -69,7 +69,9 @@ async def child(ctx: WorkflowExecutionContext) -> str:
 async def verify_shared(ctx: ActivityExecutionContext) -> None:
     assert ctx.environment is probe.contexts[0].environment
     assert ctx.resources is probe.contexts[0].resources
-    assert ctx.environment is not None and await ctx.environment.list_processes()
+    assert (
+        ctx.environment is not None and await ctx.environment.processes.list_processes()
+    )
     assert probe.events == []
 
 

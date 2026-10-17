@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import time
 import typing
 
 from vectorops.runner.runner.resources import finish_cleanup
@@ -19,11 +20,24 @@ class WorkspaceDatabase:
         self._writer: typing.Optional[SQLiteWriter] = None
 
     def _connect(self) -> sqlite3.Connection:
+        """Retry WAL setup contention off the event loop, with a bounded deadline."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=30)
         try:
             connection.execute("PRAGMA busy_timeout = 30000")
-            connection.execute("PRAGMA journal_mode = WAL")
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    connection.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if (
+                        exc.sqlite_errorcode
+                        not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        or time.monotonic() >= deadline
+                    ):
+                        raise
+                    time.sleep(0.01)
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):

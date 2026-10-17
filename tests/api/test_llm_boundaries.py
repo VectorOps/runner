@@ -83,8 +83,8 @@ async def test_patch_binding_rejects_environment_reuse(tmp_path: Path) -> None:
         assert (first_root / "result.txt").read_text() == "first\n"
         assert not (second_root / "result.txt").exists()
     finally:
-        await first.close()
-        await second.close()
+        await first.processes.close()
+        await second.processes.close()
 
 
 def test_compaction_request_and_replacement_contract() -> None:

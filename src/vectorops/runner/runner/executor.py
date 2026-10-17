@@ -13,7 +13,7 @@ from vectorops.runner import models
 from vectorops.runner import diagnostics
 from vectorops.runner.api import composition, definitions
 from vectorops.runner.authentication.service import AuthenticationService
-from vectorops.runner.environment.protocol import TargetEnvironment
+from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
@@ -39,7 +39,7 @@ class WorkflowExecutor:
         event_sink: typing.Optional[StepEventSink] = None,
         mailbox: typing.Optional[Mailbox] = None,
         authentication: typing.Optional[AuthenticationService] = None,
-        environment: typing.Optional[TargetEnvironment] = None,
+        environment: typing.Optional[LocalEnvironment] = None,
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
         scheduler: typing.Optional[Scheduler] = None,

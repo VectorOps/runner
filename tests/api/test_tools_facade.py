@@ -58,7 +58,7 @@ async def test_patch_factory_through_facade(tmp_path: Path) -> None:
     try:
         approval = tools.ToolApproval()
         binding: tools.ToolBinding = tools.apply_patch_tool(
-            PatchService(environment), approval=approval
+            PatchService(environment.root), approval=approval
         )
         assert binding.definition.name == "apply_patch"
         assert binding.approval is approval
@@ -67,4 +67,4 @@ async def test_patch_factory_through_facade(tmp_path: Path) -> None:
             binding.validate({"text": " "})
         assert list(tmp_path.iterdir()) == []
     finally:
-        await environment.close()
+        await environment.processes.close()

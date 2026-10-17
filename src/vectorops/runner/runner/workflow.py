@@ -17,8 +17,8 @@ from vectorops.runner import models, usage
 from vectorops.runner import diagnostics
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
-from vectorops.runner.environment import factory as environments
-from vectorops.runner.environment.lifecycle import close_environment
+from vectorops.runner.environment.local import LocalEnvironment
+from vectorops.runner.environment.lifecycle import close_processes
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.runner.cached_history import CachedHistory
@@ -619,11 +619,9 @@ class WorkflowRunner:
             resources.register("mcp", mcp.close)
             environment = None
             if project.config.environment is not None:
-                environment = await environments.open_environment(
-                    project.config.environment
-                )
+                environment = await LocalEnvironment.open(project.config.environment)
                 resources.register(
-                    "environment", partial(close_environment, environment)
+                    "processes", partial(close_processes, environment.processes)
                 )
             executor = WorkflowExecutor(
                 project,

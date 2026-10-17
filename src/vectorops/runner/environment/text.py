@@ -1,18 +1,14 @@
-"""Bounded UTF-8 line reading shared by filesystem backends."""
+"""Bounded UTF-8 line reading from an open binary file."""
 
 import codecs
-from typing import Protocol
+from typing import BinaryIO
 
 from . import models as m
 from .errors import EnvironmentError, ErrorCode
 
 
-class ByteReader(Protocol):
-    async def read_file(self, request: m.ReadRequest) -> m.ReadResult: ...
-
-
-async def read_lines(
-    reader: ByteReader, request: m.LineReadRequest, *, chunk_size: int = 65536
+def read_lines(
+    reader: BinaryIO, request: m.LineReadRequest, *, chunk_size: int = 65536
 ) -> m.LineReadResult:
     """Count skipped bytes toward the budget and preserve LF/CRLF text exactly."""
     if chunk_size <= 0:
@@ -25,13 +21,10 @@ async def read_lines(
     pending_line = False
     eof = False
     while offset < request.byte_limit:
-        result = await reader.read_file(
-            m.ReadRequest(
-                path=request.path,
-                offset=offset,
-                limit=min(chunk_size, request.byte_limit - offset),
-            )
-        )
+        limit = min(chunk_size, request.byte_limit - offset)
+        content = reader.read(limit + 1)
+        result = m.ReadResult(content=content[:limit], eof=len(content) <= limit)
+        reader.seek(offset + len(result.content))
         offset += len(result.content)
         if not result.content and not result.eof:
             raise EnvironmentError(ErrorCode.IO, "byte reader made no progress")

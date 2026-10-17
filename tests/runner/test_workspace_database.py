@@ -3,6 +3,7 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 import threading
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -144,6 +145,63 @@ async def test_concurrent_first_open(tmp_path: Path) -> None:
         await asyncio.gather(*(database.index_status() for database in databases))
         == [(0, None)] * 8
     )
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED])
+def test_journal_mode_retries_contention(tmp_path: Path, code: int) -> None:
+    error = sqlite3.OperationalError("database is locked")
+    error.sqlite_errorcode = code
+    connection = Mock(spec=sqlite3.Connection)
+    cursor = Mock(spec=sqlite3.Cursor)
+    cursor.fetchone.return_value = (1,)
+    connection.execute.side_effect = [cursor, error, cursor, cursor, cursor]
+    with (
+        patch(
+            "vectorops.runner.runner.workspace_database.sqlite3.connect",
+            return_value=connection,
+        ),
+        patch("vectorops.runner.runner.workspace_database.time.sleep") as sleep,
+    ):
+        assert WorkspaceDatabase(tmp_path)._connect() is connection
+    assert (
+        connection.execute.call_args_list[1:3]
+        == [call("PRAGMA journal_mode = WAL")] * 2
+    )
+    sleep.assert_called_once_with(0.01)
+    connection.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "code, clock",
+    [
+        (sqlite3.SQLITE_BUSY, [0, 31]),
+        (sqlite3.SQLITE_LOCKED, [0, 31]),
+        (sqlite3.SQLITE_IOERR, [0]),
+    ],
+)
+def test_journal_mode_failure_closes_connection(
+    tmp_path: Path, code: int, clock: list[int]
+) -> None:
+    error = sqlite3.OperationalError("journal mode failed")
+    error.sqlite_errorcode = code
+    connection = Mock(spec=sqlite3.Connection)
+    connection.execute.side_effect = [None, error]
+    with (
+        patch(
+            "vectorops.runner.runner.workspace_database.sqlite3.connect",
+            return_value=connection,
+        ),
+        patch(
+            "vectorops.runner.runner.workspace_database.time.monotonic",
+            side_effect=clock,
+        ),
+        patch("vectorops.runner.runner.workspace_database.time.sleep") as sleep,
+        pytest.raises(sqlite3.OperationalError) as failure,
+    ):
+        WorkspaceDatabase(tmp_path)._connect()
+    assert failure.value is error
+    sleep.assert_not_called()
+    connection.close.assert_called_once_with()
 
 
 async def test_old_workspace_files_are_ignored(tmp_path: Path) -> None:

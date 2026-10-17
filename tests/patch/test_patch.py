@@ -3,10 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from vectorops.runner.environment import models as filesystem
-from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
-from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.patch import PatchService
 from vectorops.runner.patch import common, search_replace, v4a
 
@@ -26,15 +23,13 @@ def block(path: str, search: str, replace: str) -> str:
 
 
 @pytest.fixture
-async def environment(tmp_path: Path) -> LocalEnvironment:
-    return await LocalEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path))
-    )
+async def environment(tmp_path: Path) -> Path:
+    return tmp_path
 
 
 @pytest.mark.parametrize("format", ["v4a", "patch"])
 async def test_failed_hunk_leaves_whole_file_unchanged(
-    tmp_path: Path, environment: LocalEnvironment, format: str
+    tmp_path: Path, environment: Path, format: str
 ) -> None:
     (tmp_path / "file").write_text("one\ntwo\n")
     text = (
@@ -59,7 +54,7 @@ async def test_failed_hunk_leaves_whole_file_unchanged(
 
 @pytest.mark.parametrize("format", ["v4a", "patch"])
 async def test_malformed_block_invalidates_file(
-    tmp_path: Path, environment: LocalEnvironment, format: str
+    tmp_path: Path, environment: Path, format: str
 ) -> None:
     (tmp_path / "file").write_text("old\n")
     text = (
@@ -95,7 +90,7 @@ def test_stacked_anchors() -> None:
 
 
 async def test_context_only_sections_in_branching_patch(
-    tmp_path: Path, environment: LocalEnvironment
+    tmp_path: Path, environment: Path
 ) -> None:
     text = envelope("""*** Update File: frontend/tests/branching.test.tsx
 @@
@@ -188,7 +183,7 @@ def test_context_only_section_preserves_whitespace(eof: str) -> None:
     "original", ["old\n", "old\ncontext\n", "context\nold\nmissing\n"]
 )
 async def test_context_only_sections_require_ordered_matches(
-    tmp_path: Path, environment: LocalEnvironment, original: str
+    tmp_path: Path, environment: Path, original: str
 ) -> None:
     path = tmp_path / "file"
     path.write_text(original)
@@ -241,9 +236,7 @@ def test_paths(path: str) -> None:
     assert search_replace.parse(block(path, "", "content"))[1]
 
 
-async def test_reverse_update_add_and_move(
-    tmp_path: Path, environment: LocalEnvironment
-) -> None:
+async def test_reverse_update_add_and_move(tmp_path: Path, environment: Path) -> None:
     service = PatchService(environment)
     add = envelope("*** Add File: old\n+one")
     move = envelope("*** Update File: old\n*** Move to: nested/new\n@@\n-one\n+two")
@@ -260,9 +253,7 @@ async def test_reverse_update_add_and_move(
     assert not (tmp_path / "old").exists()
 
 
-async def test_reverse_delete_is_rejected(
-    environment: LocalEnvironment, tmp_path: Path
-) -> None:
+async def test_reverse_delete_is_rejected(environment: Path, tmp_path: Path) -> None:
     result = await PatchService(environment).apply(
         envelope("*** Delete File: file"), reverse=True
     )
@@ -279,7 +270,7 @@ def test_reverse_search_sequence() -> None:
 
 
 async def test_overwrite_and_duplicate_rejected(
-    environment: LocalEnvironment, tmp_path: Path
+    environment: Path, tmp_path: Path
 ) -> None:
     (tmp_path / "file").write_text("original")
     service = PatchService(environment)
@@ -294,14 +285,14 @@ async def test_overwrite_and_duplicate_rejected(
 
 
 async def test_empty_operations_rejected(
-    environment: LocalEnvironment,
+    environment: Path,
 ) -> None:
     assert (await PatchService(environment).apply(envelope(""))).is_error
 
 
 @pytest.mark.parametrize("body", ["", "\n@@", "\n@@ anchor", "\n@@\n*** End of File"])
 async def test_empty_updates_are_noops(
-    tmp_path: Path, environment: LocalEnvironment, body: str
+    tmp_path: Path, environment: Path, body: str
 ) -> None:
     path = tmp_path / "file"
     path.write_text("anchor\nold\n")
@@ -386,9 +377,7 @@ def test_matching_prefers_exact_then_rstrip_then_strip() -> None:
 @pytest.mark.parametrize("body", ["", "\n@@", "\n@@\n*** End of File"])
 @pytest.mark.parametrize("payload", [b"\x00\xff\xfe\r\n\x80", b"one\r\ntwo\n", b""])
 async def test_binary_move_roundtrip(tmp_path: Path, body: str, payload: bytes) -> None:
-    environment = await LocalEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path), max_read_bytes=2)
-    )
+    environment = tmp_path
     source = tmp_path / "old"
     destination = tmp_path / "nested/new"
     source.write_bytes(payload)
@@ -404,9 +393,7 @@ async def test_binary_move_roundtrip(tmp_path: Path, body: str, payload: bytes) 
     assert source.read_bytes() == payload
 
 
-async def test_binary_move_safety(
-    tmp_path: Path, environment: LocalEnvironment
-) -> None:
+async def test_binary_move_safety(tmp_path: Path, environment: Path) -> None:
     source = tmp_path / "old"
     destination = tmp_path / "new"
     payload = b"\xff\x00\x80"
@@ -428,7 +415,7 @@ async def test_binary_move_safety(
 
 
 async def test_binary_move_conflicting_destinations(
-    tmp_path: Path, environment: LocalEnvironment
+    tmp_path: Path, environment: Path
 ) -> None:
     (tmp_path / "old").write_bytes(b"\xff")
     result = await PatchService(environment).apply(
@@ -440,7 +427,7 @@ async def test_binary_move_conflicting_destinations(
     assert not (tmp_path / "new").exists()
 
 
-async def test_move_conflict(environment: LocalEnvironment, tmp_path: Path) -> None:
+async def test_move_conflict(environment: Path, tmp_path: Path) -> None:
     (tmp_path / "file").write_text("old\n")
     (tmp_path / "destination").write_text("keep\n")
     result = await PatchService(environment).apply(
@@ -452,14 +439,8 @@ async def test_move_conflict(environment: LocalEnvironment, tmp_path: Path) -> N
 
 
 async def test_bounded_reads_and_invalid_text(tmp_path: Path) -> None:
-    environment = await LocalEnvironment.open(
-        LocalEnvironmentConfig(
-            base_project_path=str(tmp_path),
-            max_read_bytes=2,
-            max_write_bytes=20,
-        )
-    )
-    service = PatchService(environment)
+    environment = tmp_path
+    service = PatchService(environment, max_write_bytes=20)
     (tmp_path / "file").write_bytes(b"old\r\n")
     text = envelope("*** Update File: file\n@@\n-old\n+new")
     assert not (await service.apply(text)).is_error
@@ -471,35 +452,33 @@ async def test_bounded_reads_and_invalid_text(tmp_path: Path) -> None:
     assert (await PatchService(environment, max_patch_bytes=1).apply(text)).is_error
 
 
-class FailingEnvironment(LocalEnvironment):
+class FailingService(PatchService):
     fail_remove: bool = False
     cancel_write: bool = False
 
-    async def write_file(self, request: filesystem.WriteRequest) -> None:
+    def _write(self, destination: str, content: bytes, *, creating: bool) -> None:
         if self.cancel_write:
             raise asyncio.CancelledError
-        await super().write_file(request)
+        super()._write(destination, content, creating=creating)
 
-    async def remove(self, request: filesystem.RemoveRequest) -> None:
+    def _remove(self, path: str) -> None:
         if self.fail_remove:
             raise EnvironmentError(
                 ErrorCode.IO, "remove failed", may_have_occurred=True
             )
-        await super().remove(request)
+        super()._remove(path)
 
 
 @pytest.mark.parametrize("binary", [False, True])
 async def test_move_io_failure_reports_completed_write(
     tmp_path: Path, binary: bool
 ) -> None:
-    environment = await FailingEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path))
-    )
-    environment.fail_remove = True
+    service = FailingService(tmp_path)
+    service.fail_remove = True
     payload = b"\xff\x00\x80" if binary else b"one\n"
     (tmp_path / "old").write_bytes(payload)
     body = "" if binary else "\n@@\n-one\n+two"
-    result = await PatchService(environment).apply(
+    result = await service.apply(
         envelope(f"*** Update File: old\n*** Move to: new{body}")
     )
     assert result.is_error
@@ -512,22 +491,17 @@ async def test_move_io_failure_reports_completed_write(
 
 
 async def test_binary_move_limits_and_cancellation(tmp_path: Path) -> None:
-    environment = await FailingEnvironment.open(
-        LocalEnvironmentConfig(
-            base_project_path=str(tmp_path), max_read_bytes=2, max_write_bytes=3
-        )
-    )
     source = tmp_path / "old"
     destination = tmp_path / "new"
     text = envelope("*** Update File: old\n*** Move to: new")
-    service = PatchService(environment)
+    service = FailingService(tmp_path, max_write_bytes=3)
     source.write_bytes(b"\xff" * 4)
     result = await service.apply(text)
     assert result.is_error
     assert source.read_bytes() == b"\xff" * 4
     assert not destination.exists()
     source.write_bytes(b"\xff" * 3)
-    environment.cancel_write = True
+    service.cancel_write = True
     with pytest.raises(asyncio.CancelledError):
         await service.apply(text)
     assert source.read_bytes() == b"\xff" * 3
@@ -535,9 +509,7 @@ async def test_binary_move_limits_and_cancellation(tmp_path: Path) -> None:
 
 
 async def test_cancellation_propagates(tmp_path: Path) -> None:
-    environment = await FailingEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path))
-    )
-    environment.cancel_write = True
+    service = FailingService(tmp_path)
+    service.cancel_write = True
     with pytest.raises(asyncio.CancelledError):
-        await PatchService(environment).apply(envelope("*** Add File: file\n+value"))
+        await service.apply(envelope("*** Add File: file\n+value"))

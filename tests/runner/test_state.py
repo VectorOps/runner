@@ -230,7 +230,7 @@ async def test_restart_discovery_reads_status_from_database(
 async def test_environment_setup_failure_records_completion(workspace: Path) -> None:
     runner = WorkflowRunner(workspace)
     with patch(
-        "vectorops.runner.runner.workflow.environments.open_environment",
+        "vectorops.runner.runner.workflow.LocalEnvironment.open",
         AsyncMock(side_effect=RuntimeError("environment unavailable")),
     ):
         with pytest.raises(RuntimeError, match="environment unavailable"):

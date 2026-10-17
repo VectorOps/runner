@@ -26,7 +26,7 @@ async def test_shell_and_environment_filtering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PROCESS_SECRET", "hidden")
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
             processes=m.ProcessConfig(
@@ -37,6 +37,7 @@ async def test_shell_and_environment_filtering(
             ),
         )
     )
+    environment = target.processes
     try:
         result = await environment.exec(
             m.ExecRequest(
@@ -54,9 +55,10 @@ async def test_shell_and_environment_filtering(
 
 
 async def test_initial_stdin_and_binary_output(tmp_path: Path) -> None:
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(base_project_path=str(tmp_path))
     )
+    environment = target.processes
     try:
         result = await environment.exec(
             m.ExecRequest(
@@ -72,12 +74,13 @@ async def test_initial_stdin_and_binary_output(tmp_path: Path) -> None:
 
 
 async def test_kill_escalation_cleans_ordinary_child_group(tmp_path: Path) -> None:
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
             processes=m.ProcessConfig(termination_grace_seconds=0.05),
         )
     )
+    environment = target.processes
     try:
         result = await environment.exec(
             m.ExecRequest(command=command("child_group"), yield_timeout_ms=100)
@@ -148,7 +151,7 @@ async def test_spawn_cleanup_survives_repeated_cancellation(
             await spawned.wait()
             return handle
 
-    driver = Driver(lambda cwd: tmp_path, m.EnvPolicy())
+    driver = Driver(tmp_path, m.EnvPolicy())
     task = asyncio.create_task(
         driver.spawn(m.ExecRequest(command=m.ArgvCommand(argv=["fake"])))
     )

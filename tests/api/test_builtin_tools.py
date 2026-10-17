@@ -18,6 +18,8 @@ from vectorops.runner.api import composition, tools
 from vectorops.runner.api.llm import plan
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.local import LocalEnvironment
+from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
+from vectorops.runner.environment.processes.manager import ProcessManager
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.workflow import WorkflowRunner
 
@@ -41,7 +43,7 @@ async def context(tmp_path: Path) -> AsyncIterator[ActivityExecutionContext]:
             environment=target,
         )
     finally:
-        await target.close()
+        await target.processes.close()
 
 
 @pytest.mark.parametrize("data", [b"hello\n", b"\xff\x00\x80", b"a\x00b", b""])
@@ -181,6 +183,59 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
         )
     )
     assert killed["termination_confirmed"] is True
+
+
+@pytest.mark.parametrize(
+    "offset,limit,expected,eof",
+    [(0, 2, "ab", False), (2, 2, "cd", True), (4, 2, "", True), (20, 2, "", True)],
+)
+async def test_file_byte_ranges(
+    context: ActivityExecutionContext,
+    tmp_path: Path,
+    offset: int,
+    limit: int,
+    expected: str,
+    eof: bool,
+) -> None:
+    (tmp_path / "file").write_text("abcd")
+    result = payload(
+        await tools.read_file_tool().execute(
+            context, {"path": "file", "offset": offset, "limit": limit}
+        )
+    )
+    assert result["content"] == expected
+    assert result["eof"] is eof
+
+
+async def test_local_listing(context: ActivityExecutionContext, tmp_path: Path) -> None:
+    (tmp_path / "file").write_bytes(b"data")
+    (tmp_path / "directory").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "file")
+    listing = tools.list_files_tool()
+    partial = payload(await listing.execute(context, {"limit": 2}))
+    assert partial["truncated"] is True
+    result = payload(await listing.execute(context, {"limit": 3}))
+    assert result["truncated"] is False
+    assert {(entry["path"], entry["kind"]) for entry in result["entries"]} == {
+        ("file", "file"),
+        ("directory", "directory"),
+        ("link", "symlink"),
+    }
+
+
+@pytest.mark.parametrize("mode", ["auto", "lines"])
+async def test_file_read_limit(context: ActivityExecutionContext, mode: str) -> None:
+    assert context.environment is not None
+    with pytest.raises(EnvironmentError) as error:
+        await tools.read_file_tool().execute(
+            context,
+            {
+                "path": "file",
+                "mode": mode,
+                "limit": context.environment.config.max_read_bytes + 1,
+            },
+        )
+    assert error.value.code == ErrorCode.RESOURCE_LIMIT
 
 
 async def test_plan_reconstruction_and_atomic_validation(
@@ -432,13 +487,12 @@ async def test_environment_tools_replay_without_io(
     )
     (workspace / "sample.bin").unlink()
     with (
-        patch.object(
-            LocalEnvironment,
-            "read_file",
+        patch(
+            "vectorops.runner.api.builtin_tools.read_file.paths.open_regular",
             side_effect=AssertionError("file I/O during replay"),
         ),
         patch.object(
-            LocalEnvironment, "exec", side_effect=AssertionError("exec during replay")
+            ProcessManager, "exec", side_effect=AssertionError("exec during replay")
         ),
     ):
         second = await runner.run(

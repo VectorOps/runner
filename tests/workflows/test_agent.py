@@ -14,7 +14,6 @@ from tests.fixtures.user_input import reply
 from vectorops.runner.api import tools
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
-from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -97,12 +96,11 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
         skill_path.unlink()
         (target / "evidence.txt").unlink()
         with (
-            patch.object(
-                LocalEnvironment, "read_file", side_effect=AssertionError("replay read")
+            patch(
+                "vectorops.runner.environment.paths.open_regular",
+                side_effect=AssertionError("replay read"),
             ),
-            patch.object(
-                LocalEnvironment, "list_dir", side_effect=AssertionError("replay list")
-            ),
+            patch("os.scandir", side_effect=AssertionError("replay list")),
         ):
             assert await runner.resume() == result
         assert len(backend.requests) == 3

@@ -116,7 +116,7 @@ async def test_root_owns_environment_until_shutdown(
         os.kill(pid, 0)
     environment = workflows.probe.contexts[0].environment
     assert environment is not None
-    assert await environment.list_processes() == []
+    assert await environment.processes.list_processes() == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="local environment requires POSIX")
@@ -153,7 +153,7 @@ async def test_service_stop_closes_processes_before_terminal_event(
             os.kill(pid, 0)
         environment = workflows.probe.contexts[0].environment
         assert environment is not None
-        assert await environment.list_processes() == []
+        assert await environment.processes.list_processes() == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="local environment requires POSIX")
@@ -183,7 +183,7 @@ async def test_concurrent_roots_have_separate_attachments(
         environment = next(
             ctx.environment for ctx in contexts if ctx.workflow_id == "root-1"
         )
-        assert environment is not None and await environment.list_processes()
+        assert environment is not None and await environment.processes.list_processes()
     finally:
         runner.stop()
         await asyncio.gather(*tasks, return_exceptions=True)

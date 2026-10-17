@@ -28,12 +28,13 @@ def output(result: m.ProcessResult) -> bytes:
 
 
 @pytest.fixture
-async def environment(tmp_path: Path) -> AsyncIterator[LocalEnvironment]:
+async def environment(tmp_path: Path) -> AsyncIterator[ProcessManager]:
     if os.name != "posix":
         pytest.skip("local process driver requires POSIX")
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(base_project_path=str(tmp_path))
     )
+    environment = target.processes
     try:
         yield environment
     finally:
@@ -41,7 +42,7 @@ async def environment(tmp_path: Path) -> AsyncIterator[LocalEnvironment]:
 
 
 async def finish(
-    environment: LocalEnvironment, result: m.ProcessResult
+    environment: ProcessManager, result: m.ProcessResult
 ) -> tuple[m.ProcessResult, bytes]:
     data = output(result)
     async with asyncio.timeout(10):
@@ -135,7 +136,7 @@ def test_invalid_exec_yield_timeout(timeout: object) -> None:
         )
 
 
-async def test_quick_command_is_forgotten(environment: LocalEnvironment) -> None:
+async def test_quick_command_is_forgotten(environment: ProcessManager) -> None:
     result = await environment.exec(
         m.ExecRequest(
             command=command("streams"),
@@ -151,7 +152,7 @@ async def test_quick_command_is_forgotten(environment: LocalEnvironment) -> None
     assert error.value.code == ErrorCode.MISSING
 
 
-async def test_independent_processes_and_stdin(environment: LocalEnvironment) -> None:
+async def test_independent_processes_and_stdin(environment: ProcessManager) -> None:
     first = await environment.exec(
         m.ExecRequest(
             command=command("uppercase"),
@@ -173,7 +174,7 @@ async def test_independent_processes_and_stdin(environment: LocalEnvironment) ->
 
 
 async def test_cancelled_exec_and_poll_leave_session_alive(
-    environment: LocalEnvironment,
+    environment: ProcessManager,
 ) -> None:
     task = asyncio.create_task(
         environment.exec(
@@ -202,7 +203,7 @@ async def test_cancelled_exec_and_poll_leave_session_alive(
     assert final.returncode is not None and final.returncode < 0
 
 
-async def test_execution_timeout(environment: LocalEnvironment) -> None:
+async def test_execution_timeout(environment: ProcessManager) -> None:
     result = await environment.exec(
         m.ExecRequest(
             command=command("sleep", "60"),
@@ -216,7 +217,7 @@ async def test_execution_timeout(environment: LocalEnvironment) -> None:
 
 
 async def test_cwd_and_environment(
-    environment: LocalEnvironment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    environment: ProcessManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PROCESS_TEST_INHERITED", "parent")
     (tmp_path / "sub").mkdir()
@@ -242,7 +243,7 @@ async def test_cwd_and_environment(
 
 
 async def test_unsupported_pty_shell_and_spawn_failure(
-    environment: LocalEnvironment,
+    environment: ProcessManager,
 ) -> None:
     with pytest.raises(EnvironmentError) as pty:
         await environment.exec(m.ExecRequest(command=command("noop"), mode="pty"))
@@ -260,12 +261,13 @@ async def test_unsupported_pty_shell_and_spawn_failure(
 
 
 async def test_large_output_is_bounded_and_drained(tmp_path: Path) -> None:
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
             processes=m.ProcessConfig(max_output_bytes=128, max_response_bytes=32),
         )
     )
+    environment = target.processes
     try:
         result = await environment.exec(
             m.ExecRequest(
@@ -283,7 +285,7 @@ async def test_large_output_is_bounded_and_drained(tmp_path: Path) -> None:
 
 
 async def test_close_stops_sessions_and_rejects_exec(
-    environment: LocalEnvironment,
+    environment: ProcessManager,
 ) -> None:
     result = await environment.exec(
         m.ExecRequest(command=command("sleep", "60"), yield_timeout_ms=0)
@@ -298,7 +300,7 @@ async def test_close_stops_sessions_and_rejects_exec(
 
 @pytest.mark.parametrize("operation", ["poll", "stdin", "eof", "kill"])
 async def test_process_operations_fail_after_environment_restart(
-    environment: LocalEnvironment, tmp_path: Path, operation: str
+    environment: ProcessManager, tmp_path: Path, operation: str
 ) -> None:
     result = await environment.exec(
         m.ExecRequest(
@@ -309,9 +311,10 @@ async def test_process_operations_fail_after_environment_restart(
     )
     reports = await environment.close()
     assert reports[0].termination_confirmed
-    restarted = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(base_project_path=str(tmp_path))
     )
+    restarted = target.processes
     try:
         with pytest.raises(EnvironmentError) as error:
             if operation == "poll":

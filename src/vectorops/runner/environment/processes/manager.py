@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from ..errors import EnvironmentError, ErrorCode
 from . import models as m
-from .driver import ProcessDriver, ProcessHandle
+from .local import LocalProcessDriver, LocalProcessHandle
 from .output import OutputBuffer
 
 
@@ -17,7 +17,7 @@ class Session:
     buffer: OutputBuffer
     kill_tree: bool = True
     state: Literal["starting", "running", "exited", "failed", "unknown"] = "starting"
-    handle: Optional[ProcessHandle] = None
+    handle: Optional[LocalProcessHandle] = None
     task: Optional[asyncio.Task[None]] = None
     stop_task: Optional[asyncio.Task[m.KillResult]] = None
     input_task: Optional[asyncio.Task[None]] = None
@@ -34,7 +34,7 @@ class Session:
 
 
 class ProcessManager:
-    def __init__(self, driver: ProcessDriver, config: m.ProcessConfig) -> None:
+    def __init__(self, driver: LocalProcessDriver, config: m.ProcessConfig) -> None:
         self._driver = driver
         self._config = config.model_copy(deep=True)
         self._sessions: dict[str, Session] = {}
@@ -95,7 +95,7 @@ class ProcessManager:
                 pass
         return self._result(session, 0)
 
-    async def _collect(self, session: Session, handle: ProcessHandle) -> None:
+    async def _collect(self, session: Session, handle: LocalProcessHandle) -> None:
         async for chunk in handle.read_output():
             session.buffer.append(chunk)
             session.changed.set()

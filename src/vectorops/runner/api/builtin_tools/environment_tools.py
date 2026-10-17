@@ -42,7 +42,7 @@ def exec_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: processes.ExecRequest
     ) -> tools.ToolResponse:
-        return process_response(await environment(context).exec(arguments))
+        return process_response(await environment(context).processes.exec(arguments))
 
     return tools.Tool(
         "exec",
@@ -64,7 +64,7 @@ def poll_process_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: processes.PollRequest
     ) -> tools.ToolResponse:
-        return process_response(await environment(context).poll(arguments))
+        return process_response(await environment(context).processes.poll(arguments))
 
     return tools.Tool(
         "poll_process",
@@ -90,7 +90,7 @@ def write_stdin_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: StdinArguments
     ) -> tools.ToolResponse:
-        await environment(context).write_stdin(
+        await environment(context).processes.write_stdin(
             processes.StdinRequest(
                 process_id=arguments.process_id,
                 data=arguments.data.encode("utf-8"),
@@ -115,7 +115,7 @@ def kill_process_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: processes.SessionRequest
     ) -> tools.ToolResponse:
-        result = await environment(context).kill(arguments)
+        result = await environment(context).processes.kill(arguments)
         return tools.ToolResponse(
             content=[connect.TextBlock(text=result.model_dump_json())]
         )
@@ -140,7 +140,7 @@ def list_processes_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: EmptyArguments
     ) -> tools.ToolResponse:
-        results = await environment(context).list_processes()
+        results = await environment(context).processes.list_processes()
         return tools.ToolResponse(
             content=[
                 connect.TextBlock(

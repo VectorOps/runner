@@ -1,13 +1,13 @@
 """POSIX pipe driver with fresh process groups and explicit process environments."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 import os
 from pathlib import Path
 import signal
 
 from . import models as m
-from .driver import ProcessHandle
+from ..paths import resolve_path
 from .environment import build_environment
 
 
@@ -86,15 +86,15 @@ class LocalProcessHandle:
 
 
 class LocalProcessDriver:
-    def __init__(self, resolve_cwd: Callable[[str], Path], policy: m.EnvPolicy) -> None:
-        self._resolve_cwd = resolve_cwd
+    def __init__(self, root: Path, policy: m.EnvPolicy) -> None:
+        self._root = root
         self._policy = policy.model_copy(deep=True)
 
     @property
     def capabilities(self) -> m.DriverCapabilities:
         return m.DriverCapabilities(termination_scope="group")
 
-    async def spawn(self, request: m.ExecRequest) -> ProcessHandle:
+    async def spawn(self, request: m.ExecRequest) -> LocalProcessHandle:
         task = asyncio.create_task(self._spawn(request))
         try:
             return await asyncio.shield(task)
@@ -117,8 +117,8 @@ class LocalProcessDriver:
             closing.result()
             raise
 
-    async def _spawn(self, request: m.ExecRequest) -> ProcessHandle:
-        cwd = await asyncio.to_thread(self._resolve_cwd, request.cwd)
+    async def _spawn(self, request: m.ExecRequest) -> LocalProcessHandle:
+        cwd = await asyncio.to_thread(resolve_path, self._root, request.cwd)
         argv = (
             request.command.argv
             if isinstance(request.command, m.ArgvCommand)

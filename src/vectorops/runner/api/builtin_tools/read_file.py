@@ -1,5 +1,6 @@
 """Bounded text and binary file reads with native image tool results."""
 
+import asyncio
 import base64
 import json
 import mimetypes
@@ -9,7 +10,9 @@ import connect
 import pydantic
 
 from vectorops.runner.api.tool_registry import register_tool
-from vectorops.runner.environment import models
+from vectorops.runner.environment import models, paths
+from vectorops.runner.environment import text as file_text
+from vectorops.runner.environment.errors import EnvironmentError
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.api import tool_contracts as tools
 from .environment import environment
@@ -42,25 +45,46 @@ def read_file_tool(
         context: ActivityExecutionContext, arguments: ReadFileArguments
     ) -> tools.ToolResponse:
         target = environment(context)
-        if arguments.mode == "lines":
-            lines = await target.read_lines(
-                models.LineReadRequest(
-                    path=arguments.path,
-                    start_line=arguments.start_line,
-                    max_lines=arguments.max_lines,
-                    byte_limit=arguments.limit,
+        paths.check_limit(arguments.limit, target.config.max_read_bytes)
+
+        def read() -> models.ReadResult:
+            with paths.open_regular(
+                paths.resolve_path(target.root, arguments.path)
+            ) as stream:
+                stream.seek(arguments.offset)
+                content = stream.read(arguments.limit + 1)
+                return models.ReadResult(
+                    content=content[: arguments.limit],
+                    eof=len(content) <= arguments.limit,
                 )
-            )
+
+        def read_lines() -> models.LineReadResult:
+            with paths.open_regular(
+                paths.resolve_path(target.root, arguments.path)
+            ) as stream:
+                return file_text.read_lines(
+                    stream,
+                    models.LineReadRequest(
+                        path=arguments.path,
+                        start_line=arguments.start_line,
+                        max_lines=arguments.max_lines,
+                        byte_limit=arguments.limit,
+                    ),
+                    chunk_size=min(65536, target.config.max_read_bytes),
+                )
+
+        if arguments.mode == "lines":
+            try:
+                lines = await asyncio.to_thread(read_lines)
+            except OSError as exc:
+                raise EnvironmentError.from_os_error(exc) from exc
             return tools.ToolResponse(
                 content=[connect.TextBlock(text=lines.model_dump_json())]
             )
-        result = await target.read_file(
-            models.ReadRequest(
-                path=arguments.path,
-                offset=arguments.offset,
-                limit=arguments.limit,
-            )
-        )
+        try:
+            result = await asyncio.to_thread(read)
+        except OSError as exc:
+            raise EnvironmentError.from_os_error(exc) from exc
         mime = mimetypes.guess_type(arguments.path)[0] or "application/octet-stream"
         metadata: dict[str, pydantic.JsonValue] = {
             "path": arguments.path,

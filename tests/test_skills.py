@@ -7,17 +7,12 @@ import pytest
 import yaml
 
 from vectorops.runner import skills
-from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
-from vectorops.runner.environment.local import LocalEnvironment
-from vectorops.runner.environment.protocol import TargetEnvironment
 
 
 @pytest.fixture
-async def target(tmp_path: Path) -> TargetEnvironment:
-    return await LocalEnvironment.open(
-        LocalEnvironmentConfig(base_project_path=str(tmp_path))
-    )
+async def target(tmp_path: Path) -> Path:
+    return tmp_path
 
 
 def write_skill(tmp_path: Path, directory: str, content: str) -> Path:
@@ -92,7 +87,7 @@ def test_multiline_description_and_extra_metadata() -> None:
 
 
 async def test_discovery_skips_invalid_and_sorts(
-    tmp_path: Path, target: TargetEnvironment, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, target: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     write_skill(tmp_path, "z-last", document("last"))
     write_skill(tmp_path, "a-first", document("first"))
@@ -110,9 +105,7 @@ async def test_discovery_skips_invalid_and_sorts(
     assert caplog.text.count("Ignoring skill at") == 3
 
 
-async def test_absent_and_empty_catalog(
-    tmp_path: Path, target: TargetEnvironment
-) -> None:
+async def test_absent_and_empty_catalog(tmp_path: Path, target: Path) -> None:
     assert (await skills.discover_skills(target)).render() == ""
     (tmp_path / ".vocode/skills").mkdir(parents=True)
     assert (await skills.discover_skills(target)).render() == ""
@@ -120,7 +113,7 @@ async def test_absent_and_empty_catalog(
     assert (await skills.discover_skills(target)).render() == ""
 
 
-async def test_discovery_limits(tmp_path: Path, target: TargetEnvironment) -> None:
+async def test_discovery_limits(tmp_path: Path, target: Path) -> None:
     for index in range(skills.SKILL_LIMIT + 1):
         write_skill(tmp_path, f"skill-{index:02}", document(f"skill-{index:02}"))
     catalog = await skills.discover_skills(target)
@@ -130,7 +123,7 @@ async def test_discovery_limits(tmp_path: Path, target: TargetEnvironment) -> No
 
 
 async def test_bounded_reads_only_require_complete_header(
-    tmp_path: Path, target: TargetEnvironment
+    tmp_path: Path, target: Path
 ) -> None:
     write_skill(
         tmp_path, "large-body", document("large-body") + "x" * skills.SKILL_BYTES
@@ -144,16 +137,17 @@ async def test_bounded_reads_only_require_complete_header(
     assert [skill.name for skill in catalog.skills] == ["large-body"]
 
 
-@pytest.mark.parametrize("operation", ["list_dir", "read_file"])
+@pytest.mark.parametrize(
+    "operation", ["os.scandir", "vectorops.runner.skills.paths.open_regular"]
+)
 async def test_environment_errors_are_skipped(
     tmp_path: Path,
-    target: TargetEnvironment,
+    target: Path,
     caplog: pytest.LogCaptureFixture,
     operation: str,
 ) -> None:
     write_skill(tmp_path, "review", document("review"))
-    with patch.object(
-        LocalEnvironment,
+    with patch(
         operation,
         side_effect=EnvironmentError(ErrorCode.DENIED, "Access denied"),
     ):
@@ -161,7 +155,7 @@ async def test_environment_errors_are_skipped(
     assert "Access denied" in caplog.text
 
 
-async def test_cancellation_propagates(target: TargetEnvironment) -> None:
-    with patch.object(LocalEnvironment, "list_dir", side_effect=asyncio.CancelledError):
+async def test_cancellation_propagates(target: Path) -> None:
+    with patch("os.scandir", side_effect=asyncio.CancelledError):
         with pytest.raises(asyncio.CancelledError):
             await skills.discover_skills(target)

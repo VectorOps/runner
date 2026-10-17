@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 async def test_parent_termination_selects_process_or_group(
     tmp_path: Path, kill_tree: bool
 ) -> None:
-    environment = await LocalEnvironment.open(
+    target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
             processes=m.ProcessConfig(
@@ -28,6 +28,7 @@ async def test_parent_termination_selects_process_or_group(
             ),
         )
     )
+    environment = target.processes
     heartbeat = tmp_path / "heartbeat"
     child_pid = None
     try:
