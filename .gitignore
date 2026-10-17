@@ -5,4 +5,5 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .vocode/data/
+/.voc/data/
 .DS_Store
