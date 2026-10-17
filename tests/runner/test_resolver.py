@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from jsonschema.exceptions import ValidationError
 
 from tests.fixtures import sources
 from vectorops.runner.api import composition
@@ -156,7 +157,9 @@ async def test_builtin_resolution_and_descriptor(tmp_path: Path) -> None:
         assert descriptor.name == "Coding agent"
         assert descriptor.kind == "builtin.agent"
         descriptor.validate_input({})
-        descriptor.validate_input({"model_tier": "weak"})
+        assert descriptor.input_schema["properties"] == {}
+        with pytest.raises(ValidationError, match="model_tier"):
+            descriptor.validate_input({"model_tier": "weak"})
         descriptor.input_schema.clear()
         assert (await resolver.describe("builtin:agent")).input_schema
         await resolver.invalidate("builtin:agent")

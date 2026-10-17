@@ -301,7 +301,7 @@ The built-in chat workflow reads `workflows.defaults` directly with
 `get_config(ctx, ..., model=Settings)` after each user message and applies the selected
 tier with `set_settings`. Overrides to a tier model or shared thinking level take
 effect on the next turn. Clearing those fields restores `components.llm` inheritance.
-The coding agent selects an LLM profile matching its `model_tier` input instead;
+The coding agent always selects the `strong` LLM profile instead;
 see [Named LLM profiles](#named-llm-profiles) below.
 The helper reads shared defaults and `workflows.helper` directly for each task.
 Prompt and tool selection remain invocation-scoped; no settings-loader wrappers
@@ -378,11 +378,11 @@ replayed or interrupted generations use their recorded snapshot.
 
 ### Migrate the coding agent
 
-The coding agent selects `profile=model_tier.value`; its default tier is `strong`.
-Configure only `components.llm.model = "openai/gpt-4.1"` to use one shared
-model for every tier. No profile tables are required. To retain distinct tier models,
-move `workflows.defaults.strong_model`, `medium_model`, and `weak_model` to the
-corresponding `llm.profiles.<tier>.model` fields for the coding agent. Move its shared
+The coding agent selects `profile="strong"` and accepts no workflow input parameters.
+Remove `model_tier` from invocation inputs. Configure only
+`components.llm.model = "openai/gpt-4.1"` to use a shared model; no profile tables
+are required. To override the coding agent's model, move
+`workflows.defaults.strong_model` to `llm.profiles.strong.model`. Move its shared
 `thinking_level` to `llm.reasoning.effort`, or set reasoning in individual profiles.
 Update stored overrides to target the new keys as well. Chat and helper workflows
 still use `workflows.defaults`; retain their settings when those workflows need them.

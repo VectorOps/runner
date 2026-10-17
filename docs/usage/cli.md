@@ -133,9 +133,9 @@ uv run vops-runner client --port 8765 workflow show builtin:agent
 uv run vops-runner client --port 8765 execution start builtin:agent
 ```
 
-The workflow argument `model_tier` defaults to `strong`; pass
-`--input '{"model_tier":"weak"}'` to select `weak` (or `medium`). Use the returned
-execution ID to list the pending request, then answer its request ID:
+The agent accepts no workflow input parameters and uses the `strong` LLM profile.
+Configure `components.llm.profiles.strong` to override shared LLM settings.
+Use the returned execution ID to list the pending request, then answer its request ID:
 
 ```bash
 uv run vops-runner client --port 8765 input list EXECUTION_ID
@@ -186,7 +186,7 @@ model does not support these options. Defaults and precedence are:
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| Agent input `model_tier` | `strong` | Selects the LLM profile for the parent |
+| Agent LLM profile | `strong` | Uses `components.llm.profiles.strong`, inheriting shared LLM settings |
 | `workflows.agent.agents` | `["builtin:helper"]` | Default child references; `[]` removes default `run_agent`; explicit collection configuration takes precedence |
 | `workflows.agent.tool_collection` | `agent` | Named tool collection for the parent |
 | `workflows.helper.tool_collection` | `helper` | Named tool collection for the helper |

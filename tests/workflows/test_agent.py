@@ -161,10 +161,9 @@ async def test_parent_delegates_then_patches_and_resumes(tmp_path: Path) -> None
             await settled(connection, identifier)
 
 
-@pytest.mark.parametrize("tier", list(settings.ModelTier))
 @pytest.mark.parametrize("agents", [[], ["custom:research"]])
 async def test_parent_configures_available_agents(
-    tmp_path: Path, agents: list[str], tier: settings.ModelTier
+    tmp_path: Path, agents: list[str]
 ) -> None:
     configure(
         tmp_path,
@@ -179,7 +178,6 @@ async def test_parent_configures_available_agents(
             accepted = await connection.start(
                 protocol.Start(
                     reference="builtin:agent",
-                    input={"model_tier": tier.value},
                     idempotency_key="start",
                 )
             )
@@ -187,7 +185,7 @@ async def test_parent_configures_available_agents(
                 connection, await pending(connection, accepted.execution_id), "hello"
             )
             await pending(connection, accepted.execution_id)
-            assert backend.settings[0].model == tier.value
+            assert backend.settings[0].model == "strong"
             bindings = {tool.name: tool for tool in backend.requests[0].tools}
             assert ("run_agent" in bindings) is bool(agents)
             if agents:
@@ -262,18 +260,23 @@ async def test_agent_without_config_reaches_user_input(tmp_path: Path) -> None:
     assert not (tmp_path / ".voc/config.toml").exists()
 
 
-@pytest.mark.parametrize("tier", list(settings.ModelTier))
-async def test_agent_with_shared_model_handles_input(
-    tmp_path: Path, tier: settings.ModelTier
+@pytest.mark.parametrize("use_profile", [False, True])
+async def test_agent_uses_strong_profile_or_shared_model(
+    tmp_path: Path, use_profile: bool
 ) -> None:
-    (tmp_path / "config.toml").write_text('[components.llm]\nmodel = "shared"\n')
+    config = (
+        '[components.llm]\nmodel = "shared"\n'
+        '[components.workflows.defaults]\nstrong_model = "legacy"\n'
+    )
+    if use_profile:
+        config += '[components.llm.profiles.strong]\nmodel = "profile"\n'
+    (tmp_path / "config.toml").write_text(config)
     backend = FakeProvider([answer("done")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
             accepted = await connection.start(
                 protocol.Start(
                     reference="builtin:agent",
-                    input={"model_tier": tier.value},
                     idempotency_key="start",
                 )
             )
@@ -283,7 +286,7 @@ async def test_agent_with_shared_model_handles_input(
             assert next_request.request_id != request.request_id
             assert next_request.channel == "user.message"
             assert len(backend.requests) == 1
-            assert backend.settings[0].model == "shared"
+            assert backend.settings[0].model == ("profile" if use_profile else "shared")
             await connection.stop(accepted.execution_id)
             await settled(connection, accepted.execution_id)
 

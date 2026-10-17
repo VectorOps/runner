@@ -16,10 +16,7 @@ from vectorops.runner.workflows.tools import default_collections
     kind="builtin.agent",
     version=2,
 )
-async def agent(
-    ctx: WorkflowExecutionContext,
-    model_tier: settings.ModelTier = settings.ModelTier.STRONG,
-) -> pydantic.JsonValue:
+async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     """Retain one conversation and plan, refreshing model settings each turn."""
     options = settings.AgentSettings.model_validate(
         await get_config(ctx, "workflows.agent", {}, model=settings.AgentSettings)
@@ -30,7 +27,7 @@ async def agent(
     )
     conversation = llm.LLM(
         "agent",
-        profile=model_tier.value,
+        profile="strong",
         system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
         inbox=inbox.Inbox("steer", workflow_id=ctx.workflow.id),
     )
