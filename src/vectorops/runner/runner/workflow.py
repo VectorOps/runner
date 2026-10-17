@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from functools import partial
 import shutil
@@ -34,7 +34,7 @@ from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
-from vectorops.runner.runner import inspection
+from vectorops.runner.runner import inspection, summary_history
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import inbox
@@ -98,7 +98,7 @@ class WorkflowRunner:
         project = await self.project()
         if self._execution_index is None:
             self._execution_index = ExecutionIndex(
-                project.data_path, self.execution_state, database=project.database
+                project.data_path, self._execution_projection, database=project.database
             )
         return self._execution_index
 
@@ -418,6 +418,7 @@ class WorkflowRunner:
                     SQLiteHistory(
                         history_path,
                         usage_store=project.usage,
+                        summary_store=project.summaries,
                         event_sink=self.event_sink,
                         mailbox_sink=self.mailbox_sink,
                         change_sink=(
@@ -484,8 +485,6 @@ class WorkflowRunner:
                     await database.save_execution(record, replace_heads=True)
                     self.last_execution_id = execution_id
                     await checkpointer.persist()
-                    if is_new:
-                        await (await self.execution_index()).invalidate()
                     await store.activate(execution_id)
 
                     def changed(status: str) -> None:
@@ -577,7 +576,7 @@ class WorkflowRunner:
                             | set(pointer.active_execution_ids),
                         )
                         if removed:
-                            await (await self.execution_index()).invalidate()
+                            await project.summaries.remove(removed)
                     return result
         return await self._run(
             project,
@@ -675,6 +674,7 @@ class WorkflowRunner:
         return SQLiteHistory(
             path,
             usage_store=project.usage,
+            summary_store=project.summaries,
             event_sink=self.event_sink,
             mailbox_sink=self.mailbox_sink,
             change_sink=(
@@ -706,7 +706,28 @@ class WorkflowRunner:
         return await (await self._selected_database(execution_id)).inspect_execution()
 
     async def execution_summary(self, execution_id: str) -> inspection.ExecutionSummary:
-        return await (await self._selected_database(execution_id)).execution_summary()
+        project = await self.project()
+        try:
+            return await project.summaries.get(execution_id)
+        except KeyError:
+            snapshot = await self._execution_projection(execution_id)
+            await project.summaries.record(snapshot)
+            return snapshot.summary
+
+    async def _execution_projection(
+        self, execution_id: str
+    ) -> summary_history.Snapshot:
+        snapshot = await (
+            await self._selected_database(execution_id)
+        ).summary_snapshot()
+        if snapshot.summary.execution_id != execution_id:
+            raise ValueError("execution identity mismatch")
+        return snapshot
+
+    async def execution_summaries(
+        self, execution_ids: Sequence[str]
+    ) -> dict[str, inspection.ExecutionSummary]:
+        return await (await self.project()).summaries.get_many(execution_ids)
 
     async def workflow_state(
         self, execution_id: str, workflow_id: str
@@ -727,6 +748,7 @@ class WorkflowRunner:
                     database = await self._database(project, identifier)
                     revision, total = await database.usage_snapshot()
                     await project.usage.record(identifier, revision, total)
+            await (await self.execution_index()).reconcile()
             self._usage_ready = True
 
     async def runner_usage(self, *, reset: bool = False) -> usage.RunnerUsage:
@@ -741,14 +763,20 @@ class WorkflowRunner:
         return await (await self._selected_database(query.execution_id)).query(query)
 
     async def execution_ids(
-        self, *, after: typing.Optional[str] = None, limit: typing.Optional[int] = 100
+        self,
+        *,
+        after: typing.Optional[str] = None,
+        limit: typing.Optional[int] = 100,
+        active: Sequence[str] = (),
+        active_only: bool = False,
     ) -> list[str]:
         """Page newest-updated executions, breaking timestamp ties by ID.
 
+        Unindexed active IDs precede archives in reverse activation order.
         ID cursors resume in the current ordering rather than a frozen snapshot.
         """
         return await (await self.execution_index()).identifiers(
-            after=after, limit=limit
+            after=after, limit=limit, active=active, active_only=active_only
         )
 
     async def export_execution(
@@ -815,4 +843,4 @@ class WorkflowRunner:
                 await store.save(pointer.model_copy(update={"last_execution_id": None}))
             await store.deactivate(execution_id)
             await asyncio.to_thread(shutil.rmtree, database.path.parent)
-            await (await self.execution_index()).invalidate()
+            await project.summaries.remove([execution_id])

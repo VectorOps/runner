@@ -45,6 +45,7 @@ class UsageHistory:
     @staticmethod
     def initialize(connection: sqlite3.Connection) -> None:
         """Backfill existing histories once, in the same transaction as the new state."""
+        UsageHistory._initialize_context(connection)
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_state'"
         ).fetchone():
@@ -70,6 +71,41 @@ class UsageHistory:
             UsageHistory.link(connection, step)
         for step in steps:
             UsageHistory.update(connection, step)
+
+    @staticmethod
+    def _initialize_context(connection: sqlite3.Connection) -> None:
+        """Materialize immutable predecessor links once, preserving every branch."""
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'generation_ancestors'"
+        ).fetchone():
+            return
+        connection.execute(
+            "CREATE TABLE generation_ancestors (step_id TEXT PRIMARY KEY, generation_id TEXT)"
+        )
+        for row in connection.execute("SELECT payload FROM steps ORDER BY rowid"):
+            UsageHistory._link_context(
+                connection, models.WorkflowStep.model_validate_json(row[0])
+            )
+
+    @staticmethod
+    def _link_context(
+        connection: sqlite3.Connection, step: models.WorkflowStep
+    ) -> None:
+        generation_id: Optional[str] = None
+        if step.operation.kind == "llm.generate":
+            generation_id = step.id
+        elif step.previous_step_id is not None:
+            row = connection.execute(
+                "SELECT generation_id FROM generation_ancestors WHERE step_id = ?",
+                (step.previous_step_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(step.previous_step_id)
+            generation_id = row[0]
+        connection.execute(
+            "INSERT OR IGNORE INTO generation_ancestors VALUES (?, ?)",
+            (step.id, generation_id),
+        )
 
     @staticmethod
     def workflow_usage(
@@ -98,6 +134,7 @@ class UsageHistory:
 
     @staticmethod
     def link(connection: sqlite3.Connection, step: models.WorkflowStep) -> None:
+        UsageHistory._link_context(connection, step)
         if not isinstance(step.operation, models.WorkflowSpawnOperation):
             return
         child = step.operation.child_workflow_id
@@ -185,10 +222,20 @@ class UsageHistory:
         """Use the latest generation on the authoritative root path, not row order."""
         from vectorops.runner.api.llm import observability
 
-        row = connection.execute(
-            "SELECT step_id FROM workflow_heads WHERE workflow_id = ?", (root_id,)
-        ).fetchone()
-        current = None if row is None else str(row[0])
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'generation_ancestors'"
+        ).fetchone():
+            row = connection.execute(
+                "SELECT CASE WHEN a.step_id IS NULL THEN h.step_id ELSE a.generation_id END "
+                "FROM workflow_heads h LEFT JOIN generation_ancestors a ON a.step_id = h.step_id "
+                "WHERE h.workflow_id = ?",
+                (root_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT step_id FROM workflow_heads WHERE workflow_id = ?", (root_id,)
+            ).fetchone()
+        current = None if row is None or row[0] is None else str(row[0])
         while current is not None:
             row = connection.execute(
                 "SELECT payload FROM steps WHERE id = ?", (current,)

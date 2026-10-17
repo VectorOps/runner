@@ -50,6 +50,7 @@ async def test_committed_name_and_usage_push_full_snapshots(tmp_path: Path) -> N
                 project = await service.runner.project()
                 database = SQLiteHistory(
                     project.data_path / "executions/execution/history.sqlite3",
+                    summary_store=project.summaries,
                     change_sink=lambda ids: service._changed("execution", ids),
                 )
                 await seed(database)

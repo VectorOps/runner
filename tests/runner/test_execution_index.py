@@ -1,11 +1,10 @@
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from vectorops.runner import models
-from vectorops.runner.runner.execution_index import ExecutionIndex
 from vectorops.runner.runner.execution_state import ExecutionRecord
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -27,7 +26,7 @@ async def seed(data_path: Path, identifier: str, day: int) -> SQLiteHistory:
     return database
 
 
-async def test_cache_is_persisted_reused_and_refreshed_after_30_seconds(
+async def test_projection_is_incremental_and_external_changes_reconcile_on_restart(
     tmp_path: Path,
 ) -> None:
     runner = WorkflowRunner(tmp_path)
@@ -35,28 +34,27 @@ async def test_cache_is_persisted_reused_and_refreshed_after_30_seconds(
     await seed(project.data_path, "old", 1)
     await seed(project.data_path, "new", 2)
     index = await runner.execution_index()
-    with patch("vectorops.runner.runner.execution_index.time", return_value=100):
-        assert await runner.execution_ids() == ["new", "old"]
+    assert await runner.execution_ids() == ["new", "old"]
     snapshot = await index.database.index_status()
-    assert snapshot[1] == 100
-    await seed(project.data_path, "old", 3)
+    history = await runner._database(project, "old")
+    record = await history.get_execution()
+    await history.save_execution(
+        record.model_copy(update={"updated_at": "2025-01-03T00:00:00+00:00"})
+    )
     await seed(project.data_path, "latest", 4)
     restarted = WorkflowRunner(tmp_path)
     with (
-        patch("vectorops.runner.runner.execution_index.time", return_value=129.9),
         patch.object(Path, "iterdir", side_effect=AssertionError("unexpected scan")),
         patch.object(
             SQLiteHistory,
-            "get_execution",
+            "summary_snapshot",
             side_effect=AssertionError("unexpected read"),
         ),
     ):
-        assert await runner.execution_ids() == ["new", "old"]
-        assert await restarted.execution_ids() == ["new", "old"]
-        assert await index.database.index_status() == snapshot
-    with patch("vectorops.runner.runner.execution_index.time", return_value=130):
-        assert await restarted.execution_ids() == ["latest", "old", "new"]
-    assert (await index.database.index_status())[1] == 130
+        assert await runner.execution_ids() == ["old", "new"]
+        assert (await index.database.index_status())[1] == snapshot[1]
+        assert (await runner.execution_summary("old")).status == "completed"
+    assert await restarted.execution_ids() == ["latest", "old", "new"]
 
 
 @pytest.mark.parametrize("payload", ["not json", '{"schema_version": 2}', ""])
@@ -73,19 +71,23 @@ async def test_concurrent_requests_share_refresh(tmp_path: Path) -> None:
     runner = WorkflowRunner(tmp_path)
     index = await runner.execution_index()
     await seed(index.data_path, "execution", 1)
-    with patch.object(index, "read_record", wraps=index.read_record) as read:
+    with patch.object(index, "read_snapshot", wraps=index.read_snapshot) as read:
         results = await asyncio.gather(*(runner.execution_ids() for _ in range(10)))
     assert results == [["execution"]] * 10
     read.assert_awaited_once_with("execution")
 
 
-async def test_removal_invalidates_cache(tmp_path: Path) -> None:
+async def test_removal_updates_projection_without_invalidating_index(
+    tmp_path: Path,
+) -> None:
     runner = WorkflowRunner(tmp_path)
     index = await runner.execution_index()
     await seed(index.data_path, "execution", 1)
     assert await runner.execution_ids() == ["execution"]
-    await runner.remove_execution("execution")
-    assert await runner.execution_ids() == []
+    await runner.initialize_usage()
+    with patch.object(index, "discover", side_effect=AssertionError("unexpected scan")):
+        await runner.remove_execution("execution")
+        assert await runner.execution_ids() == []
     assert await WorkflowRunner(tmp_path).execution_ids() == []
 
 
@@ -100,7 +102,10 @@ async def test_recovery_bypasses_fresh_index(tmp_path: Path) -> None:
     assert [record.id for record in await runner.recovery_candidates()] == ["running"]
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("nan"), float("inf")])
-def test_invalid_interval(tmp_path: Path, interval: float) -> None:
-    with pytest.raises(ValueError):
-        ExecutionIndex(tmp_path, AsyncMock(), refresh_interval=interval)
+async def test_empty_active_page_does_not_refresh_archive(tmp_path: Path) -> None:
+    runner = WorkflowRunner(tmp_path)
+    index = await runner.execution_index()
+    with patch.object(index, "discover", side_effect=AssertionError("unexpected scan")):
+        assert await runner.execution_ids(active_only=True) == []
+        with pytest.raises(ValueError, match="cursor"):
+            await runner.execution_ids(after="missing", active_only=True)

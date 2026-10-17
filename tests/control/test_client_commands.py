@@ -3,8 +3,7 @@ import json
 import os
 from pathlib import Path
 import secrets
-from time import time
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 
@@ -13,8 +12,8 @@ from vectorops.runner import cli
 from vectorops.runner.control import client, commands, protocol as p
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
-from vectorops.runner.runner import mailbox
-from vectorops.runner.runner.execution_index import REFRESH_INTERVAL
+from vectorops.runner.runner import inspection, mailbox, summary_history
+from vectorops.runner.runner.sqlite_history import SQLiteHistory
 
 SOURCE = sources.read("control_catalog.py")
 
@@ -440,13 +439,7 @@ async def test_summary_pagination_and_starting_state(tmp_path: Path) -> None:
             )
         )
         await settled(connection, ids[0])
-        cached = await connection.execution_summaries()
-        assert [item.execution_id for item in cached.executions] == ids[::-1]
-        with patch(
-            "vectorops.runner.runner.execution_index.time",
-            return_value=time() + REFRESH_INTERVAL,
-        ):
-            refreshed = await connection.execution_summaries()
+        refreshed = await connection.execution_summaries()
         assert [item.execution_id for item in refreshed.executions] == [
             ids[0],
             ids[2],
@@ -454,6 +447,72 @@ async def test_summary_pagination_and_starting_state(tmp_path: Path) -> None:
         ]
         active = await connection.execution_summaries(p.SummaryQuery(active_only=True))
         assert [item.execution_id for item in active.executions] == ids[:0:-1]
+
+
+async def test_summary_pages_bound_ids_and_summary_reads(tmp_path: Path) -> None:
+    async with RunnerService(tmp_path) as service:
+        project = await service.runner.project()
+        index = await service.runner.execution_index()
+        generation, _ = await index.database.index_status()
+        assert await project.summaries.reconcile(
+            generation,
+            [
+                summary_history.Snapshot(
+                    source_id=f"source-{item}",
+                    revision=0,
+                    updated_at="1",
+                    summary=inspection.ExecutionSummary(
+                        execution_id=f"e{item:05d}", status="completed"
+                    ),
+                )
+                for item in range(10000)
+            ],
+        )
+
+        with (
+            patch.object(
+                project.summaries, "get_many", wraps=project.summaries.get_many
+            ) as read,
+            patch.object(
+                SQLiteHistory, "_connect", side_effect=AssertionError("history open")
+            ),
+            patch.object(
+                SQLiteHistory,
+                "_connect_readonly",
+                side_effect=AssertionError("history open"),
+            ),
+            patch.object(
+                service, "_summary", side_effect=AssertionError("per-item lookup")
+            ),
+            patch.object(
+                service.runner, "execution_ids", wraps=service.runner.execution_ids
+            ) as ids,
+            patch.object(
+                index, "discover", side_effect=AssertionError("unexpected scan")
+            ),
+        ):
+            first = await service._summaries(p.SummaryQuery(limit=2))
+            second = await service._summaries(
+                p.SummaryQuery(after=first.next_after, limit=2)
+            )
+            assert [item.execution_id for item in first.executions] == [
+                "e00000",
+                "e00001",
+            ]
+            assert first.next_after == "e00001"
+            assert [item.execution_id for item in second.executions] == [
+                "e00002",
+                "e00003",
+            ]
+            assert second.next_after == "e00003"
+            assert ids.await_args_list == [
+                call(after=None, limit=3, active=(), active_only=False),
+                call(after="e00001", limit=3, active=(), active_only=False),
+            ]
+            assert read.await_args_list == [
+                call(["e00000", "e00001"]),
+                call(["e00002", "e00003"]),
+            ]
 
 
 async def test_catalog_reuses_unchanged_source_and_isolates_bad_callable(

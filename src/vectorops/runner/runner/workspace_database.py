@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from contextlib import closing
+import json
 from pathlib import Path
 import sqlite3
 import time
@@ -40,13 +41,19 @@ class WorkspaceDatabase:
                     time.sleep(0.01)
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ValueError("unsupported workspace database schema version")
-            if version == 0:
+            if version < 2:
                 with connection:
                     connection.execute("BEGIN IMMEDIATE")
-                    if connection.execute("PRAGMA user_version").fetchone()[0] == 0:
+                    current = connection.execute("PRAGMA user_version").fetchone()[0]
+                    if current == 0:
                         self._initialize(connection)
+                    elif current == 1:
+                        self._initialize_summaries(connection)
+                        connection.execute(
+                            "UPDATE index_state SET generation = generation + 1, refreshed_at = NULL WHERE id = 1"
+                        )
             return connection
         except BaseException:
             connection.close()
@@ -69,7 +76,19 @@ class WorkspaceDatabase:
             "CREATE TABLE index_state (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, refreshed_at REAL)"
         )
         connection.execute("INSERT INTO index_state VALUES (1, 0, NULL)")
-        connection.execute("PRAGMA user_version = 1")
+        self._initialize_summaries(connection)
+
+    @staticmethod
+    def _initialize_summaries(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE execution_summaries (execution_id TEXT PRIMARY KEY, "
+            "source_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE summary_tombstones (execution_id TEXT NOT NULL, source_id TEXT NOT NULL, "
+            "PRIMARY KEY (execution_id, source_id))"
+        )
+        connection.execute("PRAGMA user_version = 2")
 
     def run_sync[T](self, operation: Callable[[sqlite3.Connection], T]) -> T:
         """Support startup loading off the event loop without retaining a connection."""
@@ -209,31 +228,90 @@ class WorkspaceDatabase:
         return await self.run(write)
 
     async def index_page(
-        self, after: typing.Optional[str], limit: typing.Optional[int]
+        self,
+        after: typing.Optional[str],
+        limit: typing.Optional[int],
+        *,
+        active: Sequence[str] = (),
+        active_only: bool = False,
     ) -> list[str]:
+        """Prepend unindexed active IDs in reverse activation order, then seek archives.
+
+        Separate tie and older-timestamp seeks bound work for mixed sort directions.
+        """
+        if limit is not None and limit < 0:
+            limit = None
+
         def read(connection: sqlite3.Connection) -> list[str]:
             with connection:
                 connection.execute("BEGIN")
-                where = ""
-                parameters: list[typing.Union[str, int]] = []
-                if after is not None:
+                indexed_active = (
+                    [
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT execution_id FROM execution_index "
+                            "WHERE execution_id IN (SELECT value FROM json_each(?)) "
+                            "ORDER BY updated_at DESC, execution_id ASC",
+                            (json.dumps(list(active)),),
+                        )
+                    ]
+                    if active
+                    else []
+                )
+                persisted = set(indexed_active)
+                selected = [
+                    identifier
+                    for identifier in reversed(active)
+                    if identifier not in persisted
+                ]
+                if active_only:
+                    selected.extend(indexed_active)
+                    if after is not None:
+                        if after not in selected:
+                            raise ValueError("execution index cursor does not exist")
+                        selected = selected[selected.index(after) + 1 :]
+                    return selected[:limit]
+                cursor = after
+                if cursor is not None and cursor in selected:
+                    selected = selected[selected.index(cursor) + 1 :]
+                    cursor = None
+                elif cursor is not None:
+                    selected = []
+                if cursor is None and limit is not None and len(selected) >= limit:
+                    return selected[:limit]
+                if cursor is not None:
                     row = connection.execute(
                         "SELECT updated_at FROM execution_index WHERE execution_id = ?",
-                        (after,),
+                        (cursor,),
                     ).fetchone()
                     if row is None:
                         raise ValueError("execution index cursor does not exist")
-                    where = (
-                        "WHERE updated_at < ? OR (updated_at = ? AND execution_id > ?)"
+                    updated_at = str(row[0])
+                    selected.extend(
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT execution_id FROM execution_index "
+                            "WHERE updated_at = ? AND execution_id > ? "
+                            "ORDER BY execution_id ASC LIMIT ?",
+                            (updated_at, cursor, -1 if limit is None else limit),
+                        )
                     )
-                    parameters.extend((str(row[0]), str(row[0]), after))
-                parameters.append(-1 if limit is None else limit)
-                return [
+                    if limit is not None and len(selected) >= limit:
+                        return selected
+                    where = "WHERE updated_at < ?"
+                    parameters: list[typing.Union[str, int]] = [updated_at]
+                else:
+                    where = ""
+                    parameters = []
+                parameters.append(-1 if limit is None else limit - len(selected))
+                selected.extend(
                     str(row[0])
                     for row in connection.execute(
-                        f"SELECT execution_id FROM execution_index {where} ORDER BY updated_at DESC, execution_id ASC LIMIT ?",
+                        f"SELECT execution_id FROM execution_index {where} "
+                        "ORDER BY updated_at DESC, execution_id ASC LIMIT ?",
                         parameters,
                     )
-                ]
+                )
+                return selected
 
         return await self.run(read)

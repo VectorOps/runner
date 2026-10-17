@@ -21,6 +21,9 @@ from vectorops.runner import diagnostics
 from vectorops.runner.runner.sqlite_writer import SQLiteWriter
 from vectorops.runner.runner.usage_history import UsageHistory
 from vectorops.runner.runner.usage_store import UsageStore
+from vectorops.runner.runner import summary_history
+from vectorops.runner.runner.summary_store import SummaryStore
+from vectorops.runner.runner.resources import finish_cleanup
 
 T = typing.TypeVar("T")
 
@@ -44,6 +47,7 @@ class SQLiteHistory:
         *,
         batch_size: int = 128,
         usage_store: typing.Optional[UsageStore] = None,
+        summary_store: typing.Optional[SummaryStore] = None,
         change_sink: typing.Optional[events.HistoryChangeSink] = None,
         event_sink: typing.Optional[events.StepEventSink] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
@@ -57,6 +61,7 @@ class SQLiteHistory:
         self._writer: typing.Optional[SQLiteWriter] = None
         self._closed = False
         self._usage_store = usage_store
+        self._summary_store = summary_store
         self._change_sink = change_sink
         self._event_sink = event_sink
         self._mailbox_sink = mailbox_sink
@@ -150,6 +155,7 @@ class SQLiteHistory:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 UsageHistory.initialize(connection)
+                summary_history.SummaryHistory.initialize(connection)
 
     async def _run(
         self,
@@ -162,19 +168,23 @@ class SQLiteHistory:
             list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
         ] = None,
     ) -> T:
-        if notifications is not None or (
-            self._change_sink is not None and (notify or workflow_ids or account)
+        if (
+            self._summary_store is not None
+            or notifications is not None
+            or (self._change_sink is not None and (notify or workflow_ids or account))
         ):
             changed: typing.Optional[tuple[str, ...]] = None
+            project_summary = False
             committed: tuple[
                 typing.Union[events.StepEvent, mailbox.InputsCancelled], ...
             ] = ()
 
             def tracked(connection: sqlite3.Connection) -> T:
-                nonlocal changed, committed
+                nonlocal changed, committed, project_summary
                 before = connection.total_changes
                 result = operation(connection)
                 committed = tuple(notifications or ())
+                project_summary = connection.total_changes != before
                 if self._change_sink is not None and connection.total_changes != before:
                     identifiers = set(workflow_ids)
                     if account:
@@ -188,6 +198,14 @@ class SQLiteHistory:
             try:
                 return await self._accounted(tracked, account=account)
             finally:
+                projection_cancelled = False
+                if project_summary and self._summary_store is not None:
+                    try:
+                        await finish_cleanup(
+                            asyncio.create_task(self._publish_summary())
+                        )
+                    except asyncio.CancelledError:
+                        projection_cancelled = True
                 for event in committed:
                     try:
                         if isinstance(event, events.StepEvent):
@@ -211,7 +229,28 @@ class SQLiteHistory:
                             level=diagnostics.Level.ERROR,
                             error=exc,
                         )
+                if projection_cancelled:
+                    raise asyncio.CancelledError
         return await self._accounted(operation, account=account)
+
+    async def _publish_summary(self) -> None:
+        """A projection failure cannot undo or fail an already committed history write."""
+        assert self._summary_store is not None
+        try:
+            snapshot = await self.summary_snapshot()
+        except KeyError:
+            return
+        except Exception as exc:
+            diagnostics.log(
+                "summary.snapshot_failed", level=diagnostics.Level.ERROR, error=exc
+            )
+            return
+        try:
+            await self._summary_store.record(snapshot)
+        except Exception as exc:
+            diagnostics.log(
+                "summary.publish_failed", level=diagnostics.Level.ERROR, error=exc
+            )
 
     async def _accounted(
         self, operation: Callable[[sqlite3.Connection], T], *, account: bool
@@ -540,6 +579,7 @@ class SQLiteHistory:
                             ),
                         )
                         assert cursor.lastrowid is not None
+                        UsageHistory.link(connection, step)
                         notifications.append(
                             events.StepEvent(
                                 kind="step.completed",
@@ -631,32 +671,19 @@ class SQLiteHistory:
     async def execution_summary(self) -> inspection.ExecutionSummary:
         """Read persisted totals and project context from the authoritative root path."""
 
-        await self._prepare()
-
         def read() -> inspection.ExecutionSummary:
             with closing(self._connect_readonly()) as connection:
-                row = connection.execute(
-                    "SELECT payload FROM execution WHERE singleton = 1"
-                ).fetchone()
-                if row is None:
-                    raise KeyError("execution state")
-                execution = state.ExecutionRecord.model_validate_json(row[0])
-                workflow = self._workflow(connection, execution.root_workflow_id)
-                pending = connection.execute(
-                    "SELECT COUNT(*) FROM input_requests WHERE json_extract(payload, '$.status') = 'pending'"
-                ).fetchone()[0]
-                return inspection.ExecutionSummary(
-                    execution_id=execution.id,
-                    reference=workflow.definition_ref,
-                    root_workflow_id=workflow.id,
-                    name=workflow.name,
-                    status=execution.status,
-                    pending_inputs=pending,
-                    usage=usage.ExecutionUsage(
-                        totals=UsageHistory.snapshot(connection)[1],
-                        root_context=UsageHistory.root_context(connection, workflow.id),
-                    ),
-                )
+                return summary_history.SummaryHistory.summary(connection)
+
+        return await _offload(read)
+
+    async def summary_snapshot(self) -> summary_history.Snapshot:
+        """Prepare legacy projection metadata, then capture one committed revision."""
+        await self._prepare()
+
+        def read() -> summary_history.Snapshot:
+            with closing(self._connect_readonly()) as connection:
+                return summary_history.SummaryHistory.snapshot(connection)
 
         return await _offload(read)
 

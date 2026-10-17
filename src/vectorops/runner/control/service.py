@@ -416,23 +416,32 @@ class RunnerService:
     async def _summary(self, identifier: str) -> inspection.ExecutionSummary:
         active = self._active.get(identifier)
         if active is not None and active.status == "starting":
+            return self._present_summary(identifier, None)
+        try:
+            summary = await self.runner.execution_summary(identifier)
+        except (FileNotFoundError, KeyError):
+            return self._present_summary(identifier, None)
+        return self._present_summary(identifier, summary)
+
+    def _present_summary(
+        self, identifier: str, summary: typing.Optional[inspection.ExecutionSummary]
+    ) -> inspection.ExecutionSummary:
+        active = self._active.get(identifier)
+        if active is not None and active.status == "starting":
             return inspection.ExecutionSummary(
                 execution_id=identifier,
                 reference=self._references.get(identifier),
                 status="starting",
                 active=True,
             )
-        try:
-            summary = await self.runner.execution_summary(identifier)
-        except (FileNotFoundError, KeyError):
+        if summary is None:
             if active is None:
-                raise
+                raise KeyError(identifier)
             summary = inspection.ExecutionSummary(
                 execution_id=identifier,
                 reference=self._references.get(identifier),
                 status=active.status,
             )
-        active = self._active.get(identifier)
         return summary.model_copy(
             update={
                 "active": active is not None,
@@ -445,22 +454,20 @@ class RunnerService:
         )
 
     async def _summaries(self, query: p.SummaryQuery) -> p.SummaryPage:
-        identifiers = await self.runner.execution_ids(limit=None)
-        persisted = set(identifiers)
-        selected = [
-            identifier
-            for identifier in reversed(tuple(self._active))
-            if identifier not in persisted
-        ] + identifiers
-        if query.active_only:
-            selected = [
-                identifier for identifier in selected if identifier in self._active
-            ]
-        if query.after is not None:
-            selected = selected[selected.index(query.after) + 1 :]
+        selected = await self.runner.execution_ids(
+            after=query.after,
+            limit=query.limit + 1,
+            active=tuple(self._active),
+            active_only=query.active_only,
+        )
+        persisted = await self.runner.execution_summaries(selected[: query.limit])
         return p.SummaryPage(
             executions=[
-                await self._summary(identifier)
+                (
+                    self._present_summary(identifier, persisted.get(identifier))
+                    if identifier in persisted or identifier in self._active
+                    else await self._summary(identifier)
+                )
                 for identifier in selected[: query.limit]
             ],
             next_after=(

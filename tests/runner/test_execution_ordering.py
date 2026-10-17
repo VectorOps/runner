@@ -1,5 +1,4 @@
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -41,15 +40,7 @@ async def test_execution_order_uses_updated_time_and_id_cursors(tmp_path: Path) 
         record.model_copy(update={"updated_at": "2025-01-04T00:00:00+00:00"})
     )
     restarted = WorkflowRunner(tmp_path)
-    assert await restarted.execution_ids() == ["b", "z", "c", "a"]
-    index = await restarted.execution_index()
-    _, refreshed_at = await index.database.index_status()
-    assert refreshed_at is not None
-    with patch(
-        "vectorops.runner.runner.execution_index.time",
-        return_value=refreshed_at + 30,
-    ):
-        assert await restarted.execution_ids() == ["a", "b", "z", "c"]
+    assert await restarted.execution_ids() == ["a", "b", "z", "c"]
 
 
 async def test_empty_execution_list(tmp_path: Path) -> None:

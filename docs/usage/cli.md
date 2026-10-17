@@ -1,378 +1,262 @@
 # Workflow CLI
 
-Use `vops-runner` to start workflows, resume interrupted executions, inspect persisted progress, and export history for external analysis.
+Use `vops-runner` to run workflows, connect to a running daemon, answer requests,
+and inspect or export executions. `uv run python -m vectorops.runner` accepts the
+same commands.
 
 ## Quick start
 
-Create `.voc/workflows/example.py` in your project:
+Create `.voc/workflows/example.py` in an existing project directory:
 
 ```python
 async def workflow(ctx, value: int = 0) -> int:
     return value + 1
 ```
 
-Run it with JSON keyword arguments:
+From that project directory, run:
 
 ```bash
 uv run vops-runner start example:workflow --input '{"value": 4}' --execution-id example-run
-uv run vops-runner status
-uv run vops-runner export --output example-run.jsonl
+uv run vops-runner status example-run
+uv run vops-runner export example-run --output example-run.jsonl
 ```
 
-Start prints a JSON object containing `execution_id` and `result`. It runs in the foreground. Errors go to stderr with exit code 1, argument errors use exit code 2, and Ctrl-C uses exit code 130.
+`start` runs in the foreground and prints the execution ID and result:
+
+```json
+{"execution_id": "example-run", "result": 5}
+```
+
+Choose the mode that fits your task:
+
+| Task | Command |
+| --- | --- |
+| Run a workflow in the foreground | `start REFERENCE` |
+| Continue a saved execution | `resume [EXECUTION_ID]` |
+| Inspect local saved progress | `status [EXECUTION_ID]` |
+| Export local history | `export [EXECUTION_ID] --output FILE` |
+| Run interactive or concurrent executions | `daemon serve`, then `client --port PORT ...` |
+
+Use `--help` on any command to see its arguments.
+
+## Workspace location
+
+By default, commands use the current project directory and keep runner files in
+its `.voc/` subdirectory:
+
+| Path | Purpose |
+| --- | --- |
+| `.voc/config.toml` | Optional project configuration |
+| `.voc/workflows/` | Local Python workflow files |
+| `.voc/data/` | Saved executions and logs |
+
+Place global options before the command:
+
+```bash
+uv run vops-runner --project /path/to/project status
+uv run vops-runner --project /path/to/project --workspace-directory .runner status
+uv run vops-runner --project /path/to/existing-workspace --workspace-directory '' status
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--project PATH` | Current directory | Existing project directory |
+| `--workspace-directory PATH` | `VOPS_RUNNER_WORKSPACE_DIRECTORY`, then `.voc` | Relative runner directory; an empty value uses the project directory directly |
+| `--config-dir PATH` | Runner-global configuration location | Select global configuration and credentials; see [daemon setup](daemon.md) |
+
+Startup creates missing runner directories, but does not generate `config.toml`
+or move configuration from another location. Workflow and data directory overrides
+are described in [component configuration](../config/components.md).
+
+Tools use the project directory as their local target unless you configure a
+different environment. Changing `--workspace-directory` does not change that target.
+Commit non-secret configuration and workflow source; exclude the data directory
+from version control. For a complete backup, stop the runner and copy its data
+directory as a unit. Exports are for analysis, not backup restoration.
 
 ## Start and resume
 
 ```bash
-uv run vops-runner --project /path/to/workspace start example:workflow
-uv run vops-runner --project /path/to/workspace resume example-run
+uv run vops-runner start example:workflow --input '{"value": 4}'
+uv run vops-runner resume example-run
 ```
 
-`--project` precedes the command and defaults to the current directory. Runner files live in its `.voc/` subdirectory by default. Workspace paths follow `.voc/config.toml`, including workflow and data directory overrides. `start` accepts `builtin:name` for a registered built-in, an explicit `path:callable` reference relative to the workflow directory without `.py`, or `python:package.module:callable` for a library workflow. Local and library references require a callable; built-ins identify their entry point by name. There is no `--callable` option. Input defaults to `{}`, and execution IDs are generated unless `--execution-id` is supplied. Existing execution IDs are never overwritten.
+Supported workflow references are:
 
-### Workspace location
+| Form | Meaning |
+| --- | --- |
+| `example:workflow` | Callable `workflow` in `workflows/example.py` |
+| `builtin:agent` | Registered built-in workflow |
+| `python:package.module:workflow` | Callable in an importable Python module |
 
-The project directory must already exist. Startup creates the selected workspace
-directory and its workflow/data directories if missing; `config.toml` remains
-optional and is not generated yet. Existing project-root configuration is not
-automatically loaded or moved into `.voc`.
+Local paths are relative to the workspace's workflow directory, without `.py`.
+Local and library references must include the callable name.
 
-```text
-project/
-  .voc/
-    config.toml
-    workflows/
-    data/
-      workspace.sqlite3
-      runner.lock
-      executions/
-      logs/
-```
+`--input` accepts a JSON object and defaults to `{}`. Execution IDs are generated
+unless `--execution-id` is supplied. Existing IDs are never overwritten. Starting
+the same workflow twice creates two independent executions.
 
-`workspace.sqlite3` stores the last-execution pointer, active execution IDs,
-permanent component overrides, launch-request idempotency receipts, and the
-30-second execution index cache. A shared bounded SQLite worker serializes runtime
-access off the event loop; transactions protect updates, and indexed queries page
-execution IDs without loading the entire cache. SQLite can create `-wal` and `-shm`
-sidecars while the database is open. `runner.lock` remains an OS-level ownership
-lease, not a state file. Execution histories stay in
-`executions/<execution-id>/history.sqlite3`; logs and global credentials are unchanged.
+`resume` uses the saved configuration and input. Omitting the execution ID selects
+the last execution. Completed operations reuse their saved results; interrupted
+activities can run again, so check the workflow's guidance before retrying operations
+with external side effects. Resuming a completed execution returns its saved result.
 
-Workspace state is SQLite-only. Old `runner-state.json`, `config-overrides.json`,
-`control.sqlite3`, and `execution-index.json` files are ignored; no migration is
-performed. A new workspace database starts with empty state and rebuilds its
-execution index from existing execution histories. Invalid state in the workspace
-database fails rather than being silently reset.
+Only one foreground writer can own a workspace. Stop the original runner before
+resuming locally. To run several executions concurrently, start a daemon and use
+the client commands below.
 
-Use `--workspace-directory` before the command to choose a different relative
-subdirectory. Pass an empty string to use the project directory directly:
-
-```bash
-uv run vops-runner --project ./project --workspace-directory .runner status
-uv run vops-runner --project ./existing-workspace --workspace-directory '' status
-```
-
-Selection order is the explicit option, `VOPS_RUNNER_WORKSPACE_DIRECTORY`, then
-`.voc`. An empty environment value also selects the direct layout. Absolute paths,
-parent traversal, and symlinks escaping the project are rejected. Workflow and
-data directory overrides remain relative to the selected workspace and cannot
-escape it. Commit non-secret configuration and workflow source; ignore `.voc/data/`
-(or the configured data location). Global credentials remain outside the project.
-
-Python entry points `RunnerProject.open`, `WorkflowRunner`, `RunnerService`,
-`embedded`, and `daemon.serve` accept the same `workspace_directory` keyword.
-`None` uses the environment/default; `""` selects the direct layout. Project identity
-remains the supplied project root; `RunnerProject.workspace_path` identifies the
-runner file directory. Without an `[environment]` section, tools use a local target
-rooted at the supplied project directory, not `.voc`. An explicit
-`environment.base_project_path` overrides that default. Changing the runner file
-directory does not change the target. Default attachment does not bypass tool
-approval or enable shell execution.
-
-`resume [EXECUTION_ID]` uses persisted configuration, input, and selected root and child heads. Omitting the ID selects the last execution. Completed operations replay their stored outcomes; interrupted activities restart with their existing step identity. Activity implementations remain responsible for external side-effect idempotency. Resuming a completed execution replays its result. Stop the original writer before resuming; the project permits only one writer.
-
-This foreground CLI owns the workspace writer lock. For concurrent independent executions in one workspace, run a [daemon](daemon.md) and use its [execution-oriented control API](../reference/control-protocol.md#concurrent-execution-lifecycle) instead of launching competing foreground writers.
-
-## Built-in interactive workflow
-
-`builtin:agent` needs no workspace Python file. It requests a user message, runs
-the coding agent, and repeats with the same conversation history until stopped.
-Text and images use the existing typed chat input contract.
-
-Configure models in `<project>/.voc/config.toml` by default, using model IDs supported by your
-provider and [configured credentials](daemon.md):
-
-```toml
-[components.workflows.defaults]
-strong_model = "openai/gpt-5"
-medium_model = "openai/gpt-5-mini"
-weak_model = "openai/gpt-5-nano"
-thinking_level = "high"
-```
-
-These fields are optional. An unset tier inherits `components.llm.model`; an unset
-thinking level inherits `components.llm.reasoning`. At least the selected tier's
-model or the fallback model must be configured before generation. Thinking levels
-are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; provider/model support
-still applies. The coding agent resolves its selected LLM profile before
-generating each turn.
-Runtime model and thinking-level overrides therefore apply to the next turn,
-without clearing conversation history. Completed reads replay their recorded
-values; new turns read current effective settings. TOML edits require runner restart.
+## Connect to an existing runner
 
 Start a daemon in one terminal:
 
 ```bash
-uv run vops-runner --project /path/to/workspace daemon serve --port 8765
+uv run vops-runner --project /path/to/project daemon serve --port 8765
 ```
 
-From another terminal, discover and start the coding agent:
+From another terminal:
 
 ```bash
-uv run vops-runner client --port 8765 workflow show builtin:agent
-uv run vops-runner client --port 8765 execution start builtin:agent
-```
-
-The agent accepts no workflow input parameters and uses the `strong` LLM profile.
-Configure `components.llm.profiles.strong` to override shared LLM settings.
-Use the returned execution ID to list the pending request, then answer its request ID:
-
-```bash
-uv run vops-runner client --port 8765 input list EXECUTION_ID
-uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value '{"content":[{"type":"text","text":"Hello"}]}'
-```
-
-Use `execution watch EXECUTION_ID` in a separate client before sending input to
-observe live response events. Each turn creates a new request ID. End the loop
-with `execution stop EXECUTION_ID`. The foreground command
-`uv run vops-runner --project /path/to/workspace start builtin:agent` also resolves
-the workflow, but it does not provide a stdin chat interface; use the daemon/client
-flow for interactive conversations.
-
-Built-in references remain `builtin:name` in descriptors and execution history.
-Only explicitly registered names are accepted; unknown names do not fall back to
-files or arbitrary Python imports. Registered workflows are `builtin:agent`
-and `builtin:helper`.
-
-## Coding agent and helper
-
-`builtin:agent` is the interactive coding workflow. It uses a detailed coding
-prompt, retains its conversation and plan between messages, and delegates bounded
-research to `builtin:helper` through `run_agent`. The helper accepts a required `task`
-string, returns a text report, and never requests a conversational user message.
-Tool approvals and authentication can still require client input.
-
-Both workflows use the project directory as their local target by default.
-To target a different directory, add an explicit environment section to the
-workspace's `config.toml`. The component settings below are optional overrides:
-
-```toml
-[environment]
-kind = "local"
-base_project_path = "/absolute/path/to/repository"
-
-[components.workflows.agent]
-agents = ["builtin:helper"]
-
-[components.workflows.helper]
-thinking_level = "xhigh"
-temperature = 0.4
-max_rounds = 30
-```
-
-The helper-specific thinking level and temperature shown here match the Orion-style
-example; they are optional, not hard-coded provider assumptions. Omit them when a
-model does not support these options. Defaults and precedence are:
-
-| Setting | Default | Behavior |
-| --- | --- | --- |
-| Agent LLM profile | `strong` | Uses `components.llm.profiles.strong`, inheriting shared LLM settings |
-| `workflows.agent.agents` | `["builtin:helper"]` | Default child references; `[]` removes default `run_agent`; explicit collection configuration takes precedence |
-| `workflows.agent.tool_collection` | `agent` | Named tool collection for the parent |
-| `workflows.helper.tool_collection` | `helper` | Named tool collection for the helper |
-| Helper model | Shared `weak_model` | Falls back to `components.llm.model` when unset |
-| `workflows.helper.thinking_level` | Unset | Overrides shared thinking level, which otherwise inherits `components.llm.reasoning` |
-| `workflows.helper.temperature` | Unset | Inherits `components.llm.temperature` |
-| `workflows.helper.max_rounds` | `30` | Positive generation-round limit per delegated task; exhaustion fails the task |
-
-Agent prompt and tool settings are recorded at invocation; shared model defaults
-are refreshed each turn. The helper reads shared and helper-specific settings
-directly through `get_config(ctx, ...)` for each delegated task. Available child descriptors are
-recorded before the parent's first input. Discovery does not grant delegation
-access. Each child has its own conversation; the parent must supply task context.
-
-Start the parent against a running daemon:
-
-```bash
-uv run vops-runner client --port 8765 execution start builtin:agent
-```
-
-Use the `input list` and typed `input send --value` flow above. To start the
-helper directly:
-
-```bash
-uv run vops-runner client --port 8765 execution start builtin:helper --input '{"task":"Locate the parser tests. Report relevant paths and evidence only; do not change files."}'
-```
-
-### Prompts and capabilities
-
-Packaged prompts live in `src/vectorops/runner/workflows/prompts.py`. The parent
-contract covers planning, scoped investigation, minimal patches, validation,
-concise reporting, and precise delegation. The helper contract prohibits file
-changes, mutating commands, recursive delegation, and unsolicited scope expansion;
-it asks for evidence, uncertainties, and at most 300 words unless requested otherwise.
-
-Both workflows accept optional `system_prompt` and `system_append` strings in their
-configuration sections:
-
-```toml
-[components.workflows.agent]
-system_append = "Keep changes small and always report which tests were run."
-
-[components.workflows.helper]
-system_prompt = "You are a read-only research assistant. Report evidence, not guesses."
-system_append = "Include relevant file paths and keep the report under 200 words."
-```
-
-The final prompt is the configured `system_prompt` (or packaged default when omitted),
-followed by `system_append`, followed by automatic target context. An empty
-`system_prompt` deliberately removes the packaged base; an empty `system_append`
-adds nothing. Text is preserved without interpolation. Replacing the base also
-replaces its role instructions, so include any restrictions you want to retain.
-Neither setting changes tools or approval policy. Prompt settings are recorded at
-invocation and reused on resume; editing config does not rewrite an active
-conversation.
-
-The direct configuration-read sequence replaces the old settings-loader sequence.
-Start new built-in executions when upgrading from that implementation; old activity
-ordering and legacy settings-schema digests are not migrated.
-
-Each workflow records target identity/platform, up to 64 KiB of root `AGENTS.md`,
-and up to 32 entries under `.vocode/skills` from the target environment. Missing
-instructions/skills are optional; other read errors fail rather than silently
-discard instructions. Truncation is reported in the prompt. Skill directory paths
-are supplied for on-demand `SKILL.md` reads; skill bodies are not all injected.
-Nested `AGENTS.md` discovery is guided by the prompt, not automatically traversed.
-Recorded context is reused on resume, even if target files have changed.
-
-By default the helper has `read_file`, bounded non-recursive `list_files`, `exec`, and
-`poll_process`. The parent additionally has `apply_patch`, `update_plan`, process
-stdin/termination/listing tools, and the configured `run_agent` binding. Focused
-search uses `rg` through `exec`; no unavailable semantic search or summary tool is
-advertised. Patches default to the existing `v4a` format.
-
-Use [named tool collections](../config/tool-collections.md) to replace these sets,
-configure tools by name, or add selected MCP tools and registered custom factories.
-Changing a collection changes available capabilities, not the workflow's role prompt;
-keep helper collections consistent with its read-only, non-delegating contract.
-
-All tool calls use the existing approval policy; these workflows do not install
-auto-approval rules. The helper's read-only restriction is a **prompt contract, not
-a sandbox**: approved `exec` commands can mutate files or access resources beyond
-the filesystem tool root. Review commands before approving them and do not grant
-broad execution approval when read-only enforcement is required. Shell execution
-remains disabled unless explicitly enabled by the environment policy. Project-
-specific Ghidra instructions are not included in the generic prompts.
-
-## Connect to an existing runner
-
-Start a daemon in one terminal, then use its reported port from another:
-
-```bash
-uv run vops-runner --project /path/to/workspace daemon serve --port 8765
+uv run vops-runner client --port 8765 info
 uv run vops-runner client --port 8765 workflow list
-uv run vops-runner client --port 8765 workflow show mass_validator:main
-uv run vops-runner client --port 8765 execution start mass_validator:main --input-file args.json
+uv run vops-runner client --port 8765 workflow show example:workflow
+uv run vops-runner client --port 8765 execution start example:workflow --input-file args.json
 uv run vops-runner client --port 8765 execution list --active
 ```
 
-Client commands never acquire the workspace writer lock or start an embedded
-runner. They reuse the existing authenticated control client. `--project` does not
-select the remote workspace; the connected daemon owns it. Use `client info` to
-verify the workspace and instance. Place connection options before the command:
-`--host` defaults to `127.0.0.1`, `--port` is required, and `--token-file` or
-`--token-stdin` can replace the configured token. `--config-dir` remains a global
-option. Remote runners require an SSH-forwarded loopback port, not direct
-unencrypted network access.
+The client connects to an existing daemon; it does not start one. `--project`
+does not select the remote workspace. Use `client info` to confirm the connection.
 
-| Command after `client --port PORT` | Behavior |
+Connection options go before the command family. `--port` is required;
+`--host` defaults to `127.0.0.1`. Use configured authentication, `--token-file FILE`,
+or `--token-stdin`. For credentials and SSH forwarding, see the
+[daemon guide](daemon.md).
+
+| Command after `client --port PORT` | Purpose |
 | --- | --- |
-| `info` | Show runner identity and workspace |
-| `workflow list` | Discover built-ins and local decorated definitions with active execution, pending-input, and authentication-wait counts |
-| `workflow show REFERENCE` | Show descriptor and input schema; explicit undecorated/library references are supported |
-| `execution start REFERENCE --input JSON` | Start a background execution; `--input-file FILE` is an alternative |
-| `execution list [--active]` | Show root reference, lifecycle status, live ownership, and pending waits |
-| `execution show EXECUTION_ID` | Show one execution summary |
-| `execution resume EXECUTION_ID` | Resume persisted configuration and history |
-| `execution stop EXECUTION_ID` | Request cancellation, including children |
-| `execution watch EXECUTION_ID` | Print current summary and live JSONL events until terminal notification or Ctrl-C |
-| `input list EXECUTION_ID` | List pending requests, including child workflows; filter with `--workflow-id` or `--channel` |
-| `input show EXECUTION_ID REQUEST_ID` | Show full request payload and expected response type |
-| `input send EXECUTION_ID REQUEST_ID ...` | Answer an existing pending request |
-| `shell` | Run repeated commands on one connection |
+| `info` | Show the connected runner and workspace |
+| `workflow list` | List available workflow references |
+| `workflow show REFERENCE` | Show a workflow's description and input schema |
+| `execution start REFERENCE` | Start an execution; accepts `--input JSON` or `--input-file FILE` |
+| `execution list [--active]` | List executions and pending waits |
+| `execution show EXECUTION_ID` | Show an execution summary |
+| `execution resume EXECUTION_ID` | Resume a saved execution |
+| `execution stop EXECUTION_ID` | Request cancellation, including child workflows |
+| `execution watch EXECUTION_ID` | Print the summary and live events until execution ends or you interrupt the client |
+| `input list EXECUTION_ID` | List requests awaiting a response |
+| `input show EXECUTION_ID REQUEST_ID` | Inspect a request and its expected response |
+| `input send EXECUTION_ID REQUEST_ID ...` | Answer a pending request |
+| `auth login PROVIDER` | Authenticate with a provider before running workflows |
+| `auth profile list` | Show authentication profiles; `add`, `switch`, and `delete` take a profile name |
+| `shell` | Issue repeated commands over one connection |
 
-Lists accept `--limit` (default 100, maximum 500) and `--after`; output identifies
-the next cursor when more results exist. Add `--json` before the command family
-or after a leaf command for machine-readable output. Ordinary output is compact;
-`show` provides full details. `workflow list` imports trusted workspace Python and
-reports per-file or per-callable discovery errors without hiding valid definitions.
-It rescans filenames and reuses unchanged source modules. Imported workflow aliases
-and undecorated helpers are not enumerated. Definitions and executions are distinct:
-starting the same reference twice creates two independent executions.
+List commands accept `--limit` (default 100, maximum 500) and `--after CURSOR`.
+Output supplies a cursor when more results are available. Add `--json` before the
+command family or after a leaf command for machine-readable output:
 
-Pending counts include child mailbox requests and tool confirmations. They do not
-replace lifecycle status: an execution with a waiting child can also be doing work.
-Authentication waits are reported separately. Catalog counts aggregate active
-executions by their root reference, not child-definition reference. Summaries are
-live views, not a globally atomic snapshot across all execution databases.
+```bash
+uv run vops-runner client --port 8765 --json execution list --limit 20
+```
 
-### Send input
+## Send input
+
+Inspect the pending request before choosing its response format:
 
 ```bash
 uv run vops-runner client --port 8765 input list EXECUTION_ID
-uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --text-file ghidra.txt
+uv run vops-runner client --port 8765 input show EXECUTION_ID REQUEST_ID
+uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --text "Continue"
+```
+
+Choose exactly one input source:
+
+| Option | Value |
+| --- | --- |
+| `--text TEXT` | Plain text |
+| `--text-file FILE` | UTF-8 text from a local file, preserving newlines |
+| `--value JSON` | A JSON response matching the request |
+| `--json-file FILE` | A JSON response from a local file |
+
+For example, approve a tool request with:
+
+```bash
 uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value '{"approved":true}'
 ```
 
-Choose exactly one of `--text`, `--text-file`, `--value` (JSON), or `--json-file`.
-Files are local to the client, read as UTF-8, and bounded by the control frame size;
-JSON escaping and packet overhead can further reduce the effective payload limit.
-Text files preserve newlines. JSON responses may be objects, arrays, or scalars.
-The request's declared response type is checked before sending. Input is an answer
-to a specific pending request, not an unsolicited message queue. Acceptance confirms
-delivery, not successful workflow completion.
+Requests can come from child workflows as well as the main workflow. Filter the
+list with `--workflow-id` or `--channel`. Sending input answers a specific request;
+it does not create an unsolicited message. Acceptance does not mean the workflow
+has completed successfully.
 
-Start, resume, and input send accept `--idempotency-key`. A generated key is printed
-to stderr before mutation. If a request times out or disconnects, its outcome may
-be unknown: retry with that same key and arguments, not a newly generated key.
-The client never automatically resends mutations.
+### Retry after a disconnect
 
-### Connected shell
+Start, resume, and input-send commands accept `--idempotency-key`. When omitted,
+the client generates a key and prints it to stderr before sending the request.
+
+If a timeout or disconnect leaves the outcome uncertain, retry with **the same
+key and arguments**. A new key can submit a second operation. The client does not
+automatically resend these commands.
+
+## Coding agent and helper
+
+Use `builtin:agent` for an interactive coding conversation. Configure the models
+and credentials before sending its first message. For example, in
+`.voc/config.toml`:
+
+```toml
+[components.llm]
+model = "openai/gpt-5-nano"
+
+[components.llm.profiles.strong]
+model = "openai/gpt-5"
+```
+
+Choose models supported by your provider. See [named LLM profiles](../config/components.md#named-llm-profiles)
+for settings and [daemon setup](daemon.md) for credentials.
+
+Against a running daemon:
+
+```bash
+uv run vops-runner client --port 8765 execution start builtin:agent
+uv run vops-runner client --port 8765 input list EXECUTION_ID
+uv run vops-runner client --port 8765 input send EXECUTION_ID REQUEST_ID --value '{"content":[{"type":"text","text":"Investigate the failing tests."}]}'
+```
+
+Use the execution ID returned by `start` and the request ID returned by `input list`.
+Run `execution watch EXECUTION_ID` in another terminal before sending the message
+to observe the response. Each turn creates a new request ID. End the conversation
+with `execution stop EXECUTION_ID`.
+
+The foreground `start builtin:agent` command does **not** provide a stdin chat
+interface. Use the daemon/client flow for conversations and tool approvals.
+
+`builtin:helper` accepts a task and returns a report without a conversational input
+loop:
+
+```bash
+uv run vops-runner client --port 8765 execution start builtin:helper --input '{"task":"Locate the parser tests and report relevant paths. Do not change files."}'
+```
+
+The helper can still request tool approval or authentication. Its read-only role
+is an instruction, not a sandbox: review execution commands before approving them.
+For capability configuration, see [named tool collections](../config/tool-collections.md).
+
+## Connected shell
 
 ```bash
 uv run vops-runner client --port 8765 shell
 ```
 
-```text
-/workflow list
-/execution start mass_validator:main --input-file args.json
-/execution list
-/input list EXECUTION_ID
-/input send EXECUTION_ID REQUEST_ID --text "Continue"
-/execution watch EXECUTION_ID
-/help
-/exit
-```
+At the prompt, enter the same commands used after `client --port PORT`, for example
+`workflow list`, `execution list`, or `input list EXECUTION_ID`. Use `help` for
+commands and `exit` to disconnect. Quoting works as in the one-shot examples.
 
-Shell commands share the one-shot parser and support shell-like quoting; the leading
-slash is optional. A bare family such as `/input` shows its help, and leaf commands
-accept `--help`. Invalid commands report errors without ending the session.
-There is no implicit selected execution. No live events are subscribed to until an
-explicit `execution watch`. Watching occupies the shell until completion; use another
-client to answer inputs meanwhile. EOF, `/exit`, Ctrl-C, or disconnect closes only
-the client, never the daemon or its executions. Reconnect explicitly after a lost
-connection and refresh lists/history. Shell authentication uses configured credentials
-or `--token-file`; `--token-stdin` is rejected because stdin carries commands.
+There is no implicit selected execution. `execution watch` occupies the shell;
+use another client to answer input while watching. Exiting or disconnecting the
+shell does not stop the daemon or its executions. After a lost connection,
+reconnect and check the current state before retrying a mutation.
+
+Use configured authentication or `--token-file` for the shell. `--token-stdin`
+is unavailable because stdin is used for commands.
 
 ## Inspect status and statistics
 
@@ -380,9 +264,13 @@ or `--token-file`; `--token-stdin` is rejected because stdin carries commands.
 uv run vops-runner status example-run
 ```
 
-`status [EXECUTION_ID]` emits JSON with `execution` metadata and `stats`: workflow count, step count, and counts by operation and outcome kind. Counts include child workflows and all retained branches, not only selected paths. Without an ID it selects the last execution.
+`status [EXECUTION_ID]` prints JSON containing saved execution metadata and counts
+of workflows and steps, including counts by operation and outcome. Counts include
+children and all retained branches. Without an ID, it selects the last execution.
 
-Status and export read a consistent committed SQLite snapshot without taking the writer lock, so they work from another terminal while a workflow runs. Buffered streaming snapshots appear only after persistence. Lifecycle status is persisted: `running` can also indicate an execution interrupted by a crash, not proof of a live process. Checkpoint timestamps reflect persisted checkpoints, not the inspection time. Activity timing, token usage, and costs are not recorded or inferred.
+You can run `status` while a workflow is active. It reports saved progress, so the
+latest streaming output might not yet appear. A saved `running` status can remain
+after a crash; use daemon client commands to check whether an execution is live.
 
 ## Export JSONL
 
@@ -390,15 +278,26 @@ Status and export read a consistent committed SQLite snapshot without taking the
 uv run vops-runner export example-run --output analysis.jsonl
 ```
 
-`export [EXECUTION_ID] --output FILE` requires a new output file and an existing parent directory. It refuses to overwrite any existing file. Without an ID it selects the last execution.
+The output file must not already exist, and its parent directory must exist.
+Without an execution ID, the command exports the last execution.
 
-The UTF-8 file contains:
+The UTF-8 export contains an execution header followed by saved workflow steps,
+including children and retained branches. You can export while an execution is
+running. Export is an analysis format, not an import or restore interface.
+Inputs, results, and errors can contain sensitive data; protect the file accordingly.
 
-- One header entry with `kind: "execution.header"`, `version: 1`, `execution` metadata, and a `workflows` array containing every stored workflow configuration.
-- One normalized workflow step per following line, preserving its `id`, `workflow_id`, `previous_step_id`, `operation`, `outcome`, and `deferred_delivery` fields.
+## Exit codes
 
-Steps follow insertion order across the entire execution, including children and retained branches. Replacement snapshots export only the latest committed value for each step. Use predecessor links to reconstruct branches and `execution.checkpoint.heads` to identify selected paths. The entire export uses one committed snapshot; it is an analysis format, not an import or restore interface. Inputs, results, and error messages can contain sensitive data; protect the exported file accordingly.
+| Code | Meaning |
+| --- | --- |
+| `0` | Command completed successfully |
+| `1` | Runtime or client-command error; details go to stderr |
+| `2` | Top-level argument parsing error |
+| `130` | Interrupted with Ctrl-C |
 
 ## Related
 
+- [Run and connect to a daemon](daemon.md)
+- [Component configuration](../config/components.md)
 - [Workflow authoring and replay](../development/workflows.md)
+- [Control protocol for integrations](../reference/control-protocol.md)

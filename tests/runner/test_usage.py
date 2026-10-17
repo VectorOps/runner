@@ -114,6 +114,45 @@ async def test_workflow_tree_persists_own_and_subtree_usage(tmp_path: Path) -> N
     assert (await reopened.get_workflow("root")).usage == root.usage
 
 
+async def test_summary_is_readonly_while_writer_has_uncommitted_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(history)
+    await history.append_step(generation("call"))
+
+    def forbid_initialization(self: SQLiteHistory) -> None:
+        raise AssertionError("summary must not initialize or migrate history")
+
+    monkeypatch.setattr(SQLiteHistory, "_initialize", forbid_initialization)
+    with closing(sqlite3.connect(history.path)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "UPDATE workflows SET payload = json_set(payload, '$.name', 'uncommitted')"
+        )
+        try:
+            summary = await asyncio.wait_for(
+                SQLiteHistory(history.path).execution_summary(), 1
+            )
+        finally:
+            writer.rollback()
+    assert summary.name is None
+    assert summary.usage is not None and summary.usage.root_context is not None
+    assert summary.usage.root_context.step_id == "call"
+    assert summary.usage.totals.input_tokens == 100
+
+
+async def test_summary_rejects_unknown_schema_without_mutation(tmp_path: Path) -> None:
+    history = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(history)
+    with closing(sqlite3.connect(history.path)) as connection:
+        connection.execute("PRAGMA user_version = 99")
+    with pytest.raises(ValueError, match="schema version"):
+        await SQLiteHistory(history.path).execution_summary()
+    with closing(sqlite3.connect(history.path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (99,)
+
+
 async def test_replacement_streaming_and_reset_baseline(tmp_path: Path) -> None:
     store = UsageStore(WorkspaceDatabase(tmp_path))
     history = SQLiteHistory(

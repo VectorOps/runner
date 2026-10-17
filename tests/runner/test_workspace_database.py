@@ -128,8 +128,85 @@ async def test_index_generation_and_sql_pagination(tmp_path: Path) -> None:
         assert await database.index_page(None, 1) == ["a"]
         assert await database.index_page("a", 1) == ["b"]
         assert await database.index_page("b", None) == ["c"]
+        assert await database.index_page("a", -1) == ["b", "c"]
+        assert await database.index_page("a", 0) == []
         with pytest.raises(ValueError, match="cursor"):
             await database.index_page("missing", 1)
+        with pytest.raises(ValueError, match="cursor"):
+            await database.index_page("missing", 0)
+
+
+async def test_index_pages_merge_active_without_duplicates(tmp_path: Path) -> None:
+    async with WorkspaceDatabase(tmp_path) as database:
+        generation, _ = await database.index_status()
+        assert await database.replace_index(
+            generation, 100, [("b", "2"), ("a", "2"), ("c", "1")]
+        )
+        active = ("a", "starting-old", "c", "starting-new")
+        expected = ["starting-new", "starting-old", "a", "b", "c"]
+        assert await database.index_page(None, None, active=active) == expected
+        for index, identifier in enumerate(expected):
+            after = None if index == 0 else expected[index - 1]
+            assert await database.index_page(after, 1, active=active) == [identifier]
+        assert await database.index_page("c", 1, active=active) == []
+        assert await database.index_page(None, 4, active=active) == expected[:4]
+        assert (
+            await database.index_page("starting-new", 3, active=active) == expected[1:4]
+        )
+        assert await database.index_page(
+            None, None, active=active, active_only=True
+        ) == ["starting-new", "starting-old", "a", "c"]
+        assert await database.index_page(
+            "starting-old", 1, active=active, active_only=True
+        ) == ["a"]
+        assert await database.index_page("a", 2, active=active, active_only=True) == [
+            "c"
+        ]
+        assert await database.index_page(None, 1, active_only=True) == []
+        for after in ("missing", "b"):
+            with pytest.raises(ValueError, match="cursor"):
+                await database.index_page(after, 1, active=active, active_only=True)
+
+
+@pytest.mark.parametrize("same_timestamp", [False, True])
+async def test_deep_index_page_seeks_without_scanning_archive(
+    tmp_path: Path, same_timestamp: bool
+) -> None:
+    operations = 0
+
+    def progress() -> int:
+        nonlocal operations
+        operations += 1
+        return 0
+
+    async with WorkspaceDatabase(tmp_path) as database:
+        generation, _ = await database.index_status()
+        assert await database.replace_index(
+            generation,
+            100,
+            [
+                (f"e{index:05d}", "1" if same_timestamp else f"{10000 - index:05d}")
+                for index in range(10000)
+            ],
+        )
+        await database.run(
+            lambda connection: connection.set_progress_handler(progress, 1)
+        )
+        try:
+            assert await database.index_page("e09000", 2) == ["e09001", "e09002"]
+            assert operations < 3000
+            operations = 0
+            assert await database.index_page(
+                "e09000",
+                2,
+                active=("e09002", "e09001", "e09000"),
+                active_only=True,
+            ) == ["e09001", "e09002"]
+        finally:
+            await database.run(
+                lambda connection: connection.set_progress_handler(None, 0)
+            )
+        assert operations < 3000
 
 
 async def test_unknown_workspace_schema_is_rejected(tmp_path: Path) -> None:
@@ -153,7 +230,7 @@ def test_journal_mode_retries_contention(tmp_path: Path, code: int) -> None:
     error.sqlite_errorcode = code
     connection = Mock(spec=sqlite3.Connection)
     cursor = Mock(spec=sqlite3.Cursor)
-    cursor.fetchone.return_value = (1,)
+    cursor.fetchone.return_value = (2,)
     connection.execute.side_effect = [cursor, error, cursor, cursor, cursor]
     with (
         patch(
