@@ -7,20 +7,14 @@ import typing
 import connect
 import pydantic
 
-from vectorops.runner import tool_policy
+from vectorops.runner import tool_authorization, tool_policy
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import WorkflowExecutionContext
 
 A = typing.TypeVar("A", bound=pydantic.BaseModel)
 
 
-class ToolApproval(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
-    channel: str = pydantic.Field(
-        default="tool.approval", min_length=1, max_length=256, pattern=r"^\S+$"
-    )
-
-
+ToolApproval = tool_authorization.ToolApproval
 ToolApprovalResponse = tool_policy.ToolApprovalResponse
 ToolApprovalRequest = tool_policy.ToolApprovalRequest
 
@@ -30,23 +24,8 @@ class ToolResponse(pydantic.BaseModel):
     is_error: bool = False
 
 
-class ToolExecutionError(Exception):
-    """An explicit tool error, model-visible unless strict handling is enabled."""
-
-
-class ToolMetadata(typing.Protocol):
-    @property
-    def definition(self) -> connect.ToolSpec: ...
-
-    @property
-    def version(self) -> int: ...
-
-    @property
-    def approval(self) -> typing.Optional[ToolApproval]: ...
-
-    def validate(self, arguments: dict[str, pydantic.JsonValue]) -> None:
-        """Validate deterministically before approval, without performing I/O."""
-        ...
+ToolExecutionError = tool_authorization.ToolExecutionError
+ToolMetadata = tool_authorization.ToolMetadata
 
 
 class ActivityToolBinding(ToolMetadata, typing.Protocol):

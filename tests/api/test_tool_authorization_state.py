@@ -9,7 +9,7 @@ import pytest
 from tests.api.test_workflow_tool_results import Arguments, WorkflowTool
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
-from vectorops.runner import models
+from vectorops.runner import models, tool_policy
 from vectorops.runner.api import tool_contracts as tools, tool_execution
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.cached_history import CachedHistory
@@ -79,8 +79,8 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
     assert step.outcome.kind == "pending" and step.authorized is True
     release.set()
     with patch.object(
-        tool_execution.tool_approval,
-        "authorize",
+        tool_policy.ToolPolicy,
+        "evaluate",
         side_effect=AssertionError("approval repeated"),
     ):
         completion = await replay.run(
@@ -200,8 +200,8 @@ async def test_workflow_reconstruction_returns_original_response(
     text = "changed"
     before = dict(history.steps)
     with patch.object(
-        tool_execution.tool_approval,
-        "authorize",
+        tool_policy.ToolPolicy,
+        "evaluate",
         side_effect=AssertionError("approval during replay"),
     ):
         assert (

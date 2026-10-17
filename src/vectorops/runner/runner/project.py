@@ -15,11 +15,11 @@ import typing
 import pydantic
 
 from vectorops.runner import configuration as overrides, diagnostics
+from vectorops.runner import tool_authorization, tool_policy
 from vectorops.runner.environment.configuration import (
     EnvironmentConfig,
     LocalEnvironmentConfig,
 )
-from vectorops.runner.tool_policy import ToolPolicy
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 from vectorops.runner.runner.usage_store import UsageStore
 from vectorops.runner.runner.summary_store import SummaryStore
@@ -257,8 +257,8 @@ class RunnerProject:
     root: Path
     config: RunnerConfig
     workspace_directory: str = field(default=".voc", kw_only=True)
-    tool_policy: ToolPolicy = field(
-        default_factory=ToolPolicy, compare=False, repr=False
+    tool_policy: tool_policy.ToolPolicy = field(
+        default_factory=tool_policy.ToolPolicy, compare=False, repr=False
     )
     workflow_resolver: typing.Optional[WorkflowResolver] = field(
         default=None, compare=False, repr=False
@@ -266,6 +266,15 @@ class RunnerProject:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "config", self.config.for_project(self.root))
+
+    @cached_property
+    def tool_authorization(self) -> tool_authorization.ToolAuthorizationService:
+        return tool_authorization.ToolAuthorizationService(
+            self.tool_policy,
+            lambda: self.configuration.get_validated(
+                "tools.approval", tool_policy.ApprovalSettings
+            ),
+        )
 
     @cached_property
     def configuration(self) -> Configuration:

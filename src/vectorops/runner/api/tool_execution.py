@@ -1,7 +1,5 @@
 """Workflow-side approval and durable execution of tool capabilities."""
 
-import hashlib
-import json
 import typing
 
 import connect
@@ -15,7 +13,11 @@ from vectorops.runner.authentication.models import (
     CredentialStorageError,
 )
 from vectorops.runner.api import composition as c
-from vectorops.runner.api import tool_contracts, tool_approval
+from vectorops.runner.api import tool_contracts
+from vectorops.runner.tool_authorization import (
+    ToolAuthorizationService,
+    digest as _digest,
+)
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.project import RunnerProject
@@ -71,11 +73,6 @@ def _log_failure(request: connect.ToolCallBlock, error: Exception) -> None:
     )
 
 
-def _digest(value: pydantic.JsonValue) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode()).hexdigest()
-
-
 async def invoke_tool(
     binding: typing.Optional[ToolBinding],
     request: connect.ToolCallBlock,
@@ -106,11 +103,7 @@ async def invoke_tool(
     approval = binding.approval if binding is not None else None
     error: typing.Optional[str] = None
     try:
-        if binding is None:
-            raise ToolExecutionError(f"unknown tool: {request.name}")
-        if definition is None or definition.name != request.name:
-            raise ToolExecutionError(f"tool binding does not match: {request.name}")
-        binding.validate(request.arguments)
+        ToolAuthorizationService.validate(binding, request, definition)
     except Exception as exc:
         error = str(exc)
 
@@ -125,10 +118,8 @@ async def invoke_tool(
             },
         )
         try:
-            decision = ToolApprovalResponse.model_validate(answer)
-            if not decision.approved:
-                error = decision.reason or "Tool call rejected by host"
-        except pydantic.ValidationError as exc:
+            ToolAuthorizationService.validate_response(answer)
+        except (pydantic.ValidationError, ToolExecutionError) as exc:
             error = str(exc)
 
     return await _execute_tool(
@@ -157,15 +148,7 @@ async def _request_approval(
     """Preserve legacy activity identity while typing newly registered approvals."""
 
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-        if ctx.mailbox is None:
-            raise RuntimeError("tool approval requires a persistent workflow runner")
-        existing = await ctx.mailbox.existing(ctx.step_id)
-        spec = (
-            existing.specification()
-            if existing is not None
-            else ToolApprovalRequest.model_validate(payload).input_spec(channel)
-        )
-        return await ctx.mailbox.wait(ctx.step_id, spec)
+        return await ToolAuthorizationService.request_approval(ctx, channel, payload)
 
     return await call.run(
         input={"channel": channel, "payload": payload, "response_type": "json"},
@@ -195,8 +178,7 @@ async def _execute_tool(
             if raise_errors:
                 raise
             return _failure(request, exc).model_dump(mode="json")
-        if not ctx.authorized:
-            await ctx.record_authorization()
+        await ToolAuthorizationService.record_authorization(ctx)
         return (await _execute_binding(binding, ctx, request, raise_errors)).model_dump(
             mode="json"
         )
@@ -268,24 +250,14 @@ async def _authorize_call(
     instance: typing.Optional[str],
     raise_errors: bool,
 ) -> typing.Optional[connect.ToolResultMessage]:
-    if context.authorized:
-        return None
-    definition = binding.definition if binding is not None else None
-    error = await tool_approval.authorize(
-        project,
-        context,
-        binding,
-        request,
-        definition,
-        _digest(definition.model_dump(mode="json")) if definition else None,
-        instance,
+    error = await project.tool_authorization.authorize(
+        context, binding, request, instance
     )
     if error is not None:
         _log_failure(request, error)
         if raise_errors:
             raise error
         return _failure(request, error)
-    await context.record_authorization()
     return None
 
 
