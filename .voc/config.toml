@@ -1,0 +1,17 @@
+[environment]
+kind = "local"
+
+[components.llm]
+model = "chatgpt/gpt-6-luna:fast"
+
+[components.llm.reasoning]
+effort = "high"
+
+[components.llm.profiles.strong]
+model = "chatgpt/gpt-6.1-sol"
+
+[components.llm.profiles.medium]
+model = "chatgpt/gpt-6.1-sol"
+
+[components.llm.profiles.weak]
+model = "chatgpt/gpt-6-luna:fast"
