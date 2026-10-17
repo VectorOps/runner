@@ -16,11 +16,11 @@ from vectorops.runner.api import composition as c
 from vectorops.runner.api import tool_contracts
 from vectorops.runner.tool_authorization import (
     ToolAuthorizationService,
+    current,
     digest as _digest,
 )
 from vectorops.runner.runner import mailbox as runtime_mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner import errors as runtime_errors
 
 Tool = tool_contracts.Tool
@@ -211,14 +211,11 @@ async def _run_gated_tool(
     raise_errors: bool,
     gate_only: bool,
 ) -> pydantic.JsonValue:
-    project = c.workflow_context().project
     definition = binding.definition if binding is not None else None
     digest = _digest(definition.model_dump(mode="json")) if definition else None
 
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-        denial = await _authorize_call(
-            project, ctx, binding, request, instance, raise_errors
-        )
+        denial = await _authorize_call(ctx, binding, request, instance, raise_errors)
         if denial is not None:
             return denial.model_dump(mode="json")
         if gate_only:
@@ -243,16 +240,13 @@ async def _run_gated_tool(
 
 
 async def _authorize_call(
-    project: RunnerProject,
     context: ActivityExecutionContext,
     binding: typing.Optional[ToolBinding],
     request: connect.ToolCallBlock,
     instance: typing.Optional[str],
     raise_errors: bool,
 ) -> typing.Optional[connect.ToolResultMessage]:
-    error = await project.tool_authorization.authorize(
-        context, binding, request, instance
-    )
+    error = await current().authorize(context, binding, request, instance)
     if error is not None:
         _log_failure(request, error)
         if raise_errors:
@@ -325,7 +319,7 @@ async def _workflow_tool(
             and step.operation.input.get("gate_only") is True
         ):
             denial = await _authorize_call(
-                context.project, ctx, binding, request, instance, raise_errors
+                ctx, binding, request, instance, raise_errors
             )
             if denial is not None:
                 return denial.model_dump(mode="json")
@@ -334,7 +328,7 @@ async def _workflow_tool(
             ).model_dump(mode="json")
         if step.outcome.kind == "pending":
             denial = await _authorize_call(
-                context.project, ctx, binding, request, instance, raise_errors
+                ctx, binding, request, instance, raise_errors
             )
             if denial is not None:
                 return denial.model_dump(mode="json")

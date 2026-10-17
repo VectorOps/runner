@@ -161,8 +161,6 @@ class MailboxStore(typing.Protocol):
 
     async def answer_input(self, answer: Answer) -> InputRequest: ...
 
-    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool: ...
-
     async def cancel_inputs(self, request_id: typing.Optional[str] = None) -> None: ...
 
 
@@ -196,9 +194,6 @@ class Mailbox:
             return await self.store.get_input_spec(request_id)
         except KeyError:
             return None
-
-    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
-        return await self.store.tool_approved(workflow_id, tool_name)
 
     def emit(self, kind: str, request: InputRequest) -> None:
         if self.sink is not None:

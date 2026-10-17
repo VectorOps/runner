@@ -15,6 +15,7 @@ import pydantic
 
 from vectorops.runner import models, usage
 from vectorops.runner import diagnostics
+from vectorops.runner import tool_authorization, tool_authorization_store, tool_policy
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
@@ -62,6 +63,7 @@ class WorkflowRunner:
         project: typing.Optional[RunnerProject] = None,
         workspace_directory: typing.Optional[str] = None,
         change_sink: typing.Optional[events.ExecutionChangeSink] = None,
+        tool_policy: typing.Optional[tool_policy.ToolPolicy] = None,
     ) -> None:
         self.path = Path(path)
         self.workspace_directory = workspace_directory
@@ -85,6 +87,7 @@ class WorkflowRunner:
         self._usage_ready = False
         self._usage_lock = asyncio.Lock()
         self._scheduler = Scheduler()
+        self._tool_policy = tool_policy
 
     async def project(self) -> RunnerProject:
         async with self._project_lock:
@@ -530,6 +533,7 @@ class WorkflowRunner:
                                 reporter=checkpointer,
                                 execution_id=execution_id,
                                 mailbox_owner=owner,
+                                tool_grants=database,
                             )
                     except asyncio.CancelledError:
                         if owner.suspending:
@@ -601,6 +605,7 @@ class WorkflowRunner:
         reporter: typing.Optional[ExecutionCheckpointer] = None,
         execution_id: typing.Optional[str] = None,
         mailbox_owner: typing.Optional[mailbox.Mailbox] = None,
+        tool_grants: typing.Optional[tool_authorization_store.WorkflowGrants] = None,
     ) -> pydantic.JsonValue:
         if continue_from_step_id is not None:
             if not continue_from_step_id:
@@ -622,6 +627,37 @@ class WorkflowRunner:
                 definition_ref=reference,
                 input={} if input is None else input,
             )
+        authorization = tool_authorization.ToolAuthorizationService(
+            tool_authorization_store.AuthorizationStore(
+                project.configuration, tool_grants
+            ),
+            self._tool_policy,
+        )
+        self._tool_policy = authorization.policy
+        with authorization.activate():
+            return await self._run_configured(
+                project,
+                history,
+                configuration,
+                continue_from_step_id=continue_from_step_id,
+                child_heads=child_heads,
+                reporter=reporter,
+                execution_id=execution_id,
+                mailbox_owner=mailbox_owner,
+            )
+
+    async def _run_configured(
+        self,
+        project: RunnerProject,
+        history: WorkflowHistory,
+        configuration: models.Workflow,
+        *,
+        continue_from_step_id: typing.Optional[str],
+        child_heads: typing.Optional[dict[str, str]],
+        reporter: typing.Optional[ExecutionCheckpointer],
+        execution_id: typing.Optional[str],
+        mailbox_owner: typing.Optional[mailbox.Mailbox],
+    ) -> pydantic.JsonValue:
         async with ExecutionResources() as resources:
             mcp = MCPRuntime(self.authentication, execution_id, pool=self.mcp_pool)
             resources.register("mcp", mcp.close)

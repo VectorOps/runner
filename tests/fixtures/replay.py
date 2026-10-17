@@ -1,11 +1,13 @@
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
+import typing
 from typing import Literal, Optional
 
 import pydantic
 
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models, tool_policy
+from vectorops.runner import tool_authorization, tool_authorization_store
 from vectorops.runner.api import composition
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.runner.events import StepEventSink
@@ -59,7 +61,6 @@ async def run(
                 if workspace is None
                 else (await RunnerProject.open(workspace)).config
             ),
-            tool_policy.ToolPolicy() if policy is None else policy,
         )
     context = WorkflowExecutionContext(
         project,
@@ -69,6 +70,14 @@ async def run(
     )
     token = composition._CURRENT_CONTEXT.set(context)
     try:
-        return await session.run(invoke)
+        grants = None
+        if mailbox is not None:
+            grants = typing.cast(tool_authorization_store.WorkflowGrants, mailbox.store)
+        authorization = tool_authorization.ToolAuthorizationService(
+            tool_authorization_store.AuthorizationStore(project.configuration, grants),
+            policy,
+        )
+        with authorization.activate():
+            return await session.run(invoke)
     finally:
         composition._CURRENT_CONTEXT.reset(token)

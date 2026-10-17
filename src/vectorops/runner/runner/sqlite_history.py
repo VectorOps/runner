@@ -10,7 +10,8 @@ import sqlite3
 import typing
 from uuid import uuid4
 
-from vectorops.runner import models, tool_policy, usage
+from vectorops.runner import models, usage
+from vectorops.runner.tool_authorization_store import SQLiteWorkflowGrants
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
@@ -597,17 +598,7 @@ class SQLiteHistory:
                     connection.executemany(
                         "INSERT INTO workflow_heads VALUES (?, ?)", plan.heads.items()
                     )
-                    grants = connection.execute(
-                        "SELECT request_id FROM tool_approval_grants"
-                    ).fetchall()
-                    connection.executemany(
-                        "DELETE FROM tool_approval_grants WHERE request_id = ?",
-                        [
-                            (row[0],)
-                            for row in grants
-                            if row[0] not in plan.retained_step_ids
-                        ],
-                    )
+                    SQLiteWorkflowGrants.retain(connection, plan.retained_step_ids)
                     self._set_status(connection, "running")
                     operation = operation.model_copy(update={"status": "applied"})
                 connection.execute(
@@ -909,11 +900,9 @@ class SQLiteHistory:
 
     async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
         return await self._run(
-            lambda connection: connection.execute(
-                "SELECT 1 FROM tool_approval_grants WHERE workflow_id = ? AND tool_name = ?",
-                (workflow_id, tool_name),
-            ).fetchone()
-            is not None
+            lambda connection: SQLiteWorkflowGrants.approved(
+                connection, workflow_id, tool_name
+            )
         )
 
     async def list_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
@@ -996,16 +985,14 @@ class SQLiteHistory:
                 if self._execution(connection).status == "paused":
                     self._set_status(connection, "running")
                 step = self._step(connection, request.request_id)
-                if step.operation.kind == "llm.tool":
-                    tool_name = tool_policy.workflow_grant(
-                        request.payload, answer.response
-                    )
-                    if tool_name is not None:
-                        connection.execute(
-                            "INSERT INTO tool_approval_grants VALUES (?, ?, ?) "
-                            "ON CONFLICT(workflow_id, tool_name) DO NOTHING",
-                            (step.workflow_id, tool_name, request.request_id),
-                        )
+                SQLiteWorkflowGrants.record_answer(
+                    connection,
+                    operation_kind=step.operation.kind,
+                    workflow_id=step.workflow_id,
+                    request_id=request.request_id,
+                    payload=request.payload,
+                    response=answer.response,
+                )
                 return request.public()
 
         return await self._run(respond, notify=True)

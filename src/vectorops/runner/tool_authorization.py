@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import typing
@@ -48,16 +50,40 @@ def digest(value: pydantic.JsonValue) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+class AuthorizationData(typing.Protocol):
+    def settings(self) -> tool_policy.ApprovalSettings: ...
+
+    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool: ...
+
+
+_CURRENT: ContextVar["ToolAuthorizationService"] = ContextVar("tool_authorization")
+
+
+def current() -> ToolAuthorizationService:
+    try:
+        return _CURRENT.get()
+    except LookupError:
+        raise RuntimeError("tool authorization requires an execution scope") from None
+
+
 class ToolAuthorizationService:
     """Own the live gate, delegating policy rules and durable state to their owners."""
 
     def __init__(
         self,
-        policy: tool_policy.ToolPolicy,
-        settings: Callable[[], tool_policy.ApprovalSettings],
+        data: AuthorizationData,
+        policy: typing.Optional[tool_policy.ToolPolicy] = None,
     ) -> None:
-        self._policy = policy
-        self._settings = settings
+        self.policy = policy if policy is not None else tool_policy.ToolPolicy()
+        self._data = data
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        token = _CURRENT.set(self)
+        try:
+            yield
+        finally:
+            _CURRENT.reset(token)
 
     @staticmethod
     def validate(
@@ -141,8 +167,8 @@ class ToolAuthorizationService:
             self.validate(binding, request, definition)
             if existing is None:
                 assert binding is not None
-                decision = await self._policy.evaluate(
-                    self._settings(),
+                decision = await self.policy.evaluate(
+                    self._data.settings(),
                     tool_policy.ToolCall(
                         name=request.name,
                         version=binding.version,
@@ -164,7 +190,7 @@ class ToolAuthorizationService:
             existing is None
             and decision.action == "require_confirmation"
             and context.mailbox is not None
-            and await context.mailbox.tool_approved(context.workflow_id, request.name)
+            and await self._data.tool_approved(context.workflow_id, request.name)
         ):
             decision = tool_policy.Decision(action="allow")
 
