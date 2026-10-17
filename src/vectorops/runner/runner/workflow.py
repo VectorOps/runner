@@ -147,6 +147,13 @@ class WorkflowRunner:
             if not task.done() and not task.cancelling():
                 task.cancel()
 
+    async def aclose(self) -> None:
+        """Stop executions and join background naming before releasing resources."""
+        self.stop()
+        await asyncio.gather(*self._executions, return_exceptions=True)
+        if self._naming is not None:
+            await self._naming.aclose()
+
     def request_stop(self, execution_id: str) -> None:
         self._stop_requests.add(execution_id)
 
@@ -253,11 +260,13 @@ class WorkflowRunner:
                     answer
                 )
         if request.request_type == "chat.message.v1":
-            project = await self.project()
-            await (await self._workflow_naming()).ensure_name(
-                await self._database(project, answer.execution_id), request.workflow_id
-            )
+            await self._schedule_naming(answer.execution_id, request.workflow_id)
         return request
+
+    async def _schedule_naming(self, execution_id: str, workflow_id: str) -> None:
+        project = await self.project()
+        database = await self._database(project, execution_id)
+        (await self._workflow_naming()).schedule(database, workflow_id)
 
     async def _workflow_naming(self) -> WorkflowNaming:
         if self._naming is None:
@@ -502,8 +511,8 @@ class WorkflowRunner:
                         if on_started is not None:
                             on_started()
                         if not is_new:
-                            await (await self._workflow_naming()).ensure_name(
-                                database, record.root_workflow_id
+                            await self._schedule_naming(
+                                execution_id, record.root_workflow_id
                             )
                         if (
                             execution_id in self._stop_requests

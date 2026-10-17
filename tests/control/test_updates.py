@@ -180,19 +180,19 @@ async def test_generated_name_pushes_through_runner_without_new_steps(
             await service.runner.answer_input(
                 answer({"content": [{"type": "text", "text": "Hello"}]})
             )
-        named = False
-        summarized = False
-        async with asyncio.timeout(5):
-            while not (named and summarized):
-                event = await captured.get()
-                if event.get("kind") == "workflow.updated":
-                    snapshot = events.WorkflowUpdated.model_validate(event)
-                    if snapshot.workflow.name == "Generated title":
-                        named = True
-                elif event.get("kind") == "execution.updated":
-                    summary = events.ExecutionUpdated.model_validate(event)
-                    if summary.summary.name == "Generated title":
-                        summarized = True
+            named = False
+            summarized = False
+            async with asyncio.timeout(5):
+                while not (named and summarized):
+                    event = await captured.get()
+                    if event.get("kind") == "workflow.updated":
+                        snapshot = events.WorkflowUpdated.model_validate(event)
+                        if snapshot.workflow.name == "Generated title":
+                            named = True
+                    elif event.get("kind") == "execution.updated":
+                        summary = events.ExecutionUpdated.model_validate(event)
+                        if summary.summary.name == "Generated title":
+                            summarized = True
         assert (await database.inspect_execution()).stats.steps == 1
     finally:
         await service.aclose()

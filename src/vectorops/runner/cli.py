@@ -212,31 +212,34 @@ async def dispatch(args: Arguments) -> None:
         authentication=AuthenticationService(configuration),
         workspace_directory=args.workspace_directory,
     )
-    if args.command == "start":
-        result = await runner.run(
-            args.workflow,
-            input=args.input,
-            new_execution_id=args.execution_id,
-        )
-        print(
-            json.dumps(
-                {"execution_id": runner.last_execution_id, "result": result},
-                allow_nan=False,
+    try:
+        if args.command == "start":
+            result = await runner.run(
+                args.workflow,
+                input=args.input,
+                new_execution_id=args.execution_id,
             )
-        )
-    elif args.command == "resume":
-        result = await runner.resume(args.execution_id)
-        print(
-            json.dumps(
-                {"execution_id": runner.last_execution_id, "result": result},
-                allow_nan=False,
+            print(
+                json.dumps(
+                    {"execution_id": runner.last_execution_id, "result": result},
+                    allow_nan=False,
+                )
             )
-        )
-    elif args.command == "status":
-        print((await runner.inspect_execution(args.execution_id)).model_dump_json())
-    elif args.command == "export":
-        await runner.export_execution(args.output, args.execution_id)
-        print(json.dumps({"output": str(args.output)}))
+        elif args.command == "resume":
+            result = await runner.resume(args.execution_id)
+            print(
+                json.dumps(
+                    {"execution_id": runner.last_execution_id, "result": result},
+                    allow_nan=False,
+                )
+            )
+        elif args.command == "status":
+            print((await runner.inspect_execution(args.execution_id)).model_dump_json())
+        elif args.command == "export":
+            await runner.export_execution(args.output, args.execution_id)
+            print(json.dumps({"output": str(args.output)}))
+    finally:
+        await runner.aclose()
 
 
 def main(argv: typing.Optional[list[str]] = None) -> int:

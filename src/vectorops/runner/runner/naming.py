@@ -32,6 +32,22 @@ class WorkflowNaming:
     def __init__(self, llm: RunnerLLM) -> None:
         self.llm = llm
         self._lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._closed = False
+
+    def schedule(self, store: NamingStore, workflow_id: str) -> None:
+        if self._closed:
+            return
+        task = asyncio.create_task(self.ensure_name(store, workflow_id))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def aclose(self) -> None:
+        self._closed = True
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def ensure_name(self, store: NamingStore, workflow_id: str) -> None:
         """Preserve existing names and retry only against the original input."""

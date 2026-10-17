@@ -144,6 +144,7 @@ class RunnerService:
             await asyncio.gather(*self._tasks.values())
         finally:
             try:
+                await self.runner.aclose()
                 if self._updates is not None:
                     await self._updates.close()
                 await self.mcp.close()

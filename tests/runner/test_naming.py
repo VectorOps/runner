@@ -8,10 +8,13 @@ import connect
 import pydantic
 import pytest
 
+from tests.control.test_client_commands import pending, settled
+from tests.fixtures.user_input import reply
 from tests.runner.test_mailbox import answer, store
 from vectorops.runner import models
 from vectorops.runner.api import chat_input, user_input
 from vectorops.runner.authentication.service import AuthenticationService
+from vectorops.runner.control import client, protocol
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner.llm import RunnerLLM
@@ -143,9 +146,155 @@ async def test_runner_names_after_accepting_input(tmp_path: Path) -> None:
     )
     runner = WorkflowRunner(tmp_path)
     runner._naming = await naming(tmp_path)
-    accepted = await runner.answer_input(answer(content("Help me fix tests")))
-    assert accepted.status == "answered"
-    assert (await database.get_workflow("workflow")).name == "Fix failing tests"
+    generate = cast(AsyncMock, runner._naming.llm.generate)
+    response = generate.return_value
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed(*args: object, **kwargs: object) -> connect.AssistantMessage:
+        started.set()
+        await release.wait()
+        return cast(connect.AssistantMessage, response)
+
+    generate.side_effect = delayed
+    try:
+        accepted = await asyncio.wait_for(
+            runner.answer_input(answer(content("Help me fix tests"))), 1
+        )
+        assert accepted.status == "answered"
+        await asyncio.wait_for(started.wait(), 1)
+        assert (await database.get_workflow("workflow")).name is None
+        release.set()
+        async with asyncio.timeout(5):
+            while (await database.get_workflow("workflow")).name is None:
+                await asyncio.sleep(0.01)
+        assert (await database.get_workflow("workflow")).name == "Fix failing tests"
+    finally:
+        await runner.aclose()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("offline"), asyncio.CancelledError()])
+async def test_naming_failure_does_not_cancel_workflow(
+    workspace: Path, failure: BaseException
+) -> None:
+    (workspace / "workflows/chat.py").write_text(
+        "from vectorops.runner.api import llm\n"
+        "async def main(ctx):\n"
+        "    await llm.request_user_message()\n"
+        "    await llm.request_user_message()\n"
+        "    return 'completed'\n"
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def fail(*args: object, **kwargs: object) -> connect.AssistantMessage:
+        started.set()
+        await release.wait()
+        finished.set()
+        raise failure
+
+    with patch.object(RunnerLLM, "generate", side_effect=fail):
+        async with client.embedded(workspace) as connection:
+            accepted = await connection.start(
+                protocol.Start(reference="chat:main", idempotency_key="start")
+            )
+            request = await pending(connection, accepted.execution_id)
+            await asyncio.wait_for(reply(connection, request, "Hello"), 1)
+            await asyncio.wait_for(started.wait(), 1)
+            next_request = await pending(connection, accepted.execution_id)
+            release.set()
+            await asyncio.wait_for(finished.wait(), 1)
+            await asyncio.wait_for(reply(connection, next_request, "Continue"), 1)
+            await settled(connection, accepted.execution_id)
+            assert (
+                await connection.execution_summary(accepted.execution_id)
+            ).status == "completed"
+
+
+async def test_resume_does_not_wait_for_name_and_name_survives_execution_exit(
+    workspace: Path,
+) -> None:
+    (workspace / "workflows/chat.py").write_text(
+        "from vectorops.runner.api import llm\n"
+        "async def main(ctx):\n"
+        "    await llm.request_user_message()\n"
+        "    return 'completed'\n"
+    )
+    async with client.embedded(workspace) as connection:
+        accepted = await connection.start(
+            protocol.Start(reference="chat:main", idempotency_key="start")
+        )
+        request = await pending(connection, accepted.execution_id)
+    database = SQLiteHistory(
+        workspace / "data/executions" / accepted.execution_id / "history.sqlite3"
+    )
+    await database.answer_input(
+        mailbox.Answer(
+            execution_id=accepted.execution_id,
+            request_id=request.request_id,
+            response=content("Hello"),
+            idempotency_key="answer",
+        )
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed(*args: object, **kwargs: object) -> connect.AssistantMessage:
+        started.set()
+        await release.wait()
+        return connect.AssistantMessage(
+            content=[connect.TextBlock(text="Background title")], finish_reason="stop"
+        )
+
+    runner = WorkflowRunner(workspace)
+    try:
+        with patch.object(RunnerLLM, "generate", side_effect=delayed):
+            assert (
+                await asyncio.wait_for(runner.resume(accepted.execution_id), 1)
+                == "completed"
+            )
+            await asyncio.wait_for(started.wait(), 1)
+            assert (await database.get_workflow(request.workflow_id)).name is None
+            release.set()
+            async with asyncio.timeout(5):
+                while (await database.get_workflow(request.workflow_id)).name is None:
+                    await asyncio.sleep(0.01)
+            assert (
+                await database.get_workflow(request.workflow_id)
+            ).name == "Background title"
+    finally:
+        await runner.aclose()
+
+
+async def test_service_shutdown_cancels_background_naming(workspace: Path) -> None:
+    (workspace / "workflows/chat.py").write_text(
+        "from vectorops.runner.api import llm\n"
+        "async def main(ctx):\n"
+        "    while True:\n"
+        "        await llm.request_user_message()\n"
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def delayed(*args: object, **kwargs: object) -> connect.AssistantMessage:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        raise AssertionError("naming should be cancelled")
+
+    with patch.object(RunnerLLM, "generate", side_effect=delayed):
+        async with client.embedded(workspace) as connection:
+            accepted = await connection.start(
+                protocol.Start(reference="chat:main", idempotency_key="start")
+            )
+            request = await pending(connection, accepted.execution_id)
+            await asyncio.wait_for(reply(connection, request, "Hello"), 1)
+            await asyncio.wait_for(started.wait(), 1)
+            await pending(connection, accepted.execution_id)
+        assert cancelled.is_set()
 
 
 @pytest.mark.parametrize("name", ["", "x" * 121])
