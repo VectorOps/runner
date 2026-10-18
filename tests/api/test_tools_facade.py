@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from vectorops.runner.api import llm, tools
-from vectorops.runner.api import tool_collections, tool_registry
+from vectorops.runner.api import tool_collections, tool_contracts, tool_registry
 import vectorops.runner.api.llm.list_files as list_files
 import vectorops.runner.api.llm.environment_tools as environment_tools
 import vectorops.runner.api.llm.patch as patch
@@ -18,6 +18,7 @@ from vectorops.runner.patch import PatchService
 
 def test_exports_preserve_implementation_identity() -> None:
     expected = {
+        "AuthContext": tool_contracts.AuthContext,
         "ToolConfig": tool_registry.ToolConfig,
         "register_tool": tool_registry.register_tool,
         "ToolCollection": tool_collections.ToolCollection,

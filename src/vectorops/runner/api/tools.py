@@ -34,8 +34,10 @@ ToolExecutionError = _tools.ToolExecutionError
 ToolResponse = _tools.ToolResponse
 ToolApproval = _tools.ToolApproval
 ToolApprovalResponse = _tools.ToolApprovalResponse
+AuthContext = _tools.AuthContext
 
 __all__ = [
+    "AuthContext",
     "ToolConfig",
     "register_tool",
     "ToolCollection",

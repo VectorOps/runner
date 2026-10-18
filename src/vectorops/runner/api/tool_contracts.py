@@ -17,6 +17,7 @@ A = typing.TypeVar("A", bound=pydantic.BaseModel)
 ToolApproval = tool_authorization.ToolApproval
 ToolApprovalResponse = tool_policy.ToolApprovalResponse
 ToolApprovalRequest = tool_policy.ToolApprovalRequest
+AuthContext = tool_policy.AuthContext
 
 
 class ToolResponse(pydantic.BaseModel):
@@ -84,6 +85,7 @@ class Tool(typing.Generic[A]):
         *,
         version: int = 1,
         approval: typing.Optional[ToolApproval] = None,
+        auth_context: typing.Optional[Callable[[A], Awaitable[AuthContext]]] = None,
     ) -> None:
         if version < 1:
             raise ValueError("tool version must be positive")
@@ -96,6 +98,7 @@ class Tool(typing.Generic[A]):
         self._invoke = invoke
         self._version = version
         self._approval = approval
+        self._auth_context = auth_context
 
     @property
     def definition(self) -> connect.ToolSpec:
@@ -118,9 +121,86 @@ class Tool(typing.Generic[A]):
     def validate(self, arguments: dict[str, pydantic.JsonValue]) -> None:
         self._validated(arguments)
 
+    async def auth_context(
+        self, arguments: dict[str, pydantic.JsonValue]
+    ) -> AuthContext:
+        if self._auth_context is None:
+            return AuthContext()
+        return await self._auth_context(self._validated(arguments))
+
     async def execute(
         self,
         context: ActivityExecutionContext,
         arguments: dict[str, pydantic.JsonValue],
     ) -> ToolResponse:
         return await self._invoke(context, self._validated(arguments))
+
+
+class _AuthMetadata:
+    def __init__(
+        self, binding: ToolBinding, callback: tool_authorization.AuthContextCallback
+    ) -> None:
+        self._binding = binding
+        self._callback = callback
+
+    @property
+    def definition(self) -> connect.ToolSpec:
+        return self._binding.definition
+
+    @property
+    def version(self) -> int:
+        return self._binding.version
+
+    @property
+    def approval(self) -> typing.Optional[ToolApproval]:
+        return self._binding.approval
+
+    def validate(self, arguments: dict[str, pydantic.JsonValue]) -> None:
+        self._binding.validate(arguments)
+
+    async def auth_context(
+        self, arguments: dict[str, pydantic.JsonValue]
+    ) -> AuthContext:
+        return await self._callback(arguments)
+
+
+class _AuthActivityBinding(_AuthMetadata):
+    def __init__(
+        self,
+        binding: ActivityToolBinding,
+        callback: tool_authorization.AuthContextCallback,
+    ) -> None:
+        super().__init__(binding, callback)
+        self._activity = binding
+
+    async def execute(
+        self,
+        context: ActivityExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> ToolResponse:
+        return await self._activity.execute(context, arguments)
+
+
+class _AuthWorkflowBinding(_AuthMetadata, WorkflowToolBinding):
+    def __init__(
+        self,
+        binding: WorkflowToolBinding,
+        callback: tool_authorization.AuthContextCallback,
+    ) -> None:
+        super().__init__(binding, callback)
+        self._workflow = binding
+
+    async def execute_workflow(
+        self,
+        context: WorkflowExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> ToolResponse:
+        return await self._workflow.execute_workflow(context, arguments)
+
+
+def with_auth_context(
+    binding: ToolBinding, callback: tool_authorization.AuthContextCallback
+) -> ToolBinding:
+    if isinstance(binding, WorkflowToolBinding):
+        return _AuthWorkflowBinding(binding, callback)
+    return _AuthActivityBinding(binding, callback)

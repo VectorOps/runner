@@ -110,6 +110,7 @@ async def invoke_tool(
     if error is None and approval is not None:
         answer = await _request_approval(
             approval.channel,
+            binding=binding,
             payload={
                 "instance": instance,
                 "call": request.model_dump(mode="json"),
@@ -143,12 +144,17 @@ async def invoke_tool(
 
 @c.activity_wrapper(name="request_input", kind=runtime_mailbox.KIND)
 async def _request_approval(
-    call: c.ActivityCall, channel: str, payload: pydantic.JsonValue
+    call: c.ActivityCall,
+    channel: str,
+    payload: pydantic.JsonValue,
+    binding: typing.Optional[ToolBinding] = None,
 ) -> pydantic.JsonValue:
     """Preserve legacy activity identity while typing newly registered approvals."""
 
     async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
-        return await ToolAuthorizationService.request_approval(ctx, channel, payload)
+        return await ToolAuthorizationService.request_approval(
+            ctx, channel, payload, binding
+        )
 
     return await call.run(
         input={"channel": channel, "payload": payload, "response_type": "json"},

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
@@ -28,6 +28,19 @@ class ToolApproval(pydantic.BaseModel):
 
 class ToolExecutionError(Exception):
     """An explicit tool error, model-visible unless strict handling is enabled."""
+
+
+AuthContext = tool_policy.AuthContext
+AuthContextCallback: typing.TypeAlias = Callable[
+    [dict[str, pydantic.JsonValue]], Awaitable[AuthContext]
+]
+
+
+@typing.runtime_checkable
+class AuthContextProvider(typing.Protocol):
+    async def auth_context(
+        self, arguments: dict[str, pydantic.JsonValue]
+    ) -> AuthContext: ...
 
 
 class ToolMetadata(typing.Protocol):
@@ -104,6 +117,17 @@ class ToolAuthorizationService:
             raise ToolExecutionError(response.reason or "Tool call rejected by host")
 
     @staticmethod
+    async def resolve_auth_context(
+        binding: typing.Optional[ToolMetadata], request: connect.ToolCallBlock
+    ) -> AuthContext:
+        if not isinstance(binding, AuthContextProvider):
+            return AuthContext()
+        result = await binding.auth_context(request.model_copy(deep=True).arguments)
+        if not isinstance(result, AuthContext):
+            raise TypeError("auth context callback must return AuthContext")
+        return AuthContext.model_validate(result.model_dump(mode="json"))
+
+    @staticmethod
     async def record_authorization(context: ActivityExecutionContext) -> None:
         if not context.authorized:
             await context.record_authorization()
@@ -132,11 +156,18 @@ class ToolAuthorizationService:
         context: ActivityExecutionContext,
         channel: str,
         payload: pydantic.JsonValue,
+        binding: typing.Optional[ToolMetadata] = None,
     ) -> pydantic.JsonValue:
         """Serve legacy approval activities without owning their recording boundary."""
         if context.mailbox is None:
             raise RuntimeError("tool approval requires a persistent workflow runner")
         existing = await context.mailbox.existing(context.step_id)
+        if existing is None and binding is not None:
+            approval = tool_policy.ToolApprovalRequest.model_validate(payload)
+            auth_context = await cls.resolve_auth_context(binding, approval.call)
+            payload = approval.model_copy(
+                update={"auth_context": auth_context}
+            ).model_dump(mode="json")
         return await cls._wait(context, channel, payload, existing)
 
     async def authorize(
@@ -158,6 +189,7 @@ class ToolAuthorizationService:
             digest(definition.model_dump(mode="json")) if definition else ""
         )
         decision = tool_policy.Decision(action="require_confirmation")
+        auth_context = AuthContext()
         existing = (
             await context.mailbox.existing(context.step_id)
             if context.mailbox is not None
@@ -167,6 +199,7 @@ class ToolAuthorizationService:
             self.validate(binding, request, definition)
             if existing is None:
                 assert binding is not None
+                auth_context = await self.resolve_auth_context(binding, request)
                 decision = await self.policy.evaluate(
                     self._data.settings(),
                     tool_policy.ToolCall(
@@ -177,6 +210,7 @@ class ToolAuthorizationService:
                         execution_id=context.execution_id,
                         workflow_id=context.workflow_id,
                         step_id=context.step_id,
+                        auth_context=auth_context,
                     ),
                 )
             if decision.action == "deny":
@@ -209,6 +243,7 @@ class ToolAuthorizationService:
                     call=request,
                     tool=definition,
                     tool_version=binding.version,
+                    auth_context=auth_context,
                 ).model_dump(mode="json")
             )
             answer = await self._wait(

@@ -9,6 +9,12 @@ import pydantic
 from vectorops.runner.runner import mailbox
 
 
+class AuthContext(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    properties: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+
+
 class ToolApprovalRequest(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
@@ -16,6 +22,7 @@ class ToolApprovalRequest(pydantic.BaseModel):
     call: connect.ToolCallBlock
     tool: connect.ToolSpec
     tool_version: int = pydantic.Field(ge=1, strict=True)
+    auth_context: AuthContext = pydantic.Field(default_factory=AuthContext)
 
     @pydantic.model_validator(mode="after")
     def validate_identity(self) -> typing.Self:
@@ -115,6 +122,7 @@ class ToolCall(pydantic.BaseModel):
     execution_id: typing.Optional[str] = None
     workflow_id: str
     step_id: str
+    auth_context: AuthContext = pydantic.Field(default_factory=AuthContext)
 
 
 class Decision(pydantic.BaseModel):
