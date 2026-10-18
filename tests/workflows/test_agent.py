@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +19,7 @@ from vectorops.runner.control import client, protocol
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner.workflow import WorkflowRunner
-from vectorops.runner.workflows import settings, tools as workflow_tools
+from vectorops.runner.workflows import registry, settings, tools as workflow_tools
 
 
 def configure(
@@ -358,3 +359,46 @@ def test_helper_overrides_and_tool_boundaries() -> None:
         {"apply_patch", "run_agent", "write_stdin", "update_plan"}
     )
     assert tools.apply_patch_tool().definition.name == "apply_patch"
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+async def test_agent_web_fetch_defaults_and_versioned_resume(
+    tmp_path: Path, version: int
+) -> None:
+    configure(tmp_path, tmp_path)
+    backend = FakeProvider([answer("done"), answer("continued")])
+    workflows = {
+        **registry.WORKFLOWS,
+        "agent": replace(registry.agent, version=version),
+    }
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        with patch.object(registry, "WORKFLOWS", workflows):
+            async with client.embedded(tmp_path) as connection:
+                accepted = await connection.start(
+                    protocol.Start(reference="builtin:agent", idempotency_key="start")
+                )
+                await reply(
+                    connection,
+                    await pending(connection, accepted.execution_id),
+                    "hello",
+                )
+                waiting = await pending(connection, accepted.execution_id)
+                names = {tool.name for tool in backend.requests[0].tools}
+                assert ("web_fetch" in names) == (version >= 4)
+                assert "prefer web_fetch" in str(backend.requests[0].system_prompt)
+        async with client.embedded(tmp_path) as connection:
+            restored = await pending(connection, accepted.execution_id)
+            assert restored.request_id == waiting.request_id
+            assert len(backend.requests) == 1
+            await reply(connection, restored, "continue")
+            await pending(connection, accepted.execution_id)
+            assert len(backend.requests) == 2
+            assert {tool.name for tool in backend.requests[-1].tools} == names
+            await connection.stop(accepted.execution_id)
+            await settled(connection, accepted.execution_id)
+
+
+def test_web_fetch_is_agent_only_by_default() -> None:
+    collections = workflow_tools.default_collections([])
+    assert "web_fetch" in collections["agent"].tools
+    assert "web_fetch" not in collections["helper"].tools

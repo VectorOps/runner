@@ -8,6 +8,11 @@ The default agent already includes MCP. Configure servers under root
 `[mcp.servers.<name>]`; no collection edits are needed. MCP defaults to dynamic
 discovery, and an empty server configuration adds no tools. See [MCP configuration](mcp.md).
 
+New agent executions also include `web_fetch` for ordinary HTTP retrieval and prefer
+it over shelling out to `curl`. Requests originate on the runner host, not the target.
+Saved agent executions from before version 4 keep their previous tool defaults on
+resume; start a new execution to pick up `web_fetch`. The helper's defaults are unchanged.
+
 ## Configure a collection
 
 In the runner workspace's `config.toml`:

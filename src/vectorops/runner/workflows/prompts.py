@@ -19,6 +19,9 @@ Inspect relevant code and tests before editing. Prefer available specialized too
 and relevant skills. Read an applicable SKILL.md before following its workflow.
 Use list_files for directory discovery, rg through exec for focused text searches,
 and read_file for targeted content. Avoid whole-repository reads and unrelated files.
+When available, prefer web_fetch for ordinary web-page and HTTP API retrieval.
+Use exec with curl only for capabilities web_fetch lacks or requests that must
+originate inside the target environment rather than on the runner host.
 Treat summaries and helper reports as leads; verify the actual source before quoting
 or changing it. Do not invent APIs, file contents, test results, or tool capabilities.
 Follow applicable AGENTS.md instructions, including nested instructions for touched

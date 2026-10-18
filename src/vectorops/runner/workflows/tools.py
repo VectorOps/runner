@@ -5,7 +5,7 @@ from vectorops.runner.api.tools import list_files_tool as list_files_tool
 
 
 def default_collections(
-    agents: list[str], *, include_mcp: bool = True
+    agents: list[str], *, include_mcp: bool = True, include_web_fetch: bool = True
 ) -> dict[str, tools.ToolCollection]:
     helper = ["read_file", "list_files", "exec", "poll_process"]
     agent = [
@@ -20,6 +20,8 @@ def default_collections(
         agent.append("run_agent")
     if include_mcp:
         agent.append("mcp")
+    if include_web_fetch:
+        agent.append("web_fetch")
     return {
         "helper": tools.ToolCollection(tools=helper),
         "agent": tools.ToolCollection(
