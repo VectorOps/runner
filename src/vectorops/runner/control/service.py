@@ -482,6 +482,13 @@ class RunnerService:
         *,
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
+        if method.startswith("tools.rules."):
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            try:
+                return await self.runner.authorization_rules(method, params)
+            except (ValueError, KeyError, FileNotFoundError) as exc:
+                raise p.RemoteError("invalid_argument", str(exc)) from exc
         if method in (
             "configuration.get",
             "configuration.set",

@@ -147,7 +147,7 @@ async def test_changed_tool_schema_and_version_replay_then_use_live_definition(
     binding = llm.Tool("echo", "Old description", OldArguments, old_execute)
     bindings: list[llm.ToolBinding] = [binding]
     policy = tool_policy.ToolPolicy()
-    policy.allow("echo")
+    rules = [replay.allow("echo")]
     snapshots: list[tuple[connect.Message, ...]] = []
 
     async def workflow() -> pydantic.JsonValue:
@@ -158,7 +158,11 @@ async def test_changed_tool_schema_and_version_replay_then_use_live_definition(
         return None
 
     first = await replay.run(
-        history, workflow, tool_policy_version=1 if gated else None, policy=policy
+        history,
+        workflow,
+        tool_policy_version=1 if gated else None,
+        policy=policy,
+        rules=rules,
     )
     assert first.outcome.kind == "completed", first.outcome
     bindings = (
@@ -177,6 +181,7 @@ async def test_changed_tool_schema_and_version_replay_then_use_live_definition(
         first.id,
         tool_policy_version=1 if gated else None,
         policy=policy,
+        rules=rules,
     )
     assert second == first
     assert snapshots[0] == snapshots[1]
@@ -191,7 +196,11 @@ async def test_changed_tool_schema_and_version_replay_then_use_live_definition(
 
     assert (
         await replay.run(
-            history, live, tool_policy_version=1 if gated else None, policy=policy
+            history,
+            live,
+            tool_policy_version=1 if gated else None,
+            policy=policy,
+            rules=rules,
         )
     ).outcome.kind == "completed"
     assert calls == [1]

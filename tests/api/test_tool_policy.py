@@ -19,7 +19,7 @@ class Arguments(pydantic.BaseModel):
     value: int
 
 
-@pytest.mark.parametrize("settings", ["approve_all = true", 'whitelist = ["test"]'])
+@pytest.mark.parametrize("settings", ["approve_all = true"])
 async def test_grants_and_replay_without_policy_reads(
     history: MemoryHistory, tmp_path: Path, settings: str
 ) -> None:
@@ -61,7 +61,11 @@ async def test_grants_and_replay_without_policy_reads(
 
 @pytest.mark.parametrize(
     "answer",
-    [{"approved": True}, {"approved": False, "reason": "no"}, {"approved": "yes"}],
+    [
+        {"decision": "approve"},
+        {"decision": "deny", "reason": "no"},
+        {"decision": "yes"},
+    ],
 )
 @pytest.mark.parametrize("legacy", [False, True])
 async def test_host_gate_recovery_and_result_replay(
@@ -112,11 +116,11 @@ async def test_host_gate_recovery_and_result_replay(
     (tmp_path / "config.toml").write_text(
         "[components.tools.approval]\napprove_all = true"
     )
-    if not legacy and answer.get("approved") == "yes":
+    if not legacy and answer.get("decision") == "yes":
         with pytest.raises(input_schema.InputValidationError):
             await approve(box, request, answer)
         assert store.requests[request.request_id].status == "pending"
-        answer = {"approved": False}
+        answer = {"decision": "deny"}
     await approve(box, request, answer)
     first = await replay.run(
         history,
@@ -128,7 +132,7 @@ async def test_host_gate_recovery_and_result_replay(
     )
     assert first.outcome.kind == "completed"
     result = connect.ToolResultMessage.model_validate(first.outcome.result)
-    approved = answer.get("approved") is True
+    approved = answer.get("decision") == "approve"
     assert result.is_error is not approved
     assert calls == ([request.request_id] if approved else [])
     second = await replay.run(
@@ -210,21 +214,18 @@ async def test_registry_extensions_and_isolation(tmp_path: Path) -> None:
         step_id="step",
     )
     settings = tool_policy.ApprovalSettings()
-    assert (await policy.evaluate(settings, call)).action == "require_confirmation"
-    policy.allow("test")
-    assert (await policy.evaluate(settings, call)).action == "allow"
-    assert (
-        await tool_policy.ToolPolicy().evaluate(settings, call)
-    ).action == "require_confirmation"
-    policy.remove("test")
+    assert (await policy.evaluate(settings, call)).action == "ask"
+    rule = replay.allow("test")
+    assert (await policy.evaluate(settings, call, [rule])).action == "approve"
+    assert (await tool_policy.ToolPolicy().evaluate(settings, call)).action == "ask"
 
-    async def match(call: tool_policy.ToolCall) -> bool:
-        return call.arguments["value"] == 1
+    async def check(call: tool_policy.ToolCall) -> str:
+        return "blocked"
 
-    policy.register_matcher("value", match)
-    assert (await policy.evaluate(settings, call)).action == "allow"
+    policy.register_check("value", check)
+    assert (await policy.evaluate(settings, call, [rule])).action == "deny"
     with pytest.raises(ValueError, match="unique"):
-        policy.register_matcher("value", match)
+        policy.register_check("value", check)
 
 
 async def test_approve_all_does_not_bypass_validation(
@@ -257,7 +258,7 @@ async def test_live_policy_changes_and_parallel_gate(
     history: MemoryHistory, tmp_path: Path
 ) -> None:
     config = tmp_path / "config.toml"
-    config.write_text('[components.tools.approval]\nwhitelist = ["automatic"]')
+    config.write_text("[components.tools.approval]\napprove_all = false")
     project = await RunnerProject.open(tmp_path)
     store = ApprovalStore()
     box = mailbox.Mailbox(store)
@@ -286,7 +287,12 @@ async def test_live_policy_changes_and_parallel_gate(
 
     task = asyncio.create_task(
         replay.run(
-            history, workflow, project=project, mailbox=box, tool_policy_version=1
+            history,
+            workflow,
+            project=project,
+            mailbox=box,
+            tool_policy_version=1,
+            rules=[replay.allow("automatic")],
         )
     )
     await asyncio.wait_for(automatic.wait(), 2)
@@ -294,7 +300,7 @@ async def test_live_policy_changes_and_parallel_gate(
     assert executed == [2]
     config.write_text("[components.tools.approval]\napprove_all = true")
     await project.configuration.set("tools.approval.approve_all", True)
-    await approve(box, next(iter(store.requests.values())), {"approved": True})
+    await approve(box, next(iter(store.requests.values())), {"decision": "approve"})
     first = await asyncio.wait_for(task, 2)
     assert first.outcome.kind == "completed"
     assert executed == [2, 1, 3]

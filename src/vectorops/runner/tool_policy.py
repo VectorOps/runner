@@ -1,7 +1,9 @@
 """Runtime-only tool authorization, independent of bindings and saga history."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+import json
 import typing
+from uuid import UUID
 
 import connect
 import pydantic
@@ -13,6 +15,40 @@ class AuthContext(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     properties: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
+
+
+class RuleInput(AuthContext):
+    tool_name: str = pydantic.Field(min_length=1)
+    decision: typing.Literal["approve", "deny"]
+
+    @pydantic.field_validator("tool_name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if value.strip() != value:
+            raise ValueError("tool name must be unpadded")
+        return value
+
+
+class AuthorizationRule(RuleInput):
+    id: UUID
+
+
+class ScopedRule(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+    scope: typing.Literal["workspace", "workflow"]
+    rule: AuthorizationRule
+
+
+def matches(
+    mask: dict[str, pydantic.JsonValue], properties: dict[str, pydantic.JsonValue]
+) -> bool:
+    """Match complete top-level values without conflating booleans and numbers."""
+    return all(
+        key in properties
+        and json.dumps(value, sort_keys=True, allow_nan=False)
+        == json.dumps(properties[key], sort_keys=True, allow_nan=False)
+        for key, value in mask.items()
+    )
 
 
 class ToolApprovalRequest(pydantic.BaseModel):
@@ -51,65 +87,35 @@ class ToolApprovalRequest(pydantic.BaseModel):
 
 
 class ToolApprovalResponse(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(
-        extra="forbid",
-        frozen=True,
-        json_schema_extra={
-            "if": {
-                "properties": {"scope": {"const": "workflow"}},
-                "required": ["scope"],
-            },
-            "then": {"properties": {"approved": {"const": True}}},
-        },
-    )
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    approved: bool = pydantic.Field(strict=True)
+    decision: typing.Literal["approve", "deny"]
     reason: typing.Optional[str] = None
-    scope: typing.Literal["call", "workflow"] = "call"
-
-    @pydantic.model_validator(mode="after")
-    def validate_scope(self) -> typing.Self:
-        if self.scope == "workflow" and not self.approved:
-            raise ValueError("workflow scope requires approval")
-        return self
+    scope: typing.Literal["call", "workflow", "workspace"] = "call"
+    properties: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
 
 
-def workflow_grant(
+def response_rule(
     payload: pydantic.JsonValue, response: pydantic.JsonValue
-) -> typing.Optional[str]:
-    """Interpret a tool approval answer without trusting host-supplied identities."""
-    try:
-        decision = ToolApprovalResponse.model_validate(response)
-    except pydantic.ValidationError:
+) -> typing.Optional[RuleInput]:
+    """Derive identity from the stored request and validate the selected mask."""
+    answer = ToolApprovalResponse.model_validate(response)
+    request = ToolApprovalRequest.model_validate(payload)
+    if not matches(answer.properties, request.auth_context.properties):
+        raise ValueError("approval properties must match the request auth context")
+    if answer.scope == "call":
         return None
-    if not decision.approved or decision.scope != "workflow":
-        return None
-    if not isinstance(payload, dict):
-        return None
-    call = payload.get("call")
-    tool = payload.get("tool")
-    if not isinstance(call, dict) or not isinstance(tool, dict):
-        return None
-    name = call.get("name")
-    if not isinstance(name, str) or not name or tool.get("name") != name:
-        return None
-    return name
+    return RuleInput(
+        tool_name=request.tool.name,
+        properties=answer.properties,
+        decision=answer.decision,
+    )
 
 
 class ApprovalSettings(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
     approve_all: bool = pydantic.Field(default=False, strict=True)
-    whitelist: list[str] = pydantic.Field(default_factory=list)
-
-    @pydantic.field_validator("whitelist", mode="after")
-    @classmethod
-    def validate_names(cls, names: list[str]) -> list[str]:
-        if any(not name or name.strip() != name for name in names):
-            raise ValueError("whitelist names must be nonempty and unpadded")
-        if len(names) != len(set(names)):
-            raise ValueError("whitelist names must be unique")
-        return names
 
 
 class ToolCall(pydantic.BaseModel):
@@ -128,52 +134,59 @@ class ToolCall(pydantic.BaseModel):
 class Decision(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
-    action: typing.Literal["allow", "require_confirmation", "deny"]
+    action: typing.Literal["approve", "ask", "deny"]
     reason: typing.Optional[str] = None
+    rule_id: typing.Optional[UUID] = None
 
 
 Check: typing.TypeAlias = Callable[[ToolCall], Awaitable[typing.Optional[str]]]
-Matcher: typing.TypeAlias = Callable[[ToolCall], Awaitable[bool]]
 
 
 class ToolPolicy:
-    """Own exact-name grants and extensible checks; denials precede all grants."""
+    """Mandatory checks veto rules; specificity precedes scope and decision ties."""
 
     def __init__(self) -> None:
-        self._whitelist: set[str] = set()
         self._checks: dict[str, Check] = {}
-        self._matchers: dict[str, Matcher] = {}
-
-    def allow(self, tool_name: str) -> None:
-        ApprovalSettings(whitelist=[tool_name])
-        self._whitelist.add(tool_name)
-
-    def remove(self, tool_name: str) -> None:
-        self._whitelist.discard(tool_name)
 
     def register_check(self, name: str, check: Check) -> None:
         if not name or name in self._checks:
             raise ValueError("check name must be nonempty and unique")
         self._checks[name] = check
 
-    def register_matcher(self, name: str, matcher: Matcher) -> None:
-        if not name or name in self._matchers:
-            raise ValueError("matcher name must be nonempty and unique")
-        self._matchers[name] = matcher
-
-    async def evaluate(self, settings: ApprovalSettings, call: ToolCall) -> Decision:
-        """Apply current settings without recording a policy activity or decision."""
+    async def check(self, call: ToolCall) -> typing.Optional[Decision]:
         for check in self._checks.values():
             reason = await check(call.model_copy(deep=True))
             if reason is not None:
                 return Decision(action="deny", reason=reason)
-        if (
-            settings.approve_all
-            or call.name in settings.whitelist
-            or call.name in self._whitelist
-        ):
-            return Decision(action="allow")
-        for matcher in self._matchers.values():
-            if await matcher(call.model_copy(deep=True)):
-                return Decision(action="allow")
-        return Decision(action="require_confirmation")
+        return None
+
+    @staticmethod
+    def resolve(
+        settings: ApprovalSettings, call: ToolCall, rules: Sequence[ScopedRule]
+    ) -> Decision:
+        candidates = [
+            item
+            for item in rules
+            if item.rule.tool_name == call.name
+            and matches(item.rule.properties, call.auth_context.properties)
+        ]
+        if not candidates:
+            return Decision(action="approve" if settings.approve_all else "ask")
+        winner = min(
+            candidates,
+            key=lambda item: (
+                -len(item.rule.properties),
+                -int(item.scope == "workflow"),
+                -int(item.rule.decision == "deny"),
+                str(item.rule.id),
+            ),
+        )
+        return Decision(action=winner.rule.decision, rule_id=winner.rule.id)
+
+    async def evaluate(
+        self,
+        settings: ApprovalSettings,
+        call: ToolCall,
+        rules: Sequence[ScopedRule] = (),
+    ) -> Decision:
+        return await self.check(call) or self.resolve(settings, call, rules)

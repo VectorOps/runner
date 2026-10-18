@@ -53,7 +53,7 @@ async def test_activation_collision_rejects_round_without_committing_results(
         ]
     )
     policy = tool_policy.ToolPolicy()
-    policy.allow(name)
+    rules = [replay.allow(name)]
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("dynamic", model="test", backend=backend)
@@ -67,11 +67,18 @@ async def test_activation_collision_rejects_round_without_committing_results(
         assert len(selected.bindings) == 1
         return None
 
-    result = await replay.run(history, workflow, tool_policy_version=1, policy=policy)
+    result = await replay.run(
+        history, workflow, tool_policy_version=1, policy=policy, rules=rules
+    )
     assert result.outcome.kind == "completed"
     assert (
         await replay.run(
-            history, workflow, result.id, tool_policy_version=1, policy=policy
+            history,
+            workflow,
+            result.id,
+            tool_policy_version=1,
+            policy=policy,
+            rules=rules,
         )
     ).outcome.kind == "completed"
 
@@ -95,7 +102,7 @@ async def test_successful_search_cannot_activate_a_denied_tool(
         ]
     )
     policy = tool_policy.ToolPolicy()
-    policy.allow(name)
+    rules = [replay.allow(name)]
 
     async def deny(call: tool_policy.ToolCall) -> Optional[str]:
         return "not allowed" if call.name == "alpha" else None
@@ -110,7 +117,9 @@ async def test_successful_search_cannot_activate_a_denied_tool(
         assert message.role == "tool" and message.is_error
         return None
 
-    result = await replay.run(history, workflow, tool_policy_version=1, policy=policy)
+    result = await replay.run(
+        history, workflow, tool_policy_version=1, policy=policy, rules=rules
+    )
     assert result.outcome.kind == "completed"
 
 
@@ -132,7 +141,7 @@ async def test_parallel_llms_share_catalog_without_activation_leaks(
     )
     other = FakeProvider([answer("done")])
     policy = tool_policy.ToolPolicy()
-    policy.allow(name)
+    rules = [replay.allow(name)]
 
     async def workflow() -> pydantic.JsonValue:
         first = llm.LLM("first", model="test", backend=searching)
@@ -145,7 +154,9 @@ async def test_parallel_llms_share_catalog_without_activation_leaks(
         assert len(selected.bindings) == 1
         return None
 
-    result = await replay.run(history, workflow, tool_policy_version=1, policy=policy)
+    result = await replay.run(
+        history, workflow, tool_policy_version=1, policy=policy, rules=rules
+    )
     assert result.outcome.kind == "completed"
     assert len(searching.requests[-1].tools) == 2 and len(other.requests[0].tools) == 1
 

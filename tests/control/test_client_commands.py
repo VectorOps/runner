@@ -266,7 +266,7 @@ async def test_json_response_and_idempotent_retry(
         )
         request = await pending(connection, accepted.execution_id)
         source = tmp_path / "answer.json"
-        source.write_text('{"approved": true}')
+        source.write_text('{"decision": "approve"}')
         for _ in range(2):
             await command(
                 connection,
@@ -280,7 +280,9 @@ async def test_json_response_and_idempotent_retry(
                 "reply",
                 "--json",
             )
-            assert json.loads(capsys.readouterr().out)["response"] == {"approved": True}
+            assert json.loads(capsys.readouterr().out)["response"] == {
+                "decision": "approve"
+            }
 
 
 async def test_cli_over_tcp_and_shell_exit_does_not_stop(

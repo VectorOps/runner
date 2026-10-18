@@ -77,12 +77,14 @@ async def test_durable_schema_rejection_retry_and_contract_identity(
     reopened = SQLiteHistory(database.path)
     assert await reopened.get_input_spec("request") == spec
     with pytest.raises(input_schema.InputValidationError) as error:
-        await reopened.answer_input(answer({"approved": "yes"}))
-    assert error.value.issues[0].path == ["response", "approved"]
+        await reopened.answer_input(answer({"decision": "yes"}))
+    assert error.value.issues[0].path == ["response", "decision"]
     assert await reopened.get_input("request") == original
-    receipt = await reopened.answer_input(answer({"approved": True}))
-    assert await reopened.answer_input(answer({"approved": True})) == receipt
-    assert await mailbox.Mailbox(reopened).wait("request", spec) == {"approved": True}
+    receipt = await reopened.answer_input(answer({"decision": "approve"}))
+    assert await reopened.answer_input(answer({"decision": "approve"})) == receipt
+    assert await mailbox.Mailbox(reopened).wait("request", spec) == {
+        "decision": "approve"
+    }
     with pytest.raises(mailbox.MailboxConflict, match="contract changed"):
         await reopened.register_input(
             "request", spec.model_copy(update={"response_schema": {"type": "string"}})
@@ -116,12 +118,12 @@ async def test_invalid_approval_cannot_create_grant(
     with pytest.raises(input_schema.InputValidationError):
         await database.answer_input(invalid)
     assert (await database.get_input("tool")).status == "pending"
-    assert not await database.tool_approved("workflow", "test")
+    assert not await database.authorization_rules("workflow", "test")
     valid = invalid.model_copy(
-        update={"response": {"approved": True, "scope": "workflow"}}
+        update={"response": {"decision": "approve", "scope": "workflow"}}
     )
     await database.answer_input(valid)
-    assert await database.tool_approved("workflow", "test")
+    assert await database.authorization_rules("workflow", "test")
 
 
 async def test_two_contracts_on_one_channel(tmp_path: Path) -> None:
@@ -169,10 +171,10 @@ async def test_invalid_answer_does_not_complete_waiter(tmp_path: Path) -> None:
     try:
         await asyncio.wait_for(ready.wait(), 5)
         with pytest.raises(input_schema.InputValidationError):
-            await owner.answer(answer({"approved": "yes"}))
+            await owner.answer(answer({"decision": "yes"}))
         assert not task.done()
-        await owner.answer(answer({"approved": False}))
-        assert await asyncio.wait_for(task, 5) == {"approved": False}
+        await owner.answer(answer({"decision": "deny"}))
+        assert await asyncio.wait_for(task, 5) == {"decision": "deny"}
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
 from typing import Optional
+from uuid import UUID
 
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
@@ -35,6 +36,24 @@ class ActivityExecutionContext:
     )
     created_at: Optional[str] = None
     scheduler: Scheduler = field(default_factory=Scheduler, compare=False, repr=False)
+    authorization_rule_id: Optional[UUID] = None
+    persist_authorization_decision: Optional[
+        Callable[[bool, UUID], Awaitable[None]]
+    ] = field(default=None, compare=False, repr=False)
+
+    async def record_authorization_decision(
+        self, approved: bool, rule_id: UUID
+    ) -> None:
+        if self.persist_authorization_decision is None:
+            raise AuthorizationPersistenceError(
+                "authorization persistence is unavailable"
+            )
+        try:
+            await self.persist_authorization_decision(approved, rule_id)
+        except Exception as exc:
+            raise AuthorizationPersistenceError(
+                "cannot persist tool authorization"
+            ) from exc
 
     async def record_authorization(self) -> None:
         if self.persist_authorization is None:

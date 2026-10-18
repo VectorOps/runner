@@ -13,10 +13,10 @@ async def test_answer_does_not_interrupt_parallel_tool_execution(
     flows.started = asyncio.Event()
     flows.release = asyncio.Event()
     flows.finished = asyncio.Event()
-    (tmp_path / "config.toml").write_text(
-        '[components.tools.approval]\nwhitelist = ["work"]\n'
-    )
     async with client.embedded(tmp_path) as connection:
+        await connection.request(
+            "tools.rules.create", {"rule": {"tool_name": "work", "decision": "approve"}}
+        )
         accepted = await connection.start(
             p.Start(
                 reference="python:tests.fixtures.paused_workflows:parallel_tools",
@@ -27,7 +27,7 @@ async def test_answer_does_not_interrupt_parallel_tool_execution(
         await asyncio.wait_for(flows.started.wait(), 5)
         assert (await connection.execution(accepted.execution_id)).status == "running"
         await connection.answer_input(
-            response(request).model_copy(update={"response": {"approved": True}})
+            response(request).model_copy(update={"response": {"decision": "approve"}})
         )
         assert (await connection.execution(accepted.execution_id)).status == "running"
         assert not flows.finished.is_set()

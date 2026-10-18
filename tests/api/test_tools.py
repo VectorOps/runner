@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Optional
+from uuid import UUID, uuid4
 
 import connect
 import pydantic
@@ -24,6 +25,7 @@ class ApprovalStore:
     def __init__(self) -> None:
         self.requests: dict[str, mailbox.StoredInputRequest] = {}
         self.registered = asyncio.Event()
+        self.rules: dict[str, tool_policy.AuthorizationRule] = {}
 
     async def register_input(
         self, request_id: str, spec: mailbox.InputSpec
@@ -46,18 +48,28 @@ class ApprovalStore:
     async def get_input_spec(self, request_id: str) -> mailbox.InputSpec:
         return self.requests[request_id].specification()
 
-    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
-        return any(
-            request.workflow_id == workflow_id
-            and request.status == "answered"
-            and tool_policy.workflow_grant(request.payload, request.response)
-            == tool_name
-            for request in self.requests.values()
-        )
+    async def authorization_rules(
+        self, workflow_id: str, tool_name: Optional[str] = None
+    ) -> list[tool_policy.AuthorizationRule]:
+        return [
+            rule
+            for key, rule in self.rules.items()
+            if self.requests[key].workflow_id == workflow_id
+            and (tool_name is None or rule.tool_name == tool_name)
+        ]
+
+    async def approval_rule_id(self, request_id: str) -> Optional[UUID]:
+        return self.rules[request_id].id if request_id in self.rules else None
 
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
         request = self.requests[answer.request_id]
         request.validate_response(answer.response)
+        if request.request_type == "tool.approval.v1":
+            value = tool_policy.response_rule(request.payload, answer.response)
+            if value is not None:
+                self.rules[answer.request_id] = tool_policy.AuthorizationRule(
+                    **value.model_dump(), id=uuid4()
+                )
         updated = request.model_copy(
             update={"status": "answered", "response": answer.response}
         )
@@ -105,7 +117,11 @@ async def test_patch_tool_approval_and_replay(
     task = asyncio.create_task(replay.run(history, workflow, mailbox=box))
     await asyncio.wait_for(store.registered.wait(), 2)
     assert not (tmp_path / "file").exists()
-    await approve(box, next(iter(store.requests.values())), {"approved": approved})
+    await approve(
+        box,
+        next(iter(store.requests.values())),
+        {"decision": "approve" if approved else "deny"},
+    )
     first = await task
     assert first.outcome.kind == "completed"
     response = connect.ToolResultMessage.model_validate(first.outcome.result)
@@ -153,7 +169,11 @@ async def test_standalone_tool_approval_and_replay(
     assert isinstance(request.payload, dict)
     assert isinstance(request.payload["call"], dict)
     assert request.payload["call"]["arguments"] == {"value": 1}
-    await approve(box, request, {"approved": approved, "reason": "host decision"})
+    await approve(
+        box,
+        request,
+        {"decision": "approve" if approved else "deny", "reason": "host decision"},
+    )
     first = await task
     assert first.outcome.kind == "completed"
     result = connect.ToolResultMessage.model_validate(first.outcome.result)
@@ -232,7 +252,7 @@ async def test_parallel_approval_does_not_block_automatic_tool(
     await asyncio.wait_for(automatic_finished.wait(), 2)
     await asyncio.wait_for(store.registered.wait(), 2)
     assert executed == [2]
-    await approve(box, next(iter(store.requests.values())), {"approved": True})
+    await approve(box, next(iter(store.requests.values())), {"decision": "approve"})
     first = await task
     assert first.outcome.kind == "completed"
     await replay.run(history, workflow, first.id)
@@ -267,7 +287,7 @@ async def test_pending_approval_reattaches_after_interruption(
     with pytest.raises(asyncio.CancelledError):
         await task
     box = mailbox.Mailbox(store)
-    await approve(box, request, {"approved": True})
+    await approve(box, request, {"decision": "approve"})
     result = await replay.run(history, workflow, request.request_id, mailbox=box)
     assert result.outcome.kind == "completed", result.outcome
     assert len(calls) == 1 and len(store.requests) == 1
@@ -309,7 +329,7 @@ async def test_invalid_approval_fails_closed(
         await approve(box, request, answer)
     assert store.requests[request.request_id].status == "pending"
     assert not task.done()
-    await approve(box, request, {"approved": False})
+    await approve(box, request, {"decision": "deny"})
     result = await task
     assert result.outcome.kind == "completed"
     assert (await replay.run(history, workflow, result.id)).outcome.kind == "completed"

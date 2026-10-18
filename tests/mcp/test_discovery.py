@@ -39,6 +39,7 @@ async def search(
     selected: Discovery, query: str, call_id: str = "search"
 ) -> connect.ToolResultMessage:
     tool = selected.bindings[0]
+    assert not isinstance(tool, llm.WorkflowToolBinding)
     result = await tool.execute(
         ActivityExecutionContext(None, "workflow", "step"), {"query": query}
     )
@@ -130,15 +131,16 @@ async def test_same_round_hidden_call_is_unknown_then_activated_on_replay(
         ]
     )
     policy = tool_policy.ToolPolicy()
-    policy.allow(name)
-    policy.allow("alpha")
+    rules = [replay.allow(name), replay.allow("alpha")]
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("dynamic", model="test", backend=provider)
         agent.add_user_message("hello")
         return (await agent.run(tool_set=selected)).model_dump(mode="json")
 
-    first = await replay.run(history, workflow, tool_policy_version=1, policy=policy)
+    first = await replay.run(
+        history, workflow, tool_policy_version=1, policy=policy, rules=rules
+    )
     assert first.outcome.kind == "completed"
     assert len(provider.requests[0].tools) == 1
     assert len(provider.requests[1].tools) == 2
@@ -150,7 +152,12 @@ async def test_same_round_hidden_call_is_unknown_then_activated_on_replay(
     assert hidden.role == "tool" and hidden.is_error
     assert (
         await replay.run(
-            history, workflow, first.id, tool_policy_version=1, policy=policy
+            history,
+            workflow,
+            first.id,
+            tool_policy_version=1,
+            policy=policy,
+            rules=rules,
         )
     ).outcome == first.outcome
     assert len(provider.requests) == 3 and len(selected.bindings) == 1
@@ -180,7 +187,7 @@ async def test_strict_failed_round_does_not_advance(history: MemoryHistory) -> N
         ]
     )
     policy = tool_policy.ToolPolicy()
-    policy.allow(search_name)
+    rules = [replay.allow(search_name)]
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM(
@@ -193,7 +200,9 @@ async def test_strict_failed_round_does_not_advance(history: MemoryHistory) -> N
         return None
 
     assert (
-        await replay.run(history, workflow, tool_policy_version=1, policy=policy)
+        await replay.run(
+            history, workflow, tool_policy_version=1, policy=policy, rules=rules
+        )
     ).outcome.kind == "completed"
 
 
@@ -255,7 +264,9 @@ async def test_discovery_approval_does_not_grant_concrete_tool(
                                 execution_id=identifier,
                                 request_id=request.request_id,
                                 response={
-                                    "approved": len(answered) == 1,
+                                    "decision": (
+                                        "approve" if len(answered) == 1 else "deny"
+                                    ),
                                     "scope": (
                                         "workflow" if len(answered) == 1 else "call"
                                     ),

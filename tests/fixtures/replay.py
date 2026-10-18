@@ -2,6 +2,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 import typing
 from typing import Literal, Optional
+from uuid import uuid4
 
 import pydantic
 
@@ -17,6 +18,20 @@ from vectorops.runner.runner.project import RunnerConfig, RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 
 
+def allow(
+    tool_name: str, properties: Optional[dict[str, pydantic.JsonValue]] = None
+) -> tool_policy.ScopedRule:
+    return tool_policy.ScopedRule(
+        scope="workspace",
+        rule=tool_policy.AuthorizationRule(
+            id=uuid4(),
+            tool_name=tool_name,
+            decision="approve",
+            properties=properties or {},
+        ),
+    )
+
+
 async def run(
     history: MemoryHistory,
     invoke: Callable[[], Awaitable[pydantic.JsonValue]],
@@ -29,6 +44,7 @@ async def run(
     event_sink: Optional[StepEventSink] = None,
     project: Optional[RunnerProject] = None,
     inboxes: Optional[inbox.Registry] = None,
+    rules: Optional[list[tool_policy.ScopedRule]] = None,
 ) -> models.WorkflowStep:
     async def child(
         configuration: models.Workflow,
@@ -73,9 +89,15 @@ async def run(
         grants = None
         if mailbox is not None:
             grants = typing.cast(tool_authorization_store.WorkflowGrants, mailbox.store)
+
+        class Data(tool_authorization_store.AuthorizationStore):
+            async def rules(
+                self, workflow_id: str, tool_name: str
+            ) -> list[tool_policy.ScopedRule]:
+                return [*(rules or []), *await super().rules(workflow_id, tool_name)]
+
         authorization = tool_authorization.ToolAuthorizationService(
-            tool_authorization_store.AuthorizationStore(project.configuration, grants),
-            policy,
+            Data(project.configuration, grants), policy
         )
         with authorization.activate():
             return await session.run(invoke)

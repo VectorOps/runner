@@ -17,7 +17,7 @@ def answer(
     return mailbox.Answer(
         execution_id=request.execution_id,
         request_id=request.request_id,
-        response={"approved": approved, "scope": scope},
+        response={"decision": "approve" if approved else "deny", "scope": scope},
         idempotency_key=request.request_id,
     )
 
@@ -119,26 +119,21 @@ async def test_desktop_workspace_approval_configuration_requests(
     async with client.embedded(tmp_path) as host:
         run = await host.start(p.Start(reference="flow:child", idempotency_key="start"))
         request = (await pending(host, run.execution_id))[0]
-        selected = await host.request(
-            "configuration.get", {"name": "tools.approval.whitelist"}
-        )
-        assert isinstance(selected, dict) and not selected["exists"]
+        selected = await host.request("tools.rules.list", {})
+        assert selected == {"rules": []}
         assert isinstance(request.payload, dict)
         call = request.payload["call"]
         assert isinstance(call, dict) and isinstance(call["name"], str)
         await host.request(
-            "configuration.set",
+            "tools.rules.create",
             {
-                "name": "tools.approval.whitelist",
-                "value": [call["name"]],
-                "permanent": True,
+                "rule": {"tool_name": call["name"], "decision": "approve"},
             },
         )
         await host.answer_input(answer(request))
         await completed(host, run.execution_id)
-        assert (
-            await host.get_configuration("components.tools.approval.whitelist")
-        ).value == [call["name"]]
+        saved = await host.request("tools.rules.list", {"tool_name": call["name"]})
+        assert isinstance(saved, dict) and saved["rules"]
     async with client.embedded(tmp_path) as host:
         fresh = await host.start(
             p.Start(reference="flow:child", idempotency_key="fresh")

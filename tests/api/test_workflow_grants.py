@@ -71,7 +71,7 @@ async def test_workflow_grant_cannot_bypass_mandatory_checks(
     await approve(
         box,
         next(iter(store.requests.values())),
-        {"approved": True, "scope": "workflow"},
+        {"decision": "approve", "scope": "workflow"},
     )
     first = await asyncio.wait_for(task, 2)
     assert first.outcome.kind == "completed"
@@ -103,4 +103,4 @@ def test_invalid_scope_response(value: dict[str, pydantic.JsonValue]) -> None:
 
 
 def test_scope_defaults_to_call() -> None:
-    assert llm.ToolApprovalResponse(approved=True).scope == "call"
+    assert llm.ToolApprovalResponse(decision="approve").scope == "call"

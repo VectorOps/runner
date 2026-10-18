@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import partial
 import typing
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pydantic
 
@@ -576,14 +576,23 @@ class ExecutionSession:
             raise ValueError("step belongs to another workflow")
         async with self._history_lock:
             previous = await self.history.get_step(step.id)
+            if previous.authorized is False and step.authorized is True:
+                previous = previous.model_copy(update={"authorization_rule_id": None})
             step = step.model_copy(
                 update={
                     "authorized": (
                         previous.authorized
-                        if previous.authorized is True
+                        if previous.authorized is not None
+                        and step.authorized is None
+                        or previous.authorized is True
                         else step.authorized
                     ),
                     "revision": previous.revision + 1,
+                    "authorization_rule_id": (
+                        previous.authorization_rule_id
+                        if step.authorization_rule_id is None
+                        else step.authorization_rule_id
+                    ),
                     "deliveries": previous.deliveries,
                     "created_at": previous.created_at,
                     "completed_at": (
@@ -599,6 +608,20 @@ class ExecutionSession:
             self.reporter.record(self.workflow.id, self.durable_head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
+        async def record_decision(approved: bool, rule_id: UUID) -> None:
+            current = await self.history.get_step(step.id)
+            if current.workflow_id != self.workflow.id:
+                raise ValueError("step belongs to another workflow")
+            if current.authorized is not True:
+                await self.update(
+                    current.model_copy(
+                        update={
+                            "authorized": approved,
+                            "authorization_rule_id": rule_id,
+                        }
+                    )
+                )
+
         async def authorize() -> None:
             current = await self.history.get_step(step.id)
             if current.workflow_id != self.workflow.id:
@@ -619,6 +642,8 @@ class ExecutionSession:
             persist_authorization=authorize,
             created_at=step.created_at,
             scheduler=self.scheduler,
+            authorization_rule_id=step.authorization_rule_id,
+            persist_authorization_decision=record_decision,
         )
 
     async def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

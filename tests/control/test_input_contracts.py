@@ -26,7 +26,7 @@ async def test_approval_schema_error_survives_transport_and_restart(
         invalid = mailbox.Answer(
             execution_id=request.execution_id,
             request_id=request.request_id,
-            response={"approved": "yes"},
+            response={"decision": "yes"},
             idempotency_key="answer",
         )
         with pytest.raises(p.RemoteError) as error:
@@ -35,13 +35,13 @@ async def test_approval_schema_error_survives_transport_and_restart(
         assert error.value.details == {
             "issues": [
                 {
-                    "path": ["response", "approved"],
-                    "message": "must satisfy type",
+                    "path": ["response", "decision"],
+                    "message": "must satisfy enum",
                 }
             ]
         }
         assert (await pending(connection, accepted.execution_id))[0] == original
-        valid = invalid.model_copy(update={"response": {"approved": True}})
+        valid = invalid.model_copy(update={"response": {"decision": "approve"}})
         receipt = await connection.answer_input(valid)
         assert await connection.answer_input(valid) == receipt
         await completed(connection, accepted.execution_id)

@@ -49,7 +49,9 @@ async def test_paused_startup_is_cold_and_answers_activate_once(
         ).requests == requests
         answers = [response(request) for request in requests]
         if name == "tool":
-            answers[0] = answers[0].model_copy(update={"response": {"approved": True}})
+            answers[0] = answers[0].model_copy(
+                update={"response": {"decision": "approve"}}
+            )
         with patch.object(service, "_schedule", wraps=service._schedule) as schedule:
             await asyncio.gather(
                 *(
@@ -79,10 +81,10 @@ async def test_parallel_work_keeps_running_until_only_inputs_remain(
     flows.started = asyncio.Event()
     flows.release = asyncio.Event()
     flows.finished = asyncio.Event()
-    (tmp_path / "config.toml").write_text(
-        '[components.tools.approval]\nwhitelist = ["work"]\n'
-    )
     async with client.embedded(tmp_path) as connection:
+        await connection.request(
+            "tools.rules.create", {"rule": {"tool_name": "work", "decision": "approve"}}
+        )
         accepted = await connection.start(
             p.Start(
                 reference=f"python:tests.fixtures.paused_workflows:{name}",
@@ -97,7 +99,7 @@ async def test_parallel_work_keeps_running_until_only_inputs_remain(
         await status(connection, accepted.execution_id, "paused")
         answer = response(request)
         if name == "parallel_tools":
-            answer = answer.model_copy(update={"response": {"approved": True}})
+            answer = answer.model_copy(update={"response": {"decision": "approve"}})
         await connection.answer_input(answer)
         await status(connection, accepted.execution_id, "completed")
 

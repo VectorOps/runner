@@ -73,7 +73,7 @@ async def test_shutdown_restart_restores_same_wait(
         answer = response(restored)
         if callable_name == "tool":
             assert restored.channel == "tool.approval"
-            answer = answer.model_copy(update={"response": {"approved": True}})
+            answer = answer.model_copy(update={"response": {"decision": "approve"}})
         receipt = await connection.answer_input(answer)
         await completed(connection, accepted.execution_id)
         assert await connection.answer_input(answer) == receipt
@@ -198,7 +198,7 @@ async def test_process_crash_recovers_wait_and_undelivered_answer(
             answer = response(request)
             if callable_name.startswith("tool"):
                 answer = answer.model_copy(
-                    update={"response": {"approved": True, "scope": "workflow"}}
+                    update={"response": {"decision": "approve", "scope": "workflow"}}
                 )
             await connection.answer_input(answer)
         await completed(connection, request.execution_id)
@@ -208,7 +208,7 @@ async def test_process_crash_recovers_wait_and_undelivered_answer(
             )
         )
         assert restored.response == (
-            {"approved": True, "scope": "workflow"}
+            {"decision": "approve", "scope": "workflow"}
             if callable_name.startswith("tool")
             else "before crash" if answered else "hello"
         )

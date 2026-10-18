@@ -14,7 +14,7 @@ async def test_workspace_settings_are_live_durable_and_isolated(tmp_path: Path) 
     second = await RunnerProject.open(second_path)
     store = tool_authorization_store.AuthorizationStore(first.configuration)
     other = tool_authorization_store.AuthorizationStore(second.configuration)
-    settings = tool_policy.ApprovalSettings(whitelist=["test"])
+    settings = tool_policy.ApprovalSettings(approve_all=True)
     await store.save_settings(settings, permanent=True)
     assert store.settings() == settings
     assert other.settings() == tool_policy.ApprovalSettings()
@@ -29,11 +29,11 @@ async def test_workspace_settings_are_live_durable_and_isolated(tmp_path: Path) 
 
 async def test_workflow_store_delegates_without_caching() -> None:
     grants = AsyncMock(spec=tool_authorization_store.WorkflowGrants)
-    grants.tool_approved.side_effect = [True, False]
+    grants.authorization_rules.side_effect = [[], []]
     store = tool_authorization_store.AuthorizationStore(
         Mock(spec=Configuration), grants
     )
-    assert await store.tool_approved("workflow", "test")
-    assert not await store.tool_approved("workflow", "test")
-    assert grants.tool_approved.await_count == 2
-    grants.tool_approved.assert_awaited_with("workflow", "test")
+    assert await store.rules("workflow", "test") == []
+    assert await store.rules("workflow", "test") == []
+    assert grants.authorization_rules.await_count == 2
+    grants.authorization_rules.assert_awaited_with("workflow", "test")

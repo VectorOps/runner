@@ -80,7 +80,7 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
     release.set()
     with patch.object(
         tool_policy.ToolPolicy,
-        "evaluate",
+        "check",
         side_effect=AssertionError("approval repeated"),
     ):
         completion = await replay.run(
@@ -201,7 +201,7 @@ async def test_workflow_reconstruction_returns_original_response(
     before = dict(history.steps)
     with patch.object(
         tool_policy.ToolPolicy,
-        "evaluate",
+        "check",
         side_effect=AssertionError("approval during replay"),
     ):
         assert (

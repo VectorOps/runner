@@ -216,7 +216,7 @@ async def test_helper_exec_requires_normal_approval(tmp_path: Path) -> None:
                 mailbox.Answer(
                     execution_id=accepted.execution_id,
                     request_id=request.request_id,
-                    response={"approved": False},
+                    response={"decision": "deny"},
                     idempotency_key="deny",
                 )
             )

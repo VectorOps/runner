@@ -85,7 +85,7 @@ async def test_approval_controls_remote_calls_and_replays_outcome(
         mailbox.Answer(
             execution_id=request.execution_id,
             request_id=request.request_id,
-            response={"approved": approved},
+            response={"decision": "approve" if approved else "deny"},
             idempotency_key="answer",
         )
     )

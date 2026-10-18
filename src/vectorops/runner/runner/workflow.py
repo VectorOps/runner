@@ -16,6 +16,7 @@ import pydantic
 from vectorops.runner import models, usage
 from vectorops.runner import diagnostics
 from vectorops.runner import tool_authorization, tool_authorization_store, tool_policy
+from vectorops.runner import tool_rule_api
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
@@ -251,6 +252,28 @@ class WorkflowRunner:
             reference.request_id
         )
 
+    async def authorization_rules(
+        self, method: str, params: dict[str, pydantic.JsonValue]
+    ) -> pydantic.JsonValue:
+        scope = tool_rule_api.RuleScope.model_validate(
+            {
+                key: value
+                for key, value in params.items()
+                if key in tool_rule_api.RuleScope.model_fields
+            }
+        )
+        project = await self.project()
+        database = (
+            await self._database(project, scope.execution_id)
+            if scope.execution_id is not None
+            else None
+        )
+        if database is not None:
+            await database.get_workflow(scope.workflow_id or "")
+        return await tool_rule_api.RuleManagement(
+            tool_authorization_store.WorkspaceRules(project.database), database
+        ).dispatch(method, params)
+
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
         owner = self._mailboxes.get(answer.execution_id)
         if owner is not None:
@@ -420,6 +443,9 @@ class WorkflowRunner:
                 async with (
                     SQLiteHistory(
                         history_path,
+                        workspace_rules=tool_authorization_store.WorkspaceRules(
+                            project.database
+                        ),
                         usage_store=project.usage,
                         summary_store=project.summaries,
                         event_sink=self.event_sink,
@@ -436,6 +462,7 @@ class WorkflowRunner:
                         cache_workflows=False,
                     ) as history,
                 ):
+                    await database.publish_authorization_rules()
                     if configuration is not None:
                         await history.save_workflow(configuration)
                     else:
@@ -629,7 +656,9 @@ class WorkflowRunner:
             )
         authorization = tool_authorization.ToolAuthorizationService(
             tool_authorization_store.AuthorizationStore(
-                project.configuration, tool_grants
+                project.configuration,
+                tool_grants,
+                tool_authorization_store.WorkspaceRules(project.database),
             ),
             self._tool_policy,
         )
@@ -709,6 +738,7 @@ class WorkflowRunner:
             raise FileNotFoundError("execution history is missing")
         return SQLiteHistory(
             path,
+            workspace_rules=tool_authorization_store.WorkspaceRules(project.database),
             usage_store=project.usage,
             summary_store=project.summaries,
             event_sink=self.event_sink,
@@ -829,6 +859,9 @@ class WorkflowRunner:
         records = []
         for identifier in sorted(identifiers):
             try:
+                await (
+                    await self._database(await self.project(), identifier)
+                ).publish_authorization_rules()
                 records.append(await self.execution_state(identifier))
             except KeyError:
                 if (

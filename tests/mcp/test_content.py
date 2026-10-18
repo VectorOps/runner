@@ -223,7 +223,7 @@ async def test_content_tools_use_approval_and_replay(
             mailbox.Answer(
                 execution_id=identifier,
                 request_id=request.request_id,
-                response={"approved": approved},
+                response={"decision": "approve" if approved else "deny"},
                 idempotency_key="answer",
             )
         )

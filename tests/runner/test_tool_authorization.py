@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Optional
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import connect
 import pydantic
@@ -47,13 +48,15 @@ def context(
         mailbox=box,
         authorized=authorized,
         persist_authorization=persist,
+        persist_authorization_decision=AsyncMock(),
     )
 
 
 def data(settings: Callable[[], tool_policy.ApprovalSettings]) -> Mock:
     store = Mock(spec=authorization.AuthorizationData)
     store.settings = settings
-    store.tool_approved = AsyncMock(return_value=False)
+    store.rules = AsyncMock(return_value=[])
+    store.approval_rule_id = AsyncMock(return_value=None)
     return store
 
 
@@ -62,7 +65,7 @@ async def test_service_records_authorization_without_execution() -> None:
     settings = Mock(return_value=tool_policy.ApprovalSettings(approve_all=True))
     service = authorization.ToolAuthorizationService(data(settings))
     binding = Binding()
-    assert await service.authorize(context(persist), binding, request()) is None
+    assert (await service.authorize(context(persist), binding, request())).error is None
     assert binding.validations == 1
     settings.assert_called_once_with()
     persist.assert_awaited_once_with()
@@ -82,7 +85,7 @@ async def test_validation_precedes_policy_and_persistence(
     persist = AsyncMock()
     settings = Mock(side_effect=AssertionError("settings before validation"))
     service = authorization.ToolAuthorizationService(data(settings))
-    error = await service.authorize(context(persist), binding, request())
+    error = (await service.authorize(context(persist), binding, request())).error
     assert error is not None and message in str(error)
     settings.assert_not_called()
     persist.assert_not_awaited()
@@ -95,8 +98,7 @@ async def test_authorized_step_skips_entire_boundary() -> None:
     binding = Binding(invalid=True)
     assert (
         await service.authorize(context(persist, authorized=True), binding, request())
-        is None
-    )
+    ).error is None
     assert binding.validations == 0
     settings.assert_not_called()
     persist.assert_not_awaited()
@@ -119,15 +121,17 @@ async def test_mandatory_denial_precedes_workflow_grant() -> None:
 
     policy.register_check("deny", deny)
     store = data(tool_policy.ApprovalSettings)
-    store.tool_approved.return_value = True
+    store.rules.return_value = []
     service = authorization.ToolAuthorizationService(store, policy)
     box = Mock(spec=mailbox.Mailbox)
     box.existing = AsyncMock(return_value=None)
     persist = AsyncMock()
-    error = await service.authorize(context(persist, box=box), Binding(), request())
+    error = (
+        await service.authorize(context(persist, box=box), Binding(), request())
+    ).error
     assert isinstance(error, authorization.ToolExecutionError)
     assert str(error) == "denied"
-    store.tool_approved.assert_not_awaited()
+    store.rules.assert_not_awaited()
     box.wait.assert_not_called()
     persist.assert_not_awaited()
 
@@ -145,12 +149,14 @@ async def test_existing_confirmation_keeps_contract_and_decision(
     ).input_spec("original.channel")
     box = Mock(spec=mailbox.Mailbox)
     box.existing = AsyncMock(return_value=spec)
-    box.wait = AsyncMock(return_value={"approved": approved})
+    box.wait = AsyncMock(return_value={"decision": "approve" if approved else "deny"})
     persist = AsyncMock()
-    error = await service.authorize(context(persist, box=box), binding, request())
+    error = (
+        await service.authorize(context(persist, box=box), binding, request())
+    ).error
     assert (error is None) is approved
     box.wait.assert_awaited_once_with("step", spec)
-    store.tool_approved.assert_not_called()
+    store.rules.assert_not_called()
     settings.assert_not_called()
     assert persist.await_count == int(approved)
 
@@ -201,22 +207,24 @@ async def test_execution_scopes_are_isolated_and_restored() -> None:
 
 async def test_workflow_grant_lookup_is_independent_of_mailbox() -> None:
     store = data(tool_policy.ApprovalSettings)
-    store.tool_approved.return_value = True
+    rule = tool_policy.AuthorizationRule(
+        id=uuid4(), tool_name="test", decision="approve"
+    )
+    store.rules.return_value = [tool_policy.ScopedRule(scope="workflow", rule=rule)]
     service = authorization.ToolAuthorizationService(store)
     box = Mock(spec=mailbox.Mailbox)
     box.existing = AsyncMock(return_value=None)
     persist = AsyncMock()
-    assert (
-        await service.authorize(context(persist, box=box), Binding(), request()) is None
-    )
-    store.tool_approved.assert_awaited_once_with("workflow", "test")
+    result = await service.authorize(context(persist, box=box), Binding(), request())
+    assert result.error is None and result.rule_id == rule.id
+    store.rules.assert_awaited_once_with("workflow", "test")
     box.wait.assert_not_called()
-    persist.assert_awaited_once_with()
+    persist.assert_not_awaited()
 
 
 async def test_workflow_grant_storage_failure_propagates() -> None:
     store = data(tool_policy.ApprovalSettings)
-    store.tool_approved.side_effect = OSError("grant storage failed")
+    store.rules.side_effect = OSError("grant storage failed")
     service = authorization.ToolAuthorizationService(store)
     box = Mock(spec=mailbox.Mailbox)
     box.existing = AsyncMock(return_value=None)

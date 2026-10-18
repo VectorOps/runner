@@ -46,7 +46,7 @@ async def main() -> None:
                     execution_id=request.execution_id,
                     request_id=request.request_id,
                     response=(
-                        {"approved": True, "scope": "workflow"}
+                        {"decision": "approve", "scope": "workflow"}
                         if sys.argv[3].startswith("tool")
                         else "before crash"
                     ),

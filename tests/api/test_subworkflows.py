@@ -72,7 +72,7 @@ async def test_subworkflow_history_and_descriptor_replay(
         ),
         patch.object(
             tool_policy.ToolPolicy,
-            "evaluate",
+            "check",
             side_effect=AssertionError("live policy"),
         ),
     ):
@@ -91,7 +91,7 @@ async def test_rejects_unavailable_workflow_and_bad_input(
     )
     with patch.object(
         tool_policy.ToolPolicy,
-        "evaluate",
+        "check",
         side_effect=AssertionError("policy before validation"),
     ):
         result = connect.ToolResultMessage.model_validate(
@@ -136,7 +136,7 @@ async def test_approval_precedes_child_spawn_and_survives_restart(
             mailbox.Answer(
                 execution_id=identifier,
                 request_id=request.request_id,
-                response={"approved": approved},
+                response={"decision": "approve" if approved else "deny"},
                 idempotency_key="answer",
             )
         )
@@ -173,7 +173,7 @@ async def test_mandatory_denial_prevents_child(
     prepare(workspace)
     with patch.object(
         tool_policy.ToolPolicy,
-        "evaluate",
+        "check",
         return_value=tool_policy.Decision(action="deny", reason="blocked"),
     ):
         result = connect.ToolResultMessage.model_validate(

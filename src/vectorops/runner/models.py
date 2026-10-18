@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typing
+from uuid import UUID
 
 import pydantic
 
@@ -228,6 +229,9 @@ class WorkflowStep(_JsonModel):
     authorized: typing.Optional[bool] = pydantic.Field(
         default=None, strict=True, exclude_if=lambda value: value is None
     )
+    authorization_rule_id: typing.Optional[UUID] = pydantic.Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     created_at: typing.Optional[str] = None
     completed_at: typing.Optional[str] = None
     metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
@@ -251,10 +255,26 @@ class WorkflowStep(_JsonModel):
         """Mark a pending tool invocation authorized without changing its outcome."""
         if self.operation.kind != "llm.tool" or self.outcome.kind != "pending":
             raise ValueError("authorization requires a pending tool call")
-        return self.model_copy(update={"authorized": True})
+        return self.model_copy(
+            update={"authorized": True, "authorization_rule_id": None}
+        )
 
     def validate_authorization_update(self, previous: WorkflowStep) -> None:
+        if self.authorization_rule_id != previous.authorization_rule_id:
+            if (
+                previous.authorized is True
+                or previous.outcome.kind != "pending"
+                or self.outcome.kind != "pending"
+                or self.operation.kind != "llm.tool"
+            ):
+                raise ValueError(
+                    "authorization provenance must be recorded before completion"
+                )
         if self.authorized == previous.authorized:
+            return
+        if self.authorized is False and previous.authorized is not True:
+            if self.operation.kind != "llm.tool" or self.outcome.kind != "pending":
+                raise ValueError("authorization requires a pending tool call")
             return
         if previous.authorized is True or self.authorized is not True:
             raise ValueError("authorization cannot be revoked")
@@ -288,6 +308,10 @@ class WorkflowStep(_JsonModel):
             raise ValueError("a step cannot be its own predecessor")
         if self.authorized is not None and self.operation.kind != "llm.tool":
             raise ValueError("authorization is only valid for tool calls")
+        if self.authorization_rule_id is not None and (
+            self.operation.kind != "llm.tool" or self.authorized is None
+        ):
+            raise ValueError("authorization rule requires a tool decision")
         if self.resume_step_id is not None and (
             not isinstance(self.operation, WorkflowCompleteOperation)
             or self.outcome.kind != "failed"

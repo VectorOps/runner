@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 import hashlib
 import json
 import typing
+from uuid import UUID
 
 import connect
 import pydantic
@@ -66,7 +68,21 @@ def digest(value: pydantic.JsonValue) -> str:
 class AuthorizationData(typing.Protocol):
     def settings(self) -> tool_policy.ApprovalSettings: ...
 
-    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool: ...
+    async def rules(
+        self, workflow_id: str, tool_name: str
+    ) -> list[tool_policy.ScopedRule]: ...
+
+    async def approval_rule_id(self, request_id: str) -> typing.Optional[UUID]: ...
+
+
+@dataclass(frozen=True)
+class AuthorizationResult:
+    decision: tool_policy.Decision
+    error: typing.Optional[Exception] = None
+
+    @property
+    def rule_id(self) -> typing.Optional[UUID]:
+        return self.decision.rule_id
 
 
 _CURRENT: ContextVar["ToolAuthorizationService"] = ContextVar("tool_authorization")
@@ -113,7 +129,7 @@ class ToolAuthorizationService:
     @staticmethod
     def validate_response(answer: pydantic.JsonValue) -> None:
         response = tool_policy.ToolApprovalResponse.model_validate(answer)
-        if not response.approved:
+        if response.decision == "deny":
             raise ToolExecutionError(response.reason or "Tool call rejected by host")
 
     @staticmethod
@@ -176,19 +192,23 @@ class ToolAuthorizationService:
         binding: typing.Optional[ToolMetadata],
         request: connect.ToolCallBlock,
         instance: typing.Optional[str] = None,
-    ) -> typing.Optional[Exception]:
+    ) -> AuthorizationResult:
         """Persist a successful gate before execution; return only tool-visible errors.
 
         Authorized steps and existing confirmations retain their prior decisions.
         Mailbox and authorization persistence failures propagate to the runner.
         """
         if context.authorized:
-            return None
+            return AuthorizationResult(
+                tool_policy.Decision(
+                    action="approve", rule_id=context.authorization_rule_id
+                )
+            )
         definition = binding.definition if binding is not None else None
         definition_digest = (
             digest(definition.model_dump(mode="json")) if definition else ""
         )
-        decision = tool_policy.Decision(action="require_confirmation")
+        decision = tool_policy.Decision(action="ask")
         auth_context = AuthContext()
         existing = (
             await context.mailbox.existing(context.step_id)
@@ -200,35 +220,28 @@ class ToolAuthorizationService:
             if existing is None:
                 assert binding is not None
                 auth_context = await self.resolve_auth_context(binding, request)
-                decision = await self.policy.evaluate(
-                    self._data.settings(),
-                    tool_policy.ToolCall(
-                        name=request.name,
-                        version=binding.version,
-                        arguments=request.arguments,
-                        definition_digest=definition_digest,
-                        execution_id=context.execution_id,
-                        workflow_id=context.workflow_id,
-                        step_id=context.step_id,
-                        auth_context=auth_context,
-                    ),
+                call = tool_policy.ToolCall(
+                    name=request.name,
+                    version=binding.version,
+                    arguments=request.arguments,
+                    definition_digest=definition_digest,
+                    execution_id=context.execution_id,
+                    workflow_id=context.workflow_id,
+                    step_id=context.step_id,
+                    auth_context=auth_context,
                 )
-            if decision.action == "deny":
-                raise ToolExecutionError(
-                    decision.reason or "Tool call denied by policy"
-                )
+                decision = await self.policy.check(call) or decision
+                settings = self._data.settings()
         except Exception as exc:
-            return exc
+            return AuthorizationResult(
+                tool_policy.Decision(action="deny", reason=str(exc)), exc
+            )
 
-        if (
-            existing is None
-            and decision.action == "require_confirmation"
-            and context.mailbox is not None
-            and await self._data.tool_approved(context.workflow_id, request.name)
-        ):
-            decision = tool_policy.Decision(action="allow")
+        if existing is None and decision.action != "deny":
+            rules = await self._data.rules(context.workflow_id, request.name)
+            decision = self.policy.resolve(settings, call, rules)
 
-        if decision.action == "require_confirmation":
+        if decision.action == "ask":
             if context.mailbox is None:
                 raise RuntimeError(
                     "tool approval requires a persistent workflow runner"
@@ -253,8 +266,25 @@ class ToolAuthorizationService:
                 existing,
             )
             try:
-                self.validate_response(answer)
+                response = tool_policy.ToolApprovalResponse.model_validate(answer)
             except Exception as exc:
-                return exc
-        await self.record_authorization(context)
-        return None
+                return AuthorizationResult(
+                    tool_policy.Decision(action="deny", reason=str(exc)), exc
+                )
+            decision = tool_policy.Decision(
+                action=response.decision,
+                reason=response.reason,
+                rule_id=await self._data.approval_rule_id(context.step_id),
+            )
+        if decision.rule_id is not None:
+            await context.record_authorization_decision(
+                decision.action == "approve", decision.rule_id
+            )
+        elif decision.action == "approve":
+            await self.record_authorization(context)
+        error = (
+            ToolExecutionError(decision.reason or "Tool call denied by policy")
+            if decision.action == "deny"
+            else None
+        )
+        return AuthorizationResult(decision, error)

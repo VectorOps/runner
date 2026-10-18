@@ -8,10 +8,13 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 import typing
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from vectorops.runner import models, usage
-from vectorops.runner.tool_authorization_store import SQLiteWorkflowGrants
+from vectorops.runner import models, usage, tool_policy
+from vectorops.runner.tool_authorization_store import (
+    SQLiteWorkflowGrants,
+    WorkspaceRules,
+)
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import history_query as queries
@@ -52,6 +55,7 @@ class SQLiteHistory:
         change_sink: typing.Optional[events.HistoryChangeSink] = None,
         event_sink: typing.Optional[events.StepEventSink] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
+        workspace_rules: typing.Optional[WorkspaceRules] = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("replay batch size must be positive")
@@ -66,6 +70,7 @@ class SQLiteHistory:
         self._change_sink = change_sink
         self._event_sink = event_sink
         self._mailbox_sink = mailbox_sink
+        self._workspace_rules = workspace_rules
 
     async def __aenter__(self) -> typing.Self:
         if self._closed or self._writer is not None:
@@ -139,12 +144,6 @@ class SQLiteHistory:
                     request_id TEXT PRIMARY KEY REFERENCES steps(id),
                     payload TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS tool_approval_grants (
-                    workflow_id TEXT NOT NULL REFERENCES workflows(id),
-                    tool_name TEXT NOT NULL,
-                    request_id TEXT NOT NULL REFERENCES input_requests(request_id),
-                    PRIMARY KEY (workflow_id, tool_name)
-                );
                 CREATE TABLE IF NOT EXISTS branch_operations (
                     id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL UNIQUE,
@@ -157,6 +156,7 @@ class SQLiteHistory:
                 connection.execute("BEGIN IMMEDIATE")
                 UsageHistory.initialize(connection)
                 summary_history.SummaryHistory.initialize(connection)
+                SQLiteWorkflowGrants.initialize(connection)
 
     async def _run(
         self,
@@ -889,21 +889,91 @@ class SQLiteHistory:
         return await self._run(register, notify=True)
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
-        return await self._run(
+        request = await self._run(
             lambda connection: self._input(connection, request_id).public()
         )
+        if request.status == "answered" and request.request_type == "tool.approval.v1":
+            response = tool_policy.ToolApprovalResponse.model_validate(request.response)
+            if response.scope == "workspace":
+                await self.publish_authorization_rules()
+        return request
 
     async def get_input_spec(self, request_id: str) -> mailbox.InputSpec:
         return await self._run(
             lambda connection: self._input(connection, request_id).specification()
         )
 
-    async def tool_approved(self, workflow_id: str, tool_name: str) -> bool:
+    async def authorization_rules(
+        self, workflow_id: str, tool_name: typing.Optional[str] = None
+    ) -> list[tool_policy.AuthorizationRule]:
         return await self._run(
-            lambda connection: SQLiteWorkflowGrants.approved(
+            lambda connection: SQLiteWorkflowGrants.list(
                 connection, workflow_id, tool_name
             )
         )
+
+    async def save_authorization_rule(
+        self,
+        workflow_id: str,
+        value: tool_policy.RuleInput,
+        rule_id: typing.Optional[UUID] = None,
+    ) -> tool_policy.AuthorizationRule:
+        def save(connection: sqlite3.Connection) -> tool_policy.AuthorizationRule:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._workflow(connection, workflow_id)
+                return SQLiteWorkflowGrants.save(
+                    connection, workflow_id, value, rule_id
+                )
+
+        return await self._run(save)
+
+    async def delete_authorization_rule(self, workflow_id: str, rule_id: UUID) -> None:
+        def delete(connection: sqlite3.Connection) -> None:
+            with connection:
+                if (
+                    connection.execute(
+                        "DELETE FROM tool_authorization_rules WHERE workflow_id = ? AND id = ?",
+                        (workflow_id, str(rule_id)),
+                    ).rowcount
+                    != 1
+                ):
+                    raise KeyError(str(rule_id))
+
+        await self._run(delete)
+
+    async def approval_rule_id(self, request_id: str) -> typing.Optional[UUID]:
+        def read(connection: sqlite3.Connection) -> typing.Optional[UUID]:
+            row = connection.execute(
+                "SELECT rule_id FROM tool_rule_receipts WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            return UUID(row[0]) if row is not None else None
+
+        return await self._run(read)
+
+    async def publish_authorization_rules(self) -> None:
+        if self._workspace_rules is None:
+            return
+        pending = await self._run(
+            lambda connection: [
+                tool_policy.AuthorizationRule.model_validate_json(row[0])
+                for row in connection.execute(
+                    "SELECT payload FROM tool_rule_outbox WHERE delivered = 0"
+                )
+            ]
+        )
+        for rule in pending:
+            await self._workspace_rules.import_rule(rule)
+
+            def delivered(connection: sqlite3.Connection) -> None:
+                with connection:
+                    connection.execute(
+                        "UPDATE tool_rule_outbox SET delivered = 1 WHERE id = ?",
+                        (str(rule.id),),
+                    )
+
+            await self._run(delivered)
 
     async def list_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
         def read(connection: sqlite3.Connection) -> mailbox.RequestPage:
@@ -970,6 +1040,13 @@ class SQLiteHistory:
                 ).status not in ("running", "paused"):
                     raise mailbox.MailboxConflict("input request is closed")
                 request.validate_response(answer.response)
+                if request.request_type == "tool.approval.v1":
+                    tool_policy.response_rule(request.payload, answer.response)
+                    response = tool_policy.ToolApprovalResponse.model_validate(
+                        answer.response
+                    )
+                    if response.scope == "workspace" and self._workspace_rules is None:
+                        raise ValueError("workspace rule storage is unavailable")
                 request = request.model_copy(
                     update={
                         "status": "answered",
@@ -995,7 +1072,9 @@ class SQLiteHistory:
                 )
                 return request.public()
 
-        return await self._run(respond, notify=True)
+        result = await self._run(respond, notify=True)
+        await self.publish_authorization_rules()
+        return result
 
     @staticmethod
     def _cancel_inputs(

@@ -93,7 +93,7 @@ async def test_decorator_metadata_is_durable_and_not_recomputed(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await approve(box, request, {"approved": True})
+    await approve(box, request, {"decision": "approve"})
     result = await replay.run(
         history, workflow, request.request_id, mailbox=box, tool_policy_version=version
     )
@@ -112,11 +112,6 @@ async def test_typed_context_reaches_policy(history: MemoryHistory) -> None:
         assert isinstance(args, Arguments)
         return tools.AuthContext(properties={"scope": "internal"})
 
-    async def matcher(request: tool_policy.ToolCall) -> bool:
-        return request.auth_context.properties == {"scope": "internal"}
-
-    policy = tool_policy.ToolPolicy()
-    policy.register_matcher("internal", matcher)
     binding = tools.Tool("read", "Read", Arguments, execute, auth_context=auth)
 
     async def workflow() -> pydantic.JsonValue:
@@ -124,7 +119,12 @@ async def test_typed_context_reaches_policy(history: MemoryHistory) -> None:
         assert not response.is_error
         return None
 
-    result = await replay.run(history, workflow, policy=policy, tool_policy_version=1)
+    result = await replay.run(
+        history,
+        workflow,
+        rules=[replay.allow("read", {"scope": "internal"})],
+        tool_policy_version=1,
+    )
     assert result.outcome.kind == "completed"
 
 
@@ -145,8 +145,6 @@ async def test_callback_errors_fail_closed_after_validation(
         raise AssertionError("must not execute")
 
     binding = tools.Tool("read", "Read", Arguments, forbidden, auth_context=auth)
-    policy = tool_policy.ToolPolicy()
-    policy.allow("read")
 
     async def workflow() -> pydantic.JsonValue:
         request = call()
@@ -156,7 +154,9 @@ async def test_callback_errors_fail_closed_after_validation(
         assert response.is_error
         return None
 
-    result = await replay.run(history, workflow, policy=policy, tool_policy_version=1)
+    result = await replay.run(
+        history, workflow, rules=[replay.allow("read")], tool_policy_version=1
+    )
     assert result.outcome.kind == "completed"
     assert calls == (0 if invalid_arguments else 1)
 

@@ -82,9 +82,8 @@ async def invoke_tool(
 ) -> connect.ToolResultMessage:
     """Validate, optionally await host approval, and execute a recorded tool call.
 
-    Approval uses a JSON mailbox response with a strict ``approved`` boolean and
-    optional ``reason`` and ``scope``. Workflow scope grants future calls by name
-    within that workflow instance; the default scope approves only this call.
+    Approval responses carry a decision, scope, and optional property mask.
+    Workflow and workspace scopes create rules; call scope affects only this call.
     The helper runs in workflow context; validation, the runtime policy gate,
     and implementation run in one activity for new workflows. Legacy histories
     retain binding-local approval. Tool exceptions return their unchanged text by default. Cancellation,
@@ -252,7 +251,8 @@ async def _authorize_call(
     instance: typing.Optional[str],
     raise_errors: bool,
 ) -> typing.Optional[connect.ToolResultMessage]:
-    error = await current().authorize(context, binding, request, instance)
+    authorization = await current().authorize(context, binding, request, instance)
+    error = authorization.error
     if error is not None:
         _log_failure(request, error)
         if raise_errors:
