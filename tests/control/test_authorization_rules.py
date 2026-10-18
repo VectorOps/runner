@@ -9,6 +9,22 @@ from vectorops.runner.control import client, protocol
 from vectorops.runner.runner import history_query
 
 
+async def test_default_read_rules_are_visible_and_deletable(tmp_path: Path) -> None:
+    async with client.embedded(tmp_path) as host:
+        listing = await host.request("tools.rules.list", {})
+        assert isinstance(listing, dict) and isinstance(listing["rules"], list)
+        names = set()
+        for rule in listing["rules"]:
+            assert isinstance(rule, dict)
+            names.add(str(rule["tool_name"]))
+            assert rule["properties"] == {"scope": "internal"}
+            assert rule["decision"] == "approve"
+            await host.request("tools.rules.delete", {"rule_id": rule["id"]})
+        assert names == {"read_file", "list_files"}
+    async with client.embedded(tmp_path) as host:
+        assert await host.request("tools.rules.list", {}) == {"rules": []}
+
+
 async def test_workspace_rule_from_response_survives_restart_and_has_crud(
     tmp_path: Path,
 ) -> None:
@@ -21,7 +37,7 @@ async def test_workspace_rule_from_response_survives_restart_and_has_crud(
         (request,) = await pending(host, run.execution_id)
         await host.answer_input(answer(request, scope="workspace"))
         await completed(host, run.execution_id)
-        listing = await host.request("tools.rules.list", {})
+        listing = await host.request("tools.rules.list", {"tool_name": "test"})
         assert isinstance(listing, dict) and isinstance(listing["rules"], list)
         (saved,) = listing["rules"]
         assert isinstance(saved, dict) and isinstance(saved["id"], str)
@@ -48,7 +64,9 @@ async def test_workspace_rule_from_response_survives_restart_and_has_crud(
         )
         assert isinstance(updated, dict) and updated["decision"] == "deny"
         await host.request("tools.rules.delete", {"rule_id": identifier})
-        assert await host.request("tools.rules.list", {}) == {"rules": []}
+        assert await host.request("tools.rules.list", {"tool_name": "test"}) == {
+            "rules": []
+        }
         with pytest.raises(protocol.RemoteError):
             await host.request("tools.rules.get", {"rule_id": identifier})
 
@@ -96,7 +114,9 @@ async def test_workflow_crud_is_scoped_to_execution_and_workflow(
         )
         assert isinstance(saved, dict)
         assert await host.request("tools.rules.list", scope) == {"rules": [saved]}
-        assert await host.request("tools.rules.list", {}) == {"rules": []}
+        assert await host.request("tools.rules.list", {"tool_name": "test"}) == {
+            "rules": []
+        }
         reference = {**scope, "rule_id": saved["id"]}
         with pytest.raises(protocol.RemoteError):
             await host.request("tools.rules.get", {**reference, "workflow_id": "other"})

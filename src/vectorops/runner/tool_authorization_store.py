@@ -44,6 +44,22 @@ class RuleDocument(pydantic.BaseModel):
 
 
 class WorkspaceRules:
+    @staticmethod
+    def _initial_document() -> str:
+        """Seed editable internal-read rules only when no rule document exists."""
+        rules = [
+            tool_policy.AuthorizationRule(
+                id=uuid4(),
+                tool_name=name,
+                properties={"scope": "internal"},
+                decision="approve",
+            )
+            for name in ("read_file", "list_files")
+        ]
+        return RuleDocument(
+            rules={str(rule.id): rule for rule in rules}
+        ).model_dump_json()
+
     def __init__(self, database: WorkspaceDatabase) -> None:
         self.database = database
         self._read_task: Optional[asyncio.Task[RuleDocument]] = None
@@ -54,7 +70,7 @@ class WorkspaceRules:
         async def read() -> RuleDocument:
             return RuleDocument.model_validate_json(
                 await self.database.load_document(
-                    "tool.authorization.rules", lambda: RuleDocument().model_dump_json()
+                    "tool.authorization.rules", self._initial_document
                 )
             )
 
@@ -90,7 +106,7 @@ class WorkspaceRules:
             return document.model_dump_json()
 
         await self.database.update_document(
-            "tool.authorization.rules", lambda: RuleDocument().model_dump_json(), update
+            "tool.authorization.rules", self._initial_document, update
         )
         self._read_task = None
         return rule
@@ -102,7 +118,7 @@ class WorkspaceRules:
             return document.model_dump_json()
 
         await self.database.update_document(
-            "tool.authorization.rules", lambda: RuleDocument().model_dump_json(), update
+            "tool.authorization.rules", self._initial_document, update
         )
         self._read_task = None
 
@@ -118,7 +134,7 @@ class WorkspaceRules:
             return document.model_dump_json()
 
         await self.database.update_document(
-            "tool.authorization.rules", lambda: RuleDocument().model_dump_json(), update
+            "tool.authorization.rules", self._initial_document, update
         )
         self._read_task = None
 

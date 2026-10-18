@@ -273,7 +273,7 @@ async def test_workspace_outbox_recovery_and_deleted_rule_not_resurrected(
     await workspace.delete(saved.id)
     await workspace.import_rule(saved)
     await reopened.answer_input(answer)
-    assert await workspace.list() == []
+    assert await workspace.list("read") == []
 
 
 def test_ask_is_not_storable_or_a_host_decision() -> None:
@@ -338,7 +338,13 @@ async def test_workspace_crud_does_not_lose_concurrent_changes(tmp_path: Path) -
             for index, owner in enumerate([first, second] * 5)
         )
     )
-    assert {item.id for item in await first.list()} == {item.id for item in created}
+    saved = await first.list()
+    assert {item.id for item in saved if item.tool_name.startswith("tool_")} == {
+        item.id for item in created
+    }
+    assert {
+        item.tool_name for item in saved if not item.tool_name.startswith("tool_")
+    } == {"read_file", "list_files"}
     with pytest.raises(KeyError):
         await first.save(p.RuleInput(tool_name="missing", decision="deny"), uuid4())
-    assert len(await second.list()) == 10
+    assert len(await second.list()) == 12

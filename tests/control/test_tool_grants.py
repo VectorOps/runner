@@ -119,7 +119,7 @@ async def test_desktop_workspace_approval_configuration_requests(
     async with client.embedded(tmp_path) as host:
         run = await host.start(p.Start(reference="flow:child", idempotency_key="start"))
         request = (await pending(host, run.execution_id))[0]
-        selected = await host.request("tools.rules.list", {})
+        selected = await host.request("tools.rules.list", {"tool_name": "test"})
         assert selected == {"rules": []}
         assert isinstance(request.payload, dict)
         call = request.payload["call"]
