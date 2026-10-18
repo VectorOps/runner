@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import re
 from unittest.mock import patch
 
 import pydantic
@@ -8,6 +9,7 @@ import yaml
 
 from vectorops.runner import skills
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
+from vectorops.runner.runner.workflow import WorkflowRunner
 
 
 @pytest.fixture
@@ -95,7 +97,7 @@ async def test_discovery_skips_invalid_and_sorts(
     write_skill(tmp_path, "missing", document("missing")).unlink()
     write_skill(tmp_path, "binary", document("binary")).write_bytes(b"---\n\xff\n---")
     (tmp_path / ".vocode/skills/not-a-directory").write_text(document("ignored"))
-    catalog = await skills.discover_skills(target)
+    catalog = await skills.discover_skills(target, include_builtin=False)
     assert [skill.name for skill in catalog.skills] == ["first", "last"]
     assert [skill.path for skill in catalog.skills] == [
         ".vocode/skills/a-first/SKILL.md",
@@ -106,17 +108,17 @@ async def test_discovery_skips_invalid_and_sorts(
 
 
 async def test_absent_and_empty_catalog(tmp_path: Path, target: Path) -> None:
-    assert (await skills.discover_skills(target)).render() == ""
+    assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
     (tmp_path / ".vocode/skills").mkdir(parents=True)
-    assert (await skills.discover_skills(target)).render() == ""
+    assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
     write_skill(tmp_path, "invalid", "Not a skill")
-    assert (await skills.discover_skills(target)).render() == ""
+    assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
 
 
 async def test_discovery_limits(tmp_path: Path, target: Path) -> None:
     for index in range(skills.SKILL_LIMIT + 1):
         write_skill(tmp_path, f"skill-{index:02}", document(f"skill-{index:02}"))
-    catalog = await skills.discover_skills(target)
+    catalog = await skills.discover_skills(target, include_builtin=False)
     assert len(catalog.skills) == skills.SKILL_LIMIT
     assert catalog.truncated
     assert "Skill listing truncated" in catalog.render()
@@ -133,7 +135,7 @@ async def test_bounded_reads_only_require_complete_header(
         "large-header",
         "---\nname: large-header\ndescription: " + "x" * skills.SKILL_BYTES + "\n---",
     )
-    catalog = await skills.discover_skills(target)
+    catalog = await skills.discover_skills(target, include_builtin=False)
     assert [skill.name for skill in catalog.skills] == ["large-body"]
 
 
@@ -151,7 +153,9 @@ async def test_environment_errors_are_skipped(
         operation,
         side_effect=EnvironmentError(ErrorCode.DENIED, "Access denied"),
     ):
-        assert (await skills.discover_skills(target)).render() == ""
+        assert (
+            await skills.discover_skills(target, include_builtin=False)
+        ).render() == ""
     assert "Access denied" in caplog.text
 
 
@@ -159,3 +163,122 @@ async def test_cancellation_propagates(target: Path) -> None:
     with patch("os.scandir", side_effect=asyncio.CancelledError):
         with pytest.raises(asyncio.CancelledError):
             await skills.discover_skills(target)
+
+
+@pytest.mark.parametrize("directory", ["", " ", "bad\0path"])
+def test_invalid_skill_directories(directory: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        skills.Settings(directories=[directory])
+
+
+async def test_external_sources_and_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    external = tmp_path / "external"
+    bundled = tmp_path / "bundled"
+    local = write_skill(target, "review", document("review", "Project."))
+    write_skill(external, "review", document("review", "External."))
+    shared = write_skill(external, "shared", document("shared", "External."))
+    write_skill(bundled, "shared", document("shared", "Bundled."))
+    builtin = write_skill(bundled, "builtin", document("builtin"))
+    monkeypatch.setattr(skills, "BUNDLED_SKILLS", bundled / ".vocode/skills")
+    catalog = await skills.discover_skills(
+        target,
+        ["../missing", "../external/.vocode/skills", str(external / ".vocode/skills")],
+    )
+    assert [(s.name, s.path) for s in catalog.skills] == [
+        ("review", str(local.relative_to(target))),
+        ("shared", str(shared)),
+        ("builtin", str(builtin)),
+    ]
+    assert [s.description for s in catalog.skills] == [
+        "Project.",
+        "External.",
+        "Review code.",
+    ]
+
+
+async def test_home_relative_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = write_skill(tmp_path, "shared", document("shared"))
+    target = tmp_path / "target"
+    target.mkdir()
+    catalog = await skills.discover_skills(
+        target, ["~/.vocode/skills"], include_builtin=False
+    )
+    assert [skill.path for skill in catalog.skills] == [str(path)]
+
+
+@pytest.mark.parametrize("link_root", [False, True])
+async def test_external_symlink(tmp_path: Path, link_root: bool) -> None:
+    target = tmp_path / "target"
+    external = write_skill(tmp_path / "external", "shared", document("shared"))
+    local = target / ".vocode/skills"
+    link = local if link_root else local / "shared"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(
+        external.parent.parent if link_root else external.parent,
+        target_is_directory=True,
+    )
+    catalog = await skills.discover_skills(target, include_builtin=False)
+    assert [skill.path for skill in catalog.skills] == [str(external)]
+
+
+async def test_sources_share_catalog_limit(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    for index in reversed(range(skills.SKILL_LIMIT + 2)):
+        write_skill(target, f"s-{index:02}", document(f"s-{index:02}"))
+    external = tmp_path / "external"
+    write_skill(external, "shared", document("shared"))
+    catalog = await skills.discover_skills(target, [str(external / ".vocode/skills")])
+    assert [skill.name for skill in catalog.skills] == [
+        f"s-{index:02}" for index in range(skills.SKILL_LIMIT)
+    ]
+    assert catalog.truncated
+
+
+async def test_builtin_skill_is_available_without_project_skills(
+    tmp_path: Path,
+) -> None:
+    catalog = await skills.discover_skills(tmp_path)
+    skill = next(
+        skill for skill in catalog.skills if skill.name == "workflow-authoring"
+    )
+    assert Path(skill.path).is_absolute()
+    assert Path(skill.path).is_file()
+    assert not Path(skill.path).is_relative_to(tmp_path)
+
+
+async def test_invalid_project_skill_does_not_shadow_builtin(tmp_path: Path) -> None:
+    write_skill(tmp_path, "workflow-authoring", "Missing frontmatter")
+    catalog = await skills.discover_skills(tmp_path)
+    assert [skill.name for skill in catalog.skills] == ["workflow-authoring"]
+    assert (await skills.discover_skills(tmp_path, include_builtin=False)).skills == []
+
+
+async def test_invalid_file_symlink_does_not_hide_other_skills(tmp_path: Path) -> None:
+    broken = write_skill(tmp_path, "broken", document("broken"))
+    broken.unlink()
+    broken.symlink_to(broken.name)
+    write_skill(tmp_path, "valid", document("valid"))
+    catalog = await skills.discover_skills(tmp_path, include_builtin=False)
+    assert [skill.name for skill in catalog.skills] == ["valid"]
+
+
+async def test_workflow_authoring_example_runs_and_replays(tmp_path: Path) -> None:
+    content = (skills.BUNDLED_SKILLS / "workflow-authoring/SKILL.md").read_text()
+    examples = re.findall(r"```python\n(.*?)```", content, re.DOTALL)
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    (workflows / "greeting.py").write_text(examples[0])
+    runner = WorkflowRunner(tmp_path)
+    descriptor = await (await runner.project()).resolver.describe("greeting:main")
+    descriptor.validate_input({"name": "Ada"})
+    result = await runner.run(descriptor.reference, input={"name": "Ada"})
+    assert isinstance(result, dict)
+    assert result["message"] == "Hello, Ada!"
+    assert runner.last_execution_id is not None
+    assert await WorkflowRunner(tmp_path).resume(runner.last_execution_id) == result

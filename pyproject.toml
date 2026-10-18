@@ -40,6 +40,9 @@ exclude-newer = "1 week"
 where = ["src"]
 include = ["vectorops.runner*"]
 
+[tool.setuptools.package-data]
+"vectorops.runner" = ["bundled_skills/*/SKILL.md"]
+
 [dependency-groups]
 dev = [
     "black>=25.0.0",

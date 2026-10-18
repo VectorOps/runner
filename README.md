@@ -26,6 +26,8 @@ Daemons automatically reuse user-level control secrets. See [provider authentica
 
 See [MCP servers and workflow tools](docs/config/mcp.md) for stdio/HTTP server configuration, replay-safe tool and content discovery, OAuth, and model-driven tool activation.
 
+See [skills](docs/config/skills.md) for project and shared skill directories and the bundled workflow-authoring guide.
+
 ## Current scope
 
 The design in `docs/design.md` describes three major roles:

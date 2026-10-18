@@ -195,7 +195,11 @@ The workflow decorator accepts the same `kind`, `namespace`, and positive `versi
 Root and child configurations persist their contract metadata before executing.
 The default workflow kind is `workflow`, and the default version is `1`, including older records without these fields.
 For example, `@workflow(kind="customer.acme.chat.turn", version=2)` declares the contract for the workflow input and final result.
-Changing a recorded workflow's declaration is rejected during replay.
+Changing a recorded workflow's kind is rejected when that workflow executes.
+New executions use the declared version, while `ctx.version` retains the persisted
+version on replay. Gate incompatible orchestration changes on `ctx.version` and
+keep the legacy branch available for existing executions. A version bump does not
+migrate history or force completed work to execute again.
 Structural operation kinds remain `workflow.spawn`, `workflow.join`, `workflow.complete`, and `workflow.resume`.
 A spawn references the independently stored child configuration containing its kind and version.
 

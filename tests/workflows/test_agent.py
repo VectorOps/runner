@@ -11,6 +11,7 @@ from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
 from tests.fixtures import sources
 from tests.fixtures.user_input import reply
+from vectorops.runner import skills
 from vectorops.runner.api import tools
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
@@ -57,15 +58,24 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
         "Review carefully."
     )
     (target / "evidence.txt").write_text("verified evidence")
+    external_skill = tmp_path / "shared-skills/external/SKILL.md"
+    external_skill.parent.mkdir(parents=True)
+    external_skill.write_text(
+        "---\nname: external\ndescription: External guidance.\n---\nExternal skill body."
+    )
+    builtin_skill = skills.BUNDLED_SKILLS / "workflow-authoring/SKILL.md"
     configure(
         tmp_path,
         target,
-        '[components.workflows.helper]\nthinking_level = "xhigh"\ntemperature = 0.4\n',
+        '[components.workflows.helper]\nthinking_level = "xhigh"\ntemperature = 0.4\n'
+        '[components.skills]\ndirectories = ["../shared-skills"]\n',
     )
     backend = FakeProvider(
         [
             call("list_files", {"path": "."}),
             call("read_file", {"path": "evidence.txt"}),
+            call("read_file", {"path": str(external_skill)}),
+            call("read_file", {"path": str(builtin_skill)}),
             answer("evidence.txt: verified evidence"),
         ]
     )
@@ -87,14 +97,23 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
         )
         assert "read its SKILL.md" in prompt
         assert "Review carefully." not in prompt
-        assert prompt.count("## Available project skills") == 1
+        assert f"(file: {external_skill})" in prompt
+        assert f"(file: {builtin_skill})" in prompt
+        assert "External skill body." not in prompt
+        assert prompt.count("## Available skills") == 1
         assert "300 words" in prompt
         names = {tool.name for tool in backend.requests[0].tools}
         assert names == {"read_file", "list_files", "exec", "poll_process"}
         assert "verified evidence" in str(backend.requests[-1].messages)
+        assert "External skill body." in str(backend.requests[-1].messages)
+        assert "# Workflow authoring" in str(backend.requests[-1].messages)
         (target / "AGENTS.md").write_text("changed instructions")
         skill_path.unlink()
+        external_skill.unlink()
         (target / "evidence.txt").unlink()
+        await (await runner.project()).configuration.set(
+            "skills", {"directories": [""]}
+        )
         with (
             patch(
                 "vectorops.runner.environment.paths.open_regular",
@@ -103,7 +122,7 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
             patch("os.scandir", side_effect=AssertionError("replay list")),
         ):
             assert await runner.resume() == result
-        assert len(backend.requests) == 3
+        assert len(backend.requests) == 5
 
 
 async def test_parent_delegates_then_patches_and_resumes(tmp_path: Path) -> None:

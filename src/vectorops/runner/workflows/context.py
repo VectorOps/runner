@@ -34,9 +34,19 @@ async def _read_optional(
     return text
 
 
-@composition.activity(kind="builtin.context", version=1)
-async def load_context(ctx: ActivityExecutionContext) -> str:
+@composition.activity_wrapper(kind="builtin.context", version=1)
+async def load_context(call: composition.ActivityCall) -> str:
     """Record environment details, root instructions, and a bounded skill catalog."""
+    configuration = composition.workflow_context().project.configuration
+
+    async def invoke(ctx: ActivityExecutionContext) -> str:
+        options = skills.Settings.model_validate(configuration.get("skills", {}))
+        return await _load_context(ctx, options)
+
+    return await call.run(input={}, invoke=invoke)
+
+
+async def _load_context(ctx: ActivityExecutionContext, options: skills.Settings) -> str:
     target = environment(ctx)
     parts = [
         "## Target environment",
@@ -49,7 +59,9 @@ async def load_context(ctx: ActivityExecutionContext) -> str:
     instructions = await _read_optional(target.root, "AGENTS.md")
     if instructions is not None:
         parts.extend(["## Repository instructions: AGENTS.md", instructions])
-    catalog = await skills.discover_skills(target.root)
+    catalog = await skills.discover_skills(
+        target.root, options.directories, include_builtin=options.include_builtin
+    )
     skill_context = catalog.render()
     if skill_context:
         parts.append(skill_context)

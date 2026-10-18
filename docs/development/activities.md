@@ -47,7 +47,10 @@ Namespace owners allocate contract names; generation alone cannot guarantee uniq
 Use `vocode` for runner-provided contracts and an organization/project namespace for custom contracts.
 Without either option, the existing generic `activity` kind remains unchanged.
 Older operation records without a version load as version `1`.
-When replay reaches an activity, it rejects a changed operation kind or version rather than interpreting an incompatible recorded payload.
+Activity replay matches kind, name, and input; operation versions are informational
+and do not reject incompatible recorded payloads. Kinds beginning with `llm.` also
+ignore input during replay matching. Preserve compatibility with old results or
+use a workflow-version-gated legacy branch and a distinct new operation identity.
 Reusing a completed child result does not execute or validate that child's internal activities.
 
 ## Context fields

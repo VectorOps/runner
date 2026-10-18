@@ -1,0 +1,133 @@
+---
+name: workflow-authoring
+description: Use when creating or changing VectorOps Runner workflows, activities, LLM agents, or tools. Covers authoring APIs, deterministic replay, side effects, contract versioning, and verification.
+---
+
+# Workflow authoring
+
+Create durable Python workflows with recorded activities and child calls. Use this skill when adding a workflow or changing code that existing executions may replay.
+
+## Start with a runnable workflow
+
+1. Locate the runner workspace and its `config.toml`. The attached target project and runner workspace can differ. `workflows_directory` defaults to `workflows` relative to the runner workspace; do not assume workflows belong at the target root.
+2. Define module-level async entry points with an injected `WorkflowExecutionContext` first, followed by named, typed business parameters. Use defaults for optional inputs. Positional-only business parameters, variadic inputs, and closures are unsupported.
+3. Keep orchestration deterministic. Put external I/O and nondeterministic values in activities.
+4. Use JSON-compatible boundary inputs and results. Serialize Pydantic results with `model_dump(mode="json")`; do not return clients, paths, tasks, or live handles.
+
+Save this as `workflows/greeting.py` in the runner workspace:
+
+```python
+from datetime import datetime, timezone
+
+from vectorops.runner.api import composition
+from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.context import WorkflowExecutionContext
+
+
+@composition.activity(kind="example.greeting.timestamp", version=1)
+async def timestamp(ctx: ActivityExecutionContext) -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@composition.workflow(
+    kind="example.greeting",
+    version=1,
+    description="Return a greeting with a recorded timestamp.",
+)
+async def main(ctx: WorkflowExecutionContext, name: str = "world") -> dict[str, str]:
+    recorded_at = await timestamp()
+    return {"message": f"Hello, {name}!", "recorded_at": recorded_at}
+```
+
+The timestamp activity runs once on completed execution; replay uses its recorded result. The caller supplies no context argument to decorated activities or child workflows.
+
+References use `folder/file:callable`, relative to the workflows directory, with no `.py` suffix. Absolute paths, traversal, and escaping symlinks are rejected for workflow references. Importable library entry points use `python:package.module:callable`; shipped agent references include `builtin:agent` and `builtin:helper`. Workflow-reference restrictions differ from skill-file paths, which can be absolute.
+
+Discovery imports trusted Python code and derives an input schema; it is not a sandbox or a registration step. New files are immediately discoverable. Changed source is reloaded on subsequent resolution, but helper/transitive imports follow Python's import cache. Keep import-time work free of side effects. Undecorated async root functions work too; use `@composition.workflow` for metadata and direct durable child calls.
+
+## Choose the right API
+
+| API | Use and boundary |
+| --- | --- |
+| `composition.workflow(...)` | Define a durable workflow. `await child(value)` records spawn/join and returns its final result. An ordinary async helper stays in the caller's history. |
+| `composition.activity(...)` | Record an async external operation. Implementation receives `ActivityExecutionContext`; completed replay skips it. |
+| `composition.streamable_activity(...)` | Async generator yielding `composition.delta(state)` and `composition.final(result)`. Each delta replaces the full progress state, not a patch or append. Workflows await only the final result. |
+| `composition.activity_wrapper(...)` | Advanced adapter: its body runs on replay. Injected `ActivityCall.run(input=..., invoke=...)` or `.stream(...)` records at most one operation. Keep all effects inside `invoke`. |
+| `ctx.spawn_workflow(reference, input=...)`, `ctx.join_workflows(handles)` | Explicit composition when references are dynamic. Join handles belong to the creating parent; `failure_policy="collect"` returns failed outcomes instead of propagating them. |
+| `api.configuration.get_config(ctx, name, default, model=...)` | Record a component configuration lookup and optionally validate/normalize with its owner model. Do not read live configuration in orchestration or use this API for secrets. |
+| `api.llm.LLM` | Conversation with recorded generations and tool execution. Use `add_user_message`, `run`, or `run_with_choice`; call in workflow context, not inside an ordinary activity. |
+| `api.tools` | Explicit tool bindings: `Tool`, `ToolBinding`, `WorkflowToolBinding`, `ToolResponse`, `ToolExecutionError`, `invoke_tool`, `load_collection`, and tool factories. Importing the facade does not grant permissions. |
+| `await tools.subworkflow_tool(references)` | Expose an explicit child-workflow allowlist to an LLM. Descriptor snapshots and approval decisions are recorded; child execution remains durable spawn/join, not an opaque tool activity. |
+| `api.mailbox.request_input(...)` | Durable structured input request with payload and response contracts. Host/control integration supplies answers. |
+| `llm.request_user_message(...)` | Mailbox-backed chat input returning a user-role message. Distinct from initial workflow arguments. |
+| `api.inbox.Inbox` | Addressed steering input; `drain()` is replay-aware. Can be attached to an LLM conversation. |
+| `api.sleep.sleep(seconds)`, `api.sleep.sleep_until(deadline)` | Durable waits; relative waits use persisted creation time, absolute deadlines must be timezone-aware. Import the functions from `vectorops.runner.api.sleep`. |
+
+The `api.*` names above refer to modules under `vectorops.runner.api`, not methods on the context. `ctx.data_path` exposes the runner data directory; it does not make arbitrary filesystem operations replay-safe. Activity context supplies identities and narrow runtime services such as the target environment, mailbox, and resource cleanup registry; optional services can be absent in injected-history tests. Keep service access and lifecycle inside the owning adapter instead of reaching into runner internals.
+
+## Add an LLM conversation
+
+Configure a model/provider through the runner's component settings; do not embed credentials in workflows or recorded inputs.
+
+```python
+from vectorops.runner.api import composition, llm, tools
+from vectorops.runner.runner.context import WorkflowExecutionContext
+
+
+@composition.workflow(kind="example.research", version=1)
+async def main(ctx: WorkflowExecutionContext, question: str) -> str:
+    helper = await tools.subworkflow_tool(["builtin:helper"])
+    conversation = llm.LLM("research", system_prompt="Answer using verified evidence.")
+    conversation.add_user_message(question)
+    response = await conversation.run(tools=[helper], max_rounds=10)
+    return "\n".join(block.text for block in response.content if block.type == "text")
+```
+
+Only offer bindings the task needs. Await async factories; pass bindings, not raw functions, to `run`. Creating a workflow file does not add it to an existing subworkflow allowlist. Tool policy and approval still apply. Custom workflow-composed tools must keep nondeterministic work in activities; ordinary activity-backed tools must not schedule child workflows from inside their activity implementation.
+
+For constrained routing, `run_with_choice(choices={"ready": "Ready", "blocked": "Needs input"})` returns validated `answer` and `choice`. It uses the existing conversation/history, not a new child workflow.
+
+## Preserve deterministic replay
+
+Replay means reconstructing orchestration from recorded outcomes, not obtaining the same answer from a fresh model or network call.
+
+- Derive branching and operation arguments only from workflow inputs, recorded results, and deterministic transformations. Sort unordered collections before scheduling work. Avoid mutable process-global state.
+- Keep filesystem/network/process access, environment-variable reads, randomness, UUID generation, and current time inside activities. Use async I/O or `asyncio.to_thread` for blocking operations inside activities.
+- Preserve the order and identity of recorded operations. Ordinary activity replay matches `kind`, `name`, and `input`; versions are informational. Operations whose kinds start with `llm.` ignore input during matching. This exception is not a guarantee that arbitrary prompt or code changes are safe.
+- Do not wrap an entire LLM/tool loop or child workflow orchestration in an ordinary activity. Activity implementations have no active workflow composition context.
+- `asyncio.gather`, `TaskGroup`, and tasks can coordinate engine-managed activity and child awaitables. Recorded resume operations preserve their result-delivery order. Raw timers, network events, and background tasks do not acquire durability merely by being awaited. Use the durable sleep API for waits.
+- Await owned work before returning. Propagate cancellation; do not suppress replay or persistence failures or treat them as ordinary business failures. Recorded activity failures surface as `ActivityError` and can be handled deliberately.
+- Assume interrupted activities can run again with the same `ctx.step_id`. Use it as an external idempotency key, or implement reconciliation. The runner does not guarantee exactly-once external effects, and a fork can create new identities.
+- Treat history as persisted data: do not record secrets in activity arguments, results, progress, configuration snapshots, or diagnostic messages.
+
+## Evolve workflows and contracts
+
+`workflow`, `activity`, and `streamable_activity` accept positive integer `version` (default `1`) and either `kind` or `namespace`, not both. Generic default kinds are `workflow` and `activity`. Use stable explicit kinds for published contracts, with your project's namespace. `namespace="example.project"` generates a kind from namespace, module, and callable; renaming files or functions changes generated kinds. Activity `name` defaults to the function name and participates in replay matching.
+
+Workflow versions and activity versions have different roles:
+
+- A new workflow stores its declaration's version. `ctx.version` returns that durable version, even after code upgrades. Existing executions retain their old version; new executions use the new declaration. Each child has its own durable version.
+- Workflow kind changes are rejected when that workflow executes against an existing configuration. Bumping its version is allowed; it does not migrate recorded inputs or results or rewrite history.
+- Activity versions are recorded metadata, **not a replay compatibility gate**. Changing only an activity version does not force re-execution or reject old outcomes. Keep old result readers compatible, or preserve a legacy operation in a version-gated branch and introduce a distinct new kind/name for the incompatible operation.
+- A reused completed child result skips execution of the child's internal activities. Root replay alone does not test compatibility of a partially completed child.
+
+For an upgrade from workflow version 1 to 2, retain the old path:
+
+```python
+@composition.workflow(kind="example.pipeline", version=2)
+async def main(ctx: WorkflowExecutionContext, text: str) -> str:
+    if ctx.version < 2:
+        return await legacy_transform(text)
+    return await modern_transform(text)
+```
+
+Here `legacy_transform` and `modern_transform` are separately defined activities; keep the former's operation identity, input, and result semantics intact. Do not remove old branches while executions still depend on them. Preserve reference paths/callables and accept old inputs. Internal refactoring that leaves contracts and orchestration unchanged does not require a version bump. Source reload is not history migration.
+
+## Verify before delivering
+
+1. Resolve the reference and validate valid, invalid, omitted, and defaulted inputs against its descriptor. Test JSON serialization of results.
+2. Test a fresh execution and completed replay using the project's test setup. Assert the same result, no repeated completed side effects/provider calls, and no appended history for a completed replay.
+3. Interrupt an activity before terminal persistence, then resume. Assert stable step identity and idempotent effects. Test failures and cancellation.
+4. For an upgrade, run old code first, retain its persisted workspace, then load new code. Test old root and child histories, including incomplete executions. Also test that new executions follow the new `ctx.version` branch.
+5. Test concurrency, tool allowlists/approval, input requests, and offline replay when used. Replace external providers with fakes; do not require real credentials for unit tests.
+6. Follow the project's test and formatting conventions.

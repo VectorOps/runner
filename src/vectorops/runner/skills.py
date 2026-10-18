@@ -1,6 +1,8 @@
-"""Validated, bounded project skill catalogs from local project files."""
+"""Validated, bounded skill catalogs from project, configured, and bundled files."""
 
 import asyncio
+from collections.abc import Sequence
+import heapq
 import logging
 import os
 from pathlib import Path
@@ -14,7 +16,22 @@ from vectorops.runner.environment.errors import EnvironmentError
 
 SKILL_LIMIT: Final = 32
 SKILL_BYTES: Final = 65536
+BUNDLED_SKILLS: Final = Path(__file__).parent / "bundled_skills"
 logger = logging.getLogger(__name__)
+
+
+class Settings(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
+
+    directories: list[str] = pydantic.Field(default_factory=list, max_length=32)
+    include_builtin: bool = True
+
+    @pydantic.field_validator("directories", mode="after")
+    @classmethod
+    def validate_directories(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or "\0" in value for value in values):
+            raise ValueError("skill directories must be nonblank paths without NULs")
+        return values
 
 
 class Skill(pydantic.BaseModel):
@@ -61,7 +78,7 @@ class SkillCatalog(pydantic.BaseModel):
         if not self.skills and not self.truncated:
             return ""
         lines = [
-            "## Available project skills",
+            "## Available skills",
             "Skills provide reusable expertise and workflows. Use an appropriate "
             "skill when it matches the task. Before using it, read its SKILL.md "
             "with read_file and follow its instructions.",
@@ -77,37 +94,59 @@ class SkillCatalog(pydantic.BaseModel):
         return "\n".join(lines)
 
 
-async def discover_skills(root: Path) -> SkillCatalog:
-    """Inspect direct skill directories, skipping invalid or unreadable files."""
+async def discover_skills(
+    root: Path,
+    directories: Sequence[str] = (),
+    *,
+    include_builtin: bool = True,
+) -> SkillCatalog:
+    """Merge project, configured, then bundled skills; first valid name wins."""
 
-    def listing() -> tuple[list[str], bool]:
-        entries: list[str] = []
-        with os.scandir(paths.resolve_path(root, ".vocode/skills")) as iterator:
-            for index, entry in enumerate(iterator):
-                if index == SKILL_LIMIT:
-                    return entries, True
-                if entry.is_dir(follow_symlinks=False):
-                    entries.append(f".vocode/skills/{entry.name}/SKILL.md")
-        return entries, False
+    def listing(directory: str) -> tuple[list[Path], bool]:
+        base = paths.resolve_path(root, directory, allow_external=True)
+        with os.scandir(base) as iterator:
+            entries = heapq.nsmallest(
+                SKILL_LIMIT + 1,
+                (entry.name for entry in iterator if entry.is_dir()),
+            )
+        return [base / name / "SKILL.md" for name in entries[:SKILL_LIMIT]], len(
+            entries
+        ) > SKILL_LIMIT
 
-    def read(path: str) -> bytes:
-        with paths.open_regular(paths.resolve_path(root, path)) as stream:
-            return stream.read(SKILL_BYTES)
+    def read(path: Path) -> Skill:
+        path = path.resolve()
+        display_path = (
+            str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        )
+        with paths.open_regular(path) as stream:
+            return Skill.from_document(display_path, stream.read(SKILL_BYTES))
 
-    try:
-        entries, truncated = await asyncio.to_thread(listing)
-    except FileNotFoundError:
-        return SkillCatalog()
-    except (EnvironmentError, OSError) as exc:
-        logger.warning("Cannot discover project skills: %s", exc)
-        return SkillCatalog()
-    skills = []
-    for path in sorted(entries):
+    root = await asyncio.to_thread(root.resolve)
+    sources = [".vocode/skills", *directories]
+    if include_builtin:
+        sources.append(str(BUNDLED_SKILLS))
+    catalog = SkillCatalog()
+    names: set[str] = set()
+    for directory in dict.fromkeys(sources):
         try:
-            content = await asyncio.to_thread(read, path)
-            skill = Skill.from_document(path, content)
-        except (EnvironmentError, OSError, ValueError, yaml.YAMLError) as exc:
-            logger.warning("Ignoring skill at %s: %s", path, exc)
+            entries, truncated = await asyncio.to_thread(listing, directory)
+        except FileNotFoundError:
             continue
-        skills.append(skill)
-    return SkillCatalog(skills=skills, truncated=truncated)
+        except (EnvironmentError, OSError) as exc:
+            logger.warning("Cannot discover skills at %s: %s", directory, exc)
+            continue
+        catalog.truncated |= truncated
+        for path in entries:
+            try:
+                skill = await asyncio.to_thread(read, path)
+            except (EnvironmentError, OSError, ValueError, yaml.YAMLError) as exc:
+                logger.warning("Ignoring skill at %s: %s", path, exc)
+                continue
+            if skill.name in names:
+                continue
+            if len(catalog.skills) == SKILL_LIMIT:
+                catalog.truncated = True
+                return catalog
+            names.add(skill.name)
+            catalog.skills.append(skill)
+    return catalog
