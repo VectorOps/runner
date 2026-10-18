@@ -943,6 +943,8 @@ class SQLiteHistory:
         await self._run(delete)
 
     async def approval_rule_id(self, request_id: str) -> typing.Optional[UUID]:
+        await self.publish_authorization_rules()
+
         def read(connection: sqlite3.Connection) -> typing.Optional[UUID]:
             row = connection.execute(
                 "SELECT rule_id FROM tool_rule_receipts WHERE request_id = ?",
@@ -964,10 +966,16 @@ class SQLiteHistory:
             ]
         )
         for rule in pending:
-            await self._workspace_rules.import_rule(rule)
+            canonical_id = await self._workspace_rules.import_rule(rule)
 
             def delivered(connection: sqlite3.Connection) -> None:
                 with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "UPDATE tool_rule_receipts SET rule_id = ? WHERE request_id = "
+                        "(SELECT request_id FROM tool_rule_outbox WHERE id = ?)",
+                        (str(canonical_id), str(rule.id)),
+                    )
                     connection.execute(
                         "UPDATE tool_rule_outbox SET delivered = 1 WHERE id = ?",
                         (str(rule.id),),

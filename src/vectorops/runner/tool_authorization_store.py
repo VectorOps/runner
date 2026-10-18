@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import asyncio
-from collections.abc import Set
+from collections.abc import Iterable, Set
 from typing import Optional, Protocol, TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -15,6 +15,25 @@ from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 if TYPE_CHECKING:
     from vectorops.runner.runner.project import Configuration
+
+
+def equivalent_rule(
+    rules: Iterable[tool_policy.AuthorizationRule],
+    value: tool_policy.RuleInput,
+    exclude: Optional[UUID] = None,
+) -> Optional[tool_policy.AuthorizationRule]:
+    return next(
+        (
+            rule
+            for rule in sorted(rules, key=lambda rule: str(rule.id))
+            if rule.id != exclude
+            and rule.tool_name == value.tool_name
+            and rule.decision == value.decision
+            and len(rule.properties) == len(value.properties)
+            and tool_policy.matches(rule.properties, value.properties)
+        ),
+        None,
+    )
 
 
 class WorkflowGrants(Protocol):
@@ -41,6 +60,7 @@ class RuleDocument(pydantic.BaseModel):
         default_factory=dict
     )
     imported: set[str] = pydantic.Field(default_factory=set)
+    import_ids: dict[str, UUID] = pydantic.Field(default_factory=dict)
 
 
 class WorkspaceRules:
@@ -99,9 +119,17 @@ class WorkspaceRules:
         )
 
         def update(payload: str) -> str:
+            nonlocal rule
             document = RuleDocument.model_validate_json(payload)
             if rule_id is not None and str(rule_id) not in document.rules:
                 raise KeyError(str(rule_id))
+            existing = equivalent_rule(document.rules.values(), value, rule_id)
+            if existing is not None:
+                if rule_id is not None:
+                    raise ValueError(
+                        f"equivalent authorization rule already exists: {existing.id}"
+                    )
+                rule = existing
             document.rules[str(rule.id)] = rule
             return document.model_dump_json()
 
@@ -122,21 +150,30 @@ class WorkspaceRules:
         )
         self._read_task = None
 
-    async def import_rule(self, rule: tool_policy.AuthorizationRule) -> None:
+    async def import_rule(self, rule: tool_policy.AuthorizationRule) -> UUID:
         """Remember imports even after deletion so retried delivery cannot resurrect rules."""
+        canonical_id = rule.id
 
         def update(payload: str) -> str:
+            nonlocal canonical_id
             document = RuleDocument.model_validate_json(payload)
             key = str(rule.id)
-            if key not in document.imported:
-                document.rules[key] = rule
+            if key in document.imported:
+                canonical_id = document.import_ids.get(key, rule.id)
+            else:
+                existing = equivalent_rule(document.rules.values(), rule)
+                canonical_id = existing.id if existing is not None else rule.id
+                if existing is None:
+                    document.rules[key] = rule
                 document.imported.add(key)
+                document.import_ids[key] = canonical_id
             return document.model_dump_json()
 
         await self.database.update_document(
             "tool.authorization.rules", self._initial_document, update
         )
         self._read_task = None
+        return canonical_id
 
 
 class AuthorizationStore:
@@ -224,6 +261,20 @@ class SQLiteWorkflowGrants:
         rule = tool_policy.AuthorizationRule(
             **value.model_dump(), id=rule_id or uuid4()
         )
+        rules = SQLiteWorkflowGrants.list(connection, workflow_id)
+        if rule_id is not None and not any(item.id == rule_id for item in rules):
+            raise KeyError(str(rule_id))
+        existing = equivalent_rule(rules, value, rule_id)
+        if existing is not None:
+            if rule_id is not None:
+                raise ValueError(
+                    f"equivalent authorization rule already exists: {existing.id}"
+                )
+            connection.execute(
+                "UPDATE tool_authorization_rules SET request_id = NULL WHERE id = ?",
+                (str(existing.id),),
+            )
+            return existing
         if rule_id is None:
             connection.execute(
                 "INSERT INTO tool_authorization_rules VALUES (?, ?, NULL, ?)",
@@ -256,6 +307,13 @@ class SQLiteWorkflowGrants:
             return
         answer = tool_policy.ToolApprovalResponse.model_validate(response)
         rule = tool_policy.AuthorizationRule(**value.model_dump(), id=uuid4())
+        existing = None
+        if answer.scope == "workflow":
+            existing = equivalent_rule(
+                SQLiteWorkflowGrants.list(connection, workflow_id), value
+            )
+            if existing is not None:
+                rule = existing
         connection.execute(
             "INSERT INTO tool_rule_receipts VALUES (?, ?)", (request_id, str(rule.id))
         )
@@ -264,7 +322,7 @@ class SQLiteWorkflowGrants:
                 "INSERT INTO tool_rule_outbox (id, request_id, payload) VALUES (?, ?, ?)",
                 (str(rule.id), request_id, rule.model_dump_json()),
             )
-        else:
+        elif existing is None:
             connection.execute(
                 "INSERT INTO tool_authorization_rules VALUES (?, ?, ?, ?)",
                 (str(rule.id), workflow_id, request_id, rule.model_dump_json()),
@@ -273,9 +331,16 @@ class SQLiteWorkflowGrants:
     @staticmethod
     def retain(connection: sqlite3.Connection, step_ids: Set[str]) -> None:
         grants = connection.execute(
-            "SELECT request_id FROM tool_authorization_rules WHERE request_id IS NOT NULL"
+            "SELECT id FROM tool_authorization_rules WHERE request_id IS NOT NULL"
         ).fetchall()
+        retained_rules = {
+            row[1]
+            for row in connection.execute(
+                "SELECT request_id, rule_id FROM tool_rule_receipts"
+            )
+            if row[0] in step_ids
+        }
         connection.executemany(
-            "DELETE FROM tool_authorization_rules WHERE request_id = ?",
-            [(row[0],) for row in grants if row[0] not in step_ids],
+            "DELETE FROM tool_authorization_rules WHERE id = ?",
+            [(row[0],) for row in grants if row[0] not in retained_rules],
         )
