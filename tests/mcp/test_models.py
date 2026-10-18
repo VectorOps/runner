@@ -133,3 +133,58 @@ def test_schema_depth_limit() -> None:
         nested = {"type": "object", "properties": {"next": nested}}
     with pytest.raises(ValueError, match="complexity"):
         schema.validator(nested)
+
+
+def test_exposure_policy_is_separate_from_transport_identity() -> None:
+    connection = models.StdioServer(command="unused")
+    settings = models.Settings.model_validate(
+        {
+            "mode": "static",
+            "max_active": 3,
+            "servers": {
+                "test": {
+                    **connection.model_dump(mode="json"),
+                    "tools": ["echo", "delete"],
+                    "exclude": ["delete"],
+                },
+                "disabled": {
+                    "kind": "stdio",
+                    "command": "unused",
+                    "enabled": False,
+                },
+            },
+        }
+    )
+    assert settings.server("test") == connection
+    assert models.tool_name(
+        "test", settings.server("test"), "echo"
+    ) == models.tool_name("test", connection, "echo")
+    assert settings.selections() == [
+        models.Selection(server="test", tools=["echo", "delete"], exclude=["delete"])
+    ]
+    assert settings.tool_settings("test").allows("echo")
+    assert not settings.tool_settings("test").allows("delete")
+    assert not settings.tool_settings("test").allows("other")
+    assert models.Settings.model_validate(settings.model_dump(mode="json")) == settings
+    assert settings.mode == "static"
+    assert settings.max_active == 3
+    assert models.Settings().mode == "dynamic"
+    assert models.Settings().selections() == []
+    assert models.Settings().model_dump(mode="json") == {"servers": {}}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"mode": "automatic"},
+        {"max_active": 0},
+        {"max_active": 257},
+        {"max_active": True},
+        {"servers": {"s": {"kind": "stdio", "command": "unused", "tools": "*"}}},
+        {"servers": {"s": {"kind": "stdio", "command": "unused", "enabled": "bad"}}},
+        {"server_tools": {"missing": {}}},
+    ],
+)
+def test_invalid_exposure_settings(value: dict[str, object]) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        models.Settings.model_validate(value)

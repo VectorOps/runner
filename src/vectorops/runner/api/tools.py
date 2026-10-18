@@ -17,6 +17,7 @@ from .tool_registry import ToolConfig as ToolConfig, register_tool as register_t
 from .tool_collections import (
     ToolCollection as ToolCollection,
     load_collection as load_collection,
+    load_tool_set as load_tool_set,
 )
 
 exec_tool = _environment.exec_tool
@@ -42,6 +43,7 @@ __all__ = [
     "register_tool",
     "ToolCollection",
     "load_collection",
+    "load_tool_set",
     "list_files_tool",
     "Tool",
     "ToolBinding",

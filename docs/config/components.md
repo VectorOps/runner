@@ -239,7 +239,8 @@ so changing them is detected during replay without persisting their raw payload.
 It does not scan accepted fields for secrets; owners must design non-secret schemas.
 Ordinary `get_config(ctx, name, default)` retains its schema-free behavior.
 
-MCP settings use this path under `[components.mcp.servers]`. See
+MCP settings use this path through root `[mcp.servers]`, normalized to the
+legacy `[components.mcp.servers]` namespace. Do not configure both forms. See
 [MCP servers and workflow tools](mcp.md) for stdio/HTTP configuration, credentials,
 prompt/resource access, and `LLM.run(tool_set=...)` dynamic discovery. MCP selection
 and discovery do not replace the tool approval policy below.

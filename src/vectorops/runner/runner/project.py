@@ -51,6 +51,20 @@ class RunnerConfig(pydantic.BaseModel):
     components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     environment: typing.Optional[EnvironmentConfig] = None
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def normalize_mcp(cls, value: object) -> object:
+        if not isinstance(value, dict) or "mcp" not in value:
+            return value
+        result = dict(value)
+        components = result.get("components", {})
+        if not isinstance(components, dict):
+            raise ValueError("components must be a table")
+        if "mcp" in components:
+            raise ValueError("configure either mcp or components.mcp, not both")
+        result["components"] = {**components, "mcp": result.pop("mcp")}
+        return result
+
     def for_project(self, root: Path) -> typing.Self:
         """Resolve the implicit local target without changing explicit configuration."""
         if self.environment is not None:

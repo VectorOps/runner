@@ -8,9 +8,10 @@ from typing import Annotated, Optional
 
 import pydantic
 
-from . import composition, tool_registry, builtin_tools
+from . import builtin_tools, tool_registry, tool_sets
+from .composition import workflow_context
 from .configuration import get_config
-from .tool_contracts import ToolBinding
+from .tool_contracts import ToolBinding, ToolSet
 
 CollectionKey = Annotated[str, pydantic.Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]*$")]
 
@@ -71,16 +72,12 @@ def _resolve(
     return ToolCollection(tools=list(names), config=options)
 
 
-async def load_collection(
+async def _prepare(
     name: str, *, defaults: Optional[Mapping[str, ToolCollection]] = None
-) -> list[ToolBinding]:
-    """Load one collection inside a workflow; reuse its bindings across LLM turns.
-
-    Only module names and the selected collection are recorded, never approval
-    policy. Factories are rebuilt on replay and own any recorded discovery I/O.
-    """
+) -> list[tuple[tool_registry.Registration, pydantic.BaseModel]]:
+    """Resolve and validate every factory before any factory performs discovery."""
     key = pydantic.TypeAdapter(CollectionKey).validate_python(name)
-    ctx = composition.workflow_context()
+    ctx = workflow_context()
     fallback = defaults.get(key) if defaults is not None else None
     raw = await get_config(
         ctx,
@@ -111,6 +108,14 @@ async def load_collection(
         ):
             raise ValueError(f"tool module is not enabled: {registration.module}")
         prepared.append((registration, registration.config.model_validate(options)))
+    return prepared
+
+
+async def load_collection(
+    name: str, *, defaults: Optional[Mapping[str, ToolCollection]] = None
+) -> list[ToolBinding]:
+    """Load static bindings, preserving the existing recorded collection contract."""
+    prepared = await _prepare(name, defaults=defaults)
     bindings: list[ToolBinding] = []
     exposed: set[str] = set()
     for registration, validated in prepared:
@@ -121,3 +126,14 @@ async def load_collection(
             exposed.add(tool_name)
             bindings.append(binding)
     return bindings
+
+
+async def load_tool_set(
+    name: str, *, defaults: Optional[Mapping[str, ToolCollection]] = None
+) -> ToolSet:
+    """Load static and dynamic factories for LLM.run(tool_set=...)."""
+    prepared = await _prepare(name, defaults=defaults)
+    sets = [await registration.build_set(options) for registration, options in prepared]
+    selected = tool_sets.Combined(tuple(sets))
+    _ = selected.bindings
+    return selected

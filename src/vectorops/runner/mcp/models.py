@@ -244,6 +244,17 @@ def validate_reference(value: str) -> None:
         raise ValueError("invalid MCP credential profile reference")
 
 
+class ServerTools(Model):
+    enabled: bool = True
+    tools: list[str] = pydantic.Field(default_factory=lambda: ["*"])
+    exclude: list[str] = pydantic.Field(default_factory=list)
+
+    def allows(self, name: str) -> bool:
+        return self.enabled and Selection(
+            server="", tools=self.tools, exclude=self.exclude
+        ).allows(name)
+
+
 class Settings(Model):
     configuration_contract: typing.ClassVar[str] = (
         "e27b17f60c6866b249b37b466f640e1123e34cfe37c0fc41eb7103c36cbd58e3"
@@ -252,9 +263,55 @@ class Settings(Model):
     roots: list[Root] = pydantic.Field(
         default_factory=list, exclude_if=lambda value: not value
     )
+    mode: Literal["static", "dynamic"] = pydantic.Field(
+        default="dynamic", exclude_if=lambda value: value == "dynamic"
+    )
+    max_active: int = pydantic.Field(
+        default=32, ge=1, le=256, strict=True, exclude_if=lambda value: value == 32
+    )
+    server_tools: dict[str, ServerTools] = pydantic.Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def separate_tool_settings(cls, value: object) -> object:
+        """Keep exposure policy out of transport identities and recorded catalogs."""
+        if not isinstance(value, dict) or not isinstance(value.get("servers"), dict):
+            return value
+        result = dict(value)
+        servers = dict(value["servers"])
+        policies = dict(value.get("server_tools", {}))
+        for name, server in servers.items():
+            if not isinstance(server, dict):
+                continue
+            connection = dict(server)
+            policy = {
+                key: connection.pop(key)
+                for key in ("enabled", "tools", "exclude")
+                if key in connection
+            }
+            if policy:
+                if name in policies:
+                    raise ValueError("duplicate MCP server tool settings")
+                policies[name] = policy
+            servers[name] = connection
+        return {**result, "servers": servers, "server_tools": policies}
+
+    def selections(self) -> list["Selection"]:
+        return [
+            Selection(server=name, tools=policy.tools, exclude=policy.exclude)
+            for name in sorted(self.servers)
+            if (policy := self.tool_settings(name)).enabled
+        ]
+
+    def tool_settings(self, name: str) -> ServerTools:
+        return self.server_tools.get(name, ServerTools())
 
     @pydantic.model_validator(mode="after")
     def resolve_roots(self) -> "Settings":
+        if set(self.server_tools) - set(self.servers):
+            raise ValueError("MCP tool settings reference an unknown server")
         for name in self.servers:
             self.servers[name] = self.server(name)
         return self

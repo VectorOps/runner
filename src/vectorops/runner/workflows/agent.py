@@ -14,7 +14,7 @@ from vectorops.runner.workflows.tools import default_collections
     name="Coding agent",
     description="Plan, investigate, edit, and test with explicit helper delegation.",
     kind="builtin.agent",
-    version=2,
+    version=3,
 )
 async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     """Retain one conversation and plan, refreshing model settings each turn."""
@@ -22,9 +22,15 @@ async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
         await get_config(ctx, "workflows.agent", {}, model=settings.AgentSettings)
     )
     prompt_context = await context.load_context()
-    bindings = await tools.load_collection(
-        options.tool_collection, defaults=default_collections(options.agents)
-    )
+    defaults = default_collections(options.agents, include_mcp=ctx.version >= 3)
+    bindings: list[tools.ToolBinding] = []
+    selected = None
+    if ctx.version < 3:
+        bindings = await tools.load_collection(
+            options.tool_collection, defaults=defaults
+        )
+    else:
+        selected = await tools.load_tool_set(options.tool_collection, defaults=defaults)
     conversation = llm.LLM(
         "agent",
         profile="strong",
@@ -33,4 +39,4 @@ async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     )
     while True:
         conversation.add_message(await llm.request_user_message())
-        await conversation.run(tools=bindings)
+        await conversation.run(tools=bindings, tool_set=selected)

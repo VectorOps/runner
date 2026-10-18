@@ -20,10 +20,10 @@ Connect workflows to Model Context Protocol (MCP) servers over POSIX stdio or St
 
 Prerequisites: an installed MCP server, an LLM model and credentials configured for the workspace, and a connected host that can answer tool-approval requests. See [component configuration](components.md) and [authentication](authentication.md).
 
-Add a server to the workspace's `config.toml`. Replace the executable and project paths with your installed server and working directory; the runner does not install servers.
+Add a root-level MCP server to `<project>/.voc/config.toml` (or `config.toml` in your custom runner workspace). Replace the executable and project paths with your installed server and working directory; the runner does not install servers.
 
 ```toml
-[components.mcp.servers.files]
+[mcp.servers.files]
 kind = "stdio"
 command = "/opt/mcp/bin/files-server"
 args = ["/srv/project"]
@@ -33,26 +33,49 @@ cwd = "/srv/project"
 approve_all = false
 ```
 
-Save this workflow as `workflows/review.py`:
+Start a new `builtin:agent` execution through your host or the [runner CLI](../usage/cli.md). Its default collection includes MCP: no collection edits or custom workflow are needed. Without configured servers it adds no MCP tools and opens no MCP connections. The helper's default tools are unchanged.
 
-```python
-from vectorops.runner.api import llm, mcp
-
-
-async def main(ctx):
-    bindings = await mcp.discover([mcp.Selection(server="files")])
-    agent = llm.LLM("reviewer")
-    agent.add_user_message("Inspect the project and summarize its structure.")
-    return (await agent.run(tools=bindings)).model_dump(mode="json")
-```
-
-Start `review:main` through your host or the [runner CLI](../usage/cli.md). With the default approval policy, tool calls wait for host confirmation; launching a bare CLI does not supply an approval UI. Inspect pending requests through the [control protocol](../reference/control-protocol.md#workflow-scoped-tool-approval).
+By default the agent discovers the catalog but exposes only a search tool initially. Matching concrete tools become available on subsequent rounds. With the default approval policy, search and concrete tool calls wait for host confirmation; launching a bare CLI does not supply an approval UI. Inspect pending requests through the [control protocol](../reference/control-protocol.md#workflow-scoped-tool-approval).
 
 Discovery opens the configured server and records its tool catalog. An approved call validates its arguments and checks that the remote descriptor still matches the snapshot before invoking the tool.
 
 ## Server configuration
 
-Servers live under `components.mcp.servers.<name>`. Names contain 1-64 ASCII letters, digits, underscores, or hyphens. Unknown configuration fields are rejected. `component="other.path"` on discovery APIs selects an alternate component subtree with the same `servers` shape.
+Servers live under `mcp.servers.<name>`. Names contain 1-64 ASCII letters, digits, underscores, or hyphens. Unknown configuration fields are rejected. The legacy `[components.mcp]` form remains supported, but using both root `[mcp]` and `[components.mcp]` in one file is rejected. Root configuration normalizes into the existing `components.mcp` namespace, so management APIs and configuration overrides such as `mcp.mode` continue to address the same settings. `component="other.path"` on discovery APIs selects an alternate component subtree with the same shape.
+
+### Tool exposure
+
+```toml
+[mcp]
+mode = "dynamic"
+max_active = 16
+
+[mcp.servers.docs]
+kind = "http"
+url = "https://docs.example.com/mcp"
+tools = ["search", "fetch"]
+
+[mcp.servers.archive]
+kind = "stdio"
+command = "/opt/mcp/bin/archive-server"
+enabled = false
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mcp.mode` | `"dynamic"` | `dynamic` exposes search first; `static` exposes every selected tool schema immediately |
+| `mcp.max_active` | `32` | Dynamic active-tool cap, 1-256, excluding the search tool |
+| Server `enabled` | `true` | Include this server in tool discovery; `false` skips it without connecting |
+| Server `tools` | `["*"]` | Exact remote tool names or `"*"`; `[]` exposes none |
+| Server `exclude` | `[]` | Remote names to exclude; `"*"` excludes all |
+
+Server filters bound explicit workflow/collection tool selections too. They do not disable administrative connect operations or prompt/resource APIs. Exposure settings do not change transport identity or namespaced tool names.
+
+To expose all selected schemas immediately, set `mode = "static"` under `[mcp]`. Dynamic mode still connects and records catalogs up front; it limits model context, not server startup. If no tools remain after selection, the configured collection exposes no MCP search tool either.
+
+The built-in agent loads its collection once per execution. Start a new execution to apply changes. Dynamic activation starts search-only on each user turn; the catalog remains the recorded snapshot. Existing version-2 agent executions keep their original static collection behavior when resumed. Explicit collection `tools` lists still replace defaults: include `"mcp"` if you customize the agent's list.
+
+For custom workflows, use `tools.load_tool_set(...)` and `LLM.run(tool_set=...)` to honor the mode toggle. The existing `tools.load_collection(...)` API remains static. See [tool collections](tool-collections.md).
 
 MCP uses a validated configuration read: only accepted, normalized settings enter history. Validation failures have payload-free messages. This is not a secret scanner: values in accepted command arguments, paths, names, or descriptions are still recorded. Never put secrets in them.
 
@@ -74,7 +97,7 @@ Stdio runs on the **runner host**, not inside the attached target environment. I
 ### Streamable HTTP
 
 ```toml
-[components.mcp.servers.remote]
+[mcp.servers.remote]
 kind = "http"
 url = "https://mcp.example.com/mcp"
 credential = "remote-api"
@@ -117,11 +140,11 @@ The protected file contains a credential such as this placeholder:
 Use that profile as HTTP `credential`, or map it into a stdio environment variable:
 
 ```toml
-[components.mcp.servers.local]
+[mcp.servers.local]
 kind = "stdio"
 command = "/opt/mcp/bin/private-server"
 
-[components.mcp.servers.local.env_credentials]
+[mcp.servers.local.env_credentials]
 SERVICE_TOKEN = "remote-api"
 ```
 
@@ -132,11 +155,11 @@ Credentials are resolved from the encrypted runner store during live execution, 
 Register a public client with the server's authorization provider first. Configure its client ID, the exact resource, an explicitly trusted issuer, and a loopback redirect URI matching the registration:
 
 ```toml
-[components.mcp.servers.remote]
+[mcp.servers.remote]
 kind = "http"
 url = "https://mcp.example.com/mcp"
 
-[components.mcp.servers.remote.oauth]
+[mcp.servers.remote.oauth]
 issuer = "https://login.example.com"
 resource = "https://mcp.example.com/mcp"
 client_id = "registered-public-client"
@@ -175,12 +198,12 @@ New configuration can use `auth.kind`: `none`, `header`, `authorization_code`, o
 For a custom API-key header:
 
 ```toml
-[components.mcp.servers.remote]
+[mcp.servers.remote]
 kind = "http"
 url = "https://mcp.example.com/mcp"
 headers = { X-Tenant = "engineering" }
 
-[components.mcp.servers.remote.auth]
+[mcp.servers.remote.auth]
 kind = "header"
 credential = "remote-api"
 header = "X-Api-Key"
@@ -192,11 +215,11 @@ prefix = ""
 For service-account authentication, provision the client secret as an API-key credential under provider `mcp`, then reference its profile:
 
 ```toml
-[components.mcp.servers.remote]
+[mcp.servers.remote]
 kind = "http"
 url = "https://mcp.example.com/mcp"
 
-[components.mcp.servers.remote.auth]
+[mcp.servers.remote.auth]
 kind = "client_credentials"
 token_endpoint = "https://login.example.com/token"
 resource = "https://mcp.example.com/mcp"
@@ -258,13 +281,13 @@ MCP `notifications/tools/list_changed` means the server's tool list changed; it 
 
 ## Root defaults and overrides
 
-Configure shared defaults at `components.mcp.roots`. A root accepts exactly one absolute `path` or local `file:` `uri`, plus optional `name`. Paths normalize to URIs before recording. Per-server `roots` replace defaults when explicitly supplied, including an empty list; omitted roots inherit defaults. `roots_mode="merge"` combines defaults and server roots, deduplicates by URI, and lets the server entry win.
+Configure shared defaults at `mcp.roots`. A root accepts exactly one absolute `path` or local `file:` `uri`, plus optional `name`. Paths normalize to URIs before recording. Per-server `roots` replace defaults when explicitly supplied, including an empty list; omitted roots inherit defaults. `roots_mode="merge"` combines defaults and server roots, deduplicates by URI, and lets the server entry win.
 
 ```toml
-[components.mcp]
+[mcp]
 roots = [{ path = "/srv/project", name = "project" }]
 
-[components.mcp.servers.files]
+[mcp.servers.files]
 kind = "stdio"
 command = "/opt/mcp/bin/files-server"
 roots_mode = "merge"
@@ -298,7 +321,7 @@ Input schemas use JSON Schema 2020-12, require `type="object"`, and are validate
 
 ## Dynamic discovery
 
-Use `mcp.dynamic` when exposing every tool schema would make the initial LLM request too large:
+The default agent uses dynamic discovery automatically. In a custom workflow, use `mcp.dynamic` for explicit selections when exposing every tool schema would make the initial LLM request too large:
 
 ```python
 from vectorops.runner.api import llm, mcp
@@ -373,7 +396,7 @@ Completed committed remote calls are not repeated. An interrupted call can resta
 
 ## Limits and troubleshooting
 
-Configure per-server limits with `[components.mcp.servers.<name>.limits]`:
+Configure per-server limits with `[mcp.servers.<name>.limits]`:
 
 | Field | Default | Allowed range and use |
 | --- | --- | --- |

@@ -23,6 +23,7 @@ def test_exports_preserve_implementation_identity() -> None:
         "register_tool": tool_registry.register_tool,
         "ToolCollection": tool_collections.ToolCollection,
         "load_collection": tool_collections.load_collection,
+        "load_tool_set": tool_collections.load_tool_set,
         "list_files_tool": list_files.list_files_tool,
         "Tool": llm.Tool,
         "ToolBinding": llm.ToolBinding,

@@ -1,7 +1,12 @@
 # Tool registration and named collections
 
 Named collections select and configure tools independently of workflow code.
-Workflows load fresh bindings by key and pass them directly to `LLM.run(tools=...)`.
+Use `load_tool_set` with `LLM.run(tool_set=...)` for static and dynamic tools, or
+`load_collection` with `LLM.run(tools=...)` for static bindings only.
+
+The default agent already includes MCP. Configure servers under root
+`[mcp.servers.<name>]`; no collection edits are needed. MCP defaults to dynamic
+discovery, and an empty server configuration adds no tools. See [MCP configuration](mcp.md).
 
 ## Configure a collection
 
@@ -20,7 +25,7 @@ tool_collection = "research"
 ```
 
 Configure the `repository` server separately under
-`components.mcp.servers.repository`; see [MCP configuration](mcp.md).
+`mcp.servers.repository`; see [MCP configuration](mcp.md).
 Collection keys are independent of workflow names. The agent defaults to collection
 `agent`; the helper defaults to `helper`. Their code supplies default collections,
 so existing installations need no new configuration.
@@ -79,7 +84,7 @@ the old workflow-module import forwards to the same factory.
 | `read_file`, `list_files`, `exec`, `poll_process`, `write_stdin`, `kill_process`, `list_processes`, `update_plan`, `web_fetch` | No options |
 | `apply_patch` | `format`: `v4a` (default) or `patch` |
 | `run_agent`, `subworkflow` | Required, nonempty, unique `references` list |
-| `mcp` | Required `selections` list using existing MCP selection models; optional `component`, default `mcp` |
+| `mcp` | Optional `selections` list; omitted selects all enabled configured servers, `[]` selects none. Optional `component`, default `mcp` |
 
 Selection never grants approval. All bindings retain normal approval handling under
 `components.tools.approval`. Collection configuration cannot install auto-approval
@@ -112,8 +117,17 @@ their existing recorded discovery operations. Custom factories must do the same 
 external I/O. Do not wrap collection loading in an activity that would skip binding
 construction during replay. Changed workflow code/defaults must remain replay-compatible.
 
-This helper returns static bindings. For search-first dynamic MCP activation, keep
-using `mcp.dynamic(...)` and `LLM.run(tool_set=...)` directly.
+`load_collection` retains its static behavior, even when MCP mode is dynamic.
+Use the dynamic-aware loader to honor `[mcp].mode` and `[mcp].max_active`:
+
+```python
+selected = await tools.load_tool_set("research")
+response = await conversation.run(tool_set=selected)
+```
+
+Ordinary tools remain available every round; dynamic factories advance from
+completed tool results. Each `LLM.run` begins with the original activation state.
+Direct `mcp.dynamic(...)` remains available for explicit workflow-controlled catalogs.
 
 ## Register custom tools
 
@@ -162,6 +176,13 @@ model they receive one validated model argument; without one they are called wit
 arguments and reject configuration options. Tool-call arguments remain separate from
 factory configuration. The decorator preserves the original callable and rejects
 duplicate registrations rather than replacing existing definitions.
+
+An optional `tool_set=` factory on `register_tool` supplies a `ToolSet` to
+`load_tool_set`; it accepts the same configuration argument as the static factory
+and may be sync or async. Without one, the loader wraps ordinary bindings as a
+static set. `load_collection` always uses the original static factory. Dynamic
+factories own their binding authorization metadata and cannot be combined with
+the decorator's `auth_context` option.
 
 Imports execute trusted Python code and are not sandboxed. List the defining module
 of each custom factory in `modules`; loading it in another workspace does not make

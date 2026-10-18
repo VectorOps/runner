@@ -159,3 +159,27 @@ async def test_environment_configuration(tmp_path: Path) -> None:
 def test_invalid_environment_configuration(configuration: dict[str, object]) -> None:
     with pytest.raises(pydantic.ValidationError):
         RunnerConfig.model_validate({"environment": configuration})
+
+
+@pytest.mark.parametrize("section", ["mcp", "components.mcp"])
+async def test_root_mcp_configuration_and_overrides(
+    tmp_path: Path, section: str
+) -> None:
+    (tmp_path / "config.toml").write_text(
+        f'[{section}]\nmode = "static"\n'
+        f'[{section}.servers.docs]\nkind = "stdio"\ncommand = "unused"\n'
+    )
+    project = await RunnerProject.open(tmp_path)
+    assert project.configuration.get("mcp.mode") == "static"
+    assert project.configuration.get("components.mcp.servers.docs.command") == "unused"
+    await project.configuration.set("mcp.mode", "dynamic", permanent=True)
+    assert project.configuration.get("components.mcp.mode") == "dynamic"
+    restarted = await RunnerProject.open(tmp_path)
+    assert restarted.configuration.get("mcp.mode") == "dynamic"
+
+
+def test_root_mcp_conflicts_are_rejected_without_mutating_input() -> None:
+    original: dict[str, pydantic.JsonValue] = {"mcp": {}, "components": {"mcp": {}}}
+    with pytest.raises(pydantic.ValidationError, match="not both"):
+        RunnerConfig.model_validate(original)
+    assert original == {"mcp": {}, "components": {"mcp": {}}}
