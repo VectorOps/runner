@@ -18,7 +18,8 @@ Consecutive labeled @@ lines narrow the search in order.
 Prefix context with a space, removals with -, and additions with +.
 Use enough context to locate the edit. Order hunks top-to-bottom.
 *** End of File after the final hunk prefers matching at EOF.
-Paths must be relative. Each file may appear only once.
+Paths may be target-relative, absolute, or home-relative, including outside the target root.
+Each file may appear only once.
 Adds and moves cannot overwrite existing destinations.
 An optional outer ```patch fence is accepted.
 Reverse swaps additions/removals and move paths; reversing Delete File is

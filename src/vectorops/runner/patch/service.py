@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-from typing import Optional
+from typing import Literal, Optional
 
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
 from vectorops.runner.environment import paths
@@ -44,7 +44,9 @@ class PatchService:
         self._lock = asyncio.Lock()
 
     def _read(self, path: str) -> Optional[bytes]:
-        local = paths.resolve_path(self._root, path, follow_final=False)
+        local = paths.resolve_path(
+            self._root, path, follow_final=False, allow_external=True
+        )
         try:
             info = local.lstat()
         except FileNotFoundError:
@@ -62,7 +64,11 @@ class PatchService:
     def _write(self, destination: str, content: bytes, *, creating: bool) -> None:
         """Publish complete files atomically, without replacing symlinks or move targets."""
         path = paths.resolve_path(
-            self._root, destination, follow_final=False, mutation=True
+            self._root,
+            destination,
+            follow_final=False,
+            mutation=True,
+            allow_external=True,
         )
         mode = 0o600
         try:
@@ -80,7 +86,7 @@ class PatchService:
             mode = stat.S_IMODE(metadata.st_mode)
         if path.parent != self._root:
             parent = paths.resolve_path(
-                self._root, str(Path(destination).parent), mutation=True
+                self._root, str(Path(destination).parent), allow_external=True
             )
             parent.mkdir(parents=True, exist_ok=True)
         descriptor, name = tempfile.mkstemp(prefix=".target-", dir=path.parent)
@@ -97,24 +103,23 @@ class PatchService:
             temporary.unlink(missing_ok=True)
 
     def _remove(self, path: str) -> None:
-        paths.resolve_path(self._root, path, follow_final=False, mutation=True).unlink()
+        paths.resolve_path(
+            self._root, path, follow_final=False, mutation=True, allow_external=True
+        ).unlink()
 
     def _check_destination(self, path: str) -> None:
         destination = paths.resolve_path(
-            self._root, path, follow_final=False, mutation=True
+            self._root, path, follow_final=False, mutation=True, allow_external=True
         )
         if os.path.lexists(destination):
             raise common.PatchFailure("Move destination already exists")
 
-    async def apply(
-        self, text: str, *, format: str = "v4a", reverse: bool = False
-    ) -> models.PatchResult:
-        """Serialize calls on this service, without claiming cross-process isolation."""
+    def _parse(
+        self, text: str, format: str, reverse: bool
+    ) -> tuple[list[common.FileOperation], list[models.PatchError]]:
         get_system_instruction(format)
         if len(text.encode("utf-8")) > self._max_patch_bytes:
-            return models.PatchResult(
-                errors=[models.PatchError(msg="Patch exceeds size limit")]
-            )
+            return [], [models.PatchError(msg="Patch exceeds size limit")]
         operations: list[common.FileOperation]
         if format.lower() == "v4a":
             parsed_v4a, errors = v4a.parse(text, reverse=reverse)
@@ -122,6 +127,31 @@ class PatchService:
         else:
             parsed_search, errors = search_replace.parse(text, reverse=reverse)
             operations = list(parsed_search)
+        return operations, errors
+
+    async def scope(
+        self, text: str, *, format: str = "v4a", reverse: bool = False
+    ) -> Literal["internal", "external"]:
+        """Classify all executable source and destination paths without reading file contents."""
+
+        def classify() -> Literal["internal", "external"]:
+            operations, errors = self._parse(text, format, reverse)
+            if any(
+                paths.path_scope(self._root, path) == "external"
+                for operation in operations
+                for path in (operation.path, operation.destination)
+                if path is not None
+            ):
+                return "external"
+            return "internal"
+
+        return await asyncio.to_thread(classify)
+
+    async def apply(
+        self, text: str, *, format: str = "v4a", reverse: bool = False
+    ) -> models.PatchResult:
+        """Serialize calls on this service, without claiming cross-process isolation."""
+        operations, errors = self._parse(text, format, reverse)
         async with self._lock:
             return await self._apply(operations, errors)
 

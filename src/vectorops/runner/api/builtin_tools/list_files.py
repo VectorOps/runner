@@ -20,6 +20,14 @@ from .environment import environment
 def list_files_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[models.ListRequest]:
+    async def auth_context(
+        context: ActivityExecutionContext, request: models.ListRequest
+    ) -> tools.AuthContext:
+        scope = await asyncio.to_thread(
+            paths.path_scope, environment(context).root, request.path
+        )
+        return tools.AuthContext(properties={"scope": scope})
+
     async def invoke(
         ctx: ActivityExecutionContext, request: models.ListRequest
     ) -> tools.ToolResponse:
@@ -28,7 +36,9 @@ def list_files_tool(
 
         def listing() -> models.ListResult:
             entries: list[models.FileInfo] = []
-            with os.scandir(paths.resolve_path(target.root, request.path)) as iterator:
+            with os.scandir(
+                paths.resolve_path(target.root, request.path, allow_external=True)
+            ) as iterator:
                 for entry in iterator:
                     if len(entries) == request.limit:
                         return models.ListResult(entries=entries, truncated=True)
@@ -61,8 +71,10 @@ def list_files_tool(
     return tools.Tool(
         "list_files",
         "List one directory in the target environment with a bounded entry count. "
+        "Accepts target-relative, absolute, and home-relative paths, including outside the target root. "
         "Not recursive; inspect the truncated flag before treating a listing as complete.",
         models.ListRequest,
         invoke,
         approval=approval,
+        contextual_auth_context=auth_context,
     )

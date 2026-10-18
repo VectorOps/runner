@@ -41,12 +41,10 @@ def validate_path(path: str) -> str:
         not path
         or "\0" in path
         or "\\" in path
-        or path.startswith(("/", "~"))
         or re.match(r"^[A-Za-z]:", path)
-        or ".." in PurePosixPath(path).parts
-        or str(PurePosixPath(path)) == "."
+        or str(PurePosixPath(path)) in (".", "/", "~")
     ):
-        raise PatchFailure(f"Expected a relative file path without traversal: {path!r}")
+        raise PatchFailure(f"Expected a file path: {path!r}")
     return str(PurePosixPath(path))
 
 

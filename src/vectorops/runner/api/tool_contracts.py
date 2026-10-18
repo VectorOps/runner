@@ -86,9 +86,14 @@ class Tool(typing.Generic[A]):
         version: int = 1,
         approval: typing.Optional[ToolApproval] = None,
         auth_context: typing.Optional[Callable[[A], Awaitable[AuthContext]]] = None,
+        contextual_auth_context: typing.Optional[
+            Callable[[ActivityExecutionContext, A], Awaitable[AuthContext]]
+        ] = None,
     ) -> None:
         if version < 1:
             raise ValueError("tool version must be positive")
+        if auth_context is not None and contextual_auth_context is not None:
+            raise ValueError("provide only one auth context callback")
         self._definition = connect.ToolSpec.external(
             name=name,
             description=description,
@@ -99,6 +104,7 @@ class Tool(typing.Generic[A]):
         self._version = version
         self._approval = approval
         self._auth_context = auth_context
+        self._contextual_auth_context = contextual_auth_context
 
     @property
     def definition(self) -> connect.ToolSpec:
@@ -124,9 +130,22 @@ class Tool(typing.Generic[A]):
     async def auth_context(
         self, arguments: dict[str, pydantic.JsonValue]
     ) -> AuthContext:
+        if self._contextual_auth_context is not None:
+            raise ToolExecutionError("tool auth context requires an activity context")
         if self._auth_context is None:
             return AuthContext()
         return await self._auth_context(self._validated(arguments))
+
+    async def auth_context_for_call(
+        self,
+        context: ActivityExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> AuthContext:
+        if self._contextual_auth_context is not None:
+            return await self._contextual_auth_context(
+                context, self._validated(arguments)
+            )
+        return await self.auth_context(arguments)
 
     async def execute(
         self,

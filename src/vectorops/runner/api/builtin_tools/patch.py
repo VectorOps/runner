@@ -37,9 +37,7 @@ def apply_patch_tool(
     instruction = get_system_instruction(format)
     bound_environment: Optional[LocalEnvironment] = None
 
-    async def invoke(
-        context: ActivityExecutionContext, arguments: PatchArguments
-    ) -> tools.ToolResponse:
+    def patch_service(context: ActivityExecutionContext) -> PatchService:
         nonlocal service, bound_environment
         if service is None:
             bound_environment = environment(context)
@@ -54,7 +52,20 @@ def apply_patch_tool(
             raise tools.ToolExecutionError(
                 "Patch bindings cannot be shared across target environments"
             )
-        result = await service.apply(
+        return service
+
+    async def auth_context(
+        context: ActivityExecutionContext, arguments: PatchArguments
+    ) -> tools.AuthContext:
+        scope = await patch_service(context).scope(
+            arguments.text, format=format, reverse=arguments.reverse
+        )
+        return tools.AuthContext(properties={"scope": scope})
+
+    async def invoke(
+        context: ActivityExecutionContext, arguments: PatchArguments
+    ) -> tools.ToolResponse:
+        result = await patch_service(context).apply(
             arguments.text, format=format, reverse=arguments.reverse
         )
         return tools.ToolResponse(
@@ -64,7 +75,8 @@ def apply_patch_tool(
     return tools.Tool(
         name="apply_patch",
         description=(
-            "Apply a repository patch. Parse and match failures leave the entire "
+            "Apply a patch using target-relative, absolute, or home-relative file paths, including outside the target root. "
+            "Parse and match failures leave the entire "
             "affected file unchanged, for both supported formats. Independent files "
             "may succeed and are not rolled back. Filesystem failures, especially "
             "during moves, can leave partial changes. SUCCESS lists completed I/O; "
@@ -76,6 +88,7 @@ def apply_patch_tool(
         arguments=PatchArguments,
         invoke=invoke,
         approval=approval,
+        contextual_auth_context=auth_context,
     )
 
 

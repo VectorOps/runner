@@ -228,9 +228,7 @@ def test_search_ambiguity_and_delete_validation() -> None:
     assert operations[0].plan("one\n").content is None
 
 
-@pytest.mark.parametrize(
-    "path", ["../file", "a/../file", "/file", "C:\\file", ".", "~file"]
-)
+@pytest.mark.parametrize("path", ["C:\\file", ".", "/", "~", "bad\0file"])
 def test_paths(path: str) -> None:
     assert v4a.parse(envelope(f"*** Add File: {path}\n+content"))[1]
     assert search_replace.parse(block(path, "", "content"))[1]
@@ -402,7 +400,6 @@ async def test_binary_move_safety(tmp_path: Path, environment: Path) -> None:
     service = PatchService(environment)
     for body in [
         "*** Move to: new",
-        "*** Move to: ../outside",
         "*** Move to: ./old",
         "*** Move to: new\n@@\n-old\n+new",
     ]:

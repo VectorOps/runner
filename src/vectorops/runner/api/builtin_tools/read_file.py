@@ -41,6 +41,14 @@ class ReadFileArguments(pydantic.BaseModel):
 def read_file_tool(
     *, approval: Optional[tools.ToolApproval] = None
 ) -> tools.Tool[ReadFileArguments]:
+    async def auth_context(
+        context: ActivityExecutionContext, arguments: ReadFileArguments
+    ) -> tools.AuthContext:
+        scope = await asyncio.to_thread(
+            paths.path_scope, environment(context).root, arguments.path
+        )
+        return tools.AuthContext(properties={"scope": scope})
+
     async def execute(
         context: ActivityExecutionContext, arguments: ReadFileArguments
     ) -> tools.ToolResponse:
@@ -49,7 +57,7 @@ def read_file_tool(
 
         def read() -> models.ReadResult:
             with paths.open_regular(
-                paths.resolve_path(target.root, arguments.path)
+                paths.resolve_path(target.root, arguments.path, allow_external=True)
             ) as stream:
                 stream.seek(arguments.offset)
                 content = stream.read(arguments.limit + 1)
@@ -60,7 +68,7 @@ def read_file_tool(
 
         def read_lines() -> models.LineReadResult:
             with paths.open_regular(
-                paths.resolve_path(target.root, arguments.path)
+                paths.resolve_path(target.root, arguments.path, allow_external=True)
             ) as stream:
                 return file_text.read_lines(
                     stream,
@@ -133,11 +141,13 @@ def read_file_tool(
 
     return tools.Tool(
         "read_file",
-        "Read a target-relative file with bounded byte ranges (default 64 KiB), or UTF-8 lines. "
+        "Read a file using a target-relative, absolute, or home-relative path, including outside the target root, "
+        "with bounded byte ranges (default 64 KiB), or UTF-8 lines. "
         "Auto returns text, complete supported images as image blocks, or lossless base64 for binary data. "
         "Partial images are base64, not image blocks. Use next_offset/eof to continue; limits are capped "
         "by the target environment. PDFs and other binary formats are not extracted into text.",
         ReadFileArguments,
         execute,
         approval=approval,
+        contextual_auth_context=auth_context,
     )

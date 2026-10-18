@@ -45,6 +45,15 @@ class AuthContextProvider(typing.Protocol):
     ) -> AuthContext: ...
 
 
+@typing.runtime_checkable
+class ContextualAuthContextProvider(typing.Protocol):
+    async def auth_context_for_call(
+        self,
+        context: ActivityExecutionContext,
+        arguments: dict[str, pydantic.JsonValue],
+    ) -> AuthContext: ...
+
+
 class ToolMetadata(typing.Protocol):
     @property
     def definition(self) -> connect.ToolSpec: ...
@@ -134,11 +143,17 @@ class ToolAuthorizationService:
 
     @staticmethod
     async def resolve_auth_context(
-        binding: typing.Optional[ToolMetadata], request: connect.ToolCallBlock
+        binding: typing.Optional[ToolMetadata],
+        request: connect.ToolCallBlock,
+        context: typing.Optional[ActivityExecutionContext] = None,
     ) -> AuthContext:
-        if not isinstance(binding, AuthContextProvider):
+        arguments = request.model_copy(deep=True).arguments
+        if context is not None and isinstance(binding, ContextualAuthContextProvider):
+            result = await binding.auth_context_for_call(context, arguments)
+        elif isinstance(binding, AuthContextProvider):
+            result = await binding.auth_context(arguments)
+        else:
             return AuthContext()
-        result = await binding.auth_context(request.model_copy(deep=True).arguments)
         if not isinstance(result, AuthContext):
             raise TypeError("auth context callback must return AuthContext")
         return AuthContext.model_validate(result.model_dump(mode="json"))
@@ -180,7 +195,9 @@ class ToolAuthorizationService:
         existing = await context.mailbox.existing(context.step_id)
         if existing is None and binding is not None:
             approval = tool_policy.ToolApprovalRequest.model_validate(payload)
-            auth_context = await cls.resolve_auth_context(binding, approval.call)
+            auth_context = await cls.resolve_auth_context(
+                binding, approval.call, context
+            )
             payload = approval.model_copy(
                 update={"auth_context": auth_context}
             ).model_dump(mode="json")
@@ -219,7 +236,9 @@ class ToolAuthorizationService:
             self.validate(binding, request, definition)
             if existing is None:
                 assert binding is not None
-                auth_context = await self.resolve_auth_context(binding, request)
+                auth_context = await self.resolve_auth_context(
+                    binding, request, context
+                )
                 call = tool_policy.ToolCall(
                     name=request.name,
                     version=binding.version,

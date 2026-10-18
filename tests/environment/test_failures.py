@@ -78,15 +78,15 @@ async def test_failed_removal_reports_uncertainty(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="local backend requires POSIX")
-async def test_mkdir_checks_final_symlink(tmp_path: Path) -> None:
+async def test_patch_directory_symlink_is_external(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     (root / "escape").symlink_to(outside, target_is_directory=True)
-    result = await PatchService(root).apply(
-        "*** Begin Patch\n*** Add File: escape/file\n+new\n*** End Patch"
-    )
-    assert result.is_error and not result.changes
-    assert "outside_root" in result.errors[0].msg
-    assert list(outside.iterdir()) == []
+    service = PatchService(root)
+    patch = "*** Begin Patch\n*** Add File: escape/file\n+new\n*** End Patch"
+    assert await service.scope(patch) == "external"
+    result = await service.apply(patch)
+    assert not result.is_error
+    assert (outside / "file").read_text() == "new\n"
