@@ -354,7 +354,7 @@ async def test_web_fetch(server: TestServer, context: ActivityExecutionContext) 
     html = payload(
         await binding.execute(context, {"url": str(server.make_url("/html"))})
     )
-    assert html["content"] == "Title\nHello & bye"
+    assert html["content"] == "# Title\n\nHello & bye"
     large = payload(
         await binding.execute(
             context, {"url": str(server.make_url("/large")), "max_bytes": 10}
@@ -369,8 +369,9 @@ async def test_web_fetch(server: TestServer, context: ActivityExecutionContext) 
     redirect = payload(
         await binding.execute(context, {"url": str(server.make_url("/redirect"))})
     )
-    assert redirect["status"] == 302
-    assert redirect["location"] == "/html"
+    assert redirect["status"] == 200
+    assert redirect["url"] == str(server.make_url("/html"))
+    assert redirect["content"] == html["content"]
     error = await binding.execute(context, {"url": str(server.make_url("/error"))})
     assert error.is_error
     posted = payload(

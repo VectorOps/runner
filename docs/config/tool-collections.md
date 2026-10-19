@@ -13,6 +13,69 @@ it over shelling out to `curl`. Requests originate on the runner host, not the t
 Saved agent executions from before version 4 keep their previous tool defaults on
 resume; start a new execution to pick up `web_fetch`. The helper's defaults are unchanged.
 
+### Fetch pages and continue reading
+
+`web_fetch` follows up to 10 HTTP redirects by default and converts HTML to Markdown
+with headings, links, code blocks, lists, and tables. It prefers `main` or `article`
+content and removes navigation, sidebars, footers, scripts, styles, and elements
+marked `hidden` or `aria-hidden="true"`. This is HTML parsing, not browser rendering; JavaScript-only content
+is not loaded. Plain text, including Markdown and JSON responses, is not converted.
+
+```json
+{"url": "https://example.com/docs", "max_bytes": 32000}
+```
+
+`max_bytes` limits returned content **after conversion**, before base64 encoding for
+binary content. It defaults to 65,536 bytes and accepts 1–1,048,576 bytes. A separate
+16 MiB decompressed download limit rejects oversized responses rather than silently
+converting partial HTML. The timeout defaults to 30 seconds (maximum 120) and covers
+the entire redirect chain, download, and conversion wait.
+
+To continue, pass the previous result's `next_offset` as `offset`, keeping the URL,
+format, headers, and selection options unchanged:
+
+```json
+{"url": "https://example.com/docs", "max_bytes": 32000, "offset": 32000}
+```
+
+The example assumes the first result's `next_offset` is 32000. Always use the actual
+value: UTF-8 output can end slightly before the requested limit to avoid splitting a
+character. Arbitrary offsets inside a UTF-8 character fail; a limit too small to fit
+the next character also fails. Offsets beyond the end return empty content with `eof: true`.
+
+Each call performs a fresh request, not a cached read or an HTTP Range request.
+Compare `content_sha256` across ranges; if it changes, discard the combined result
+and restart. Repeating a non-GET request also repeats its method and body, so do not
+blindly paginate requests with side effects.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `offset` | `0` | Byte offset in the complete converted UTF-8 text or original binary content |
+| `format` | `"markdown"` | HTML output: `"markdown"`, `"text"`, or `"raw"`; other text is unchanged |
+| `main_content_only` | `true` | Select main/article content and remove navigation; `false` disables those two steps; ignored for raw HTML |
+| `follow_redirects` | `true` | Follow up to 10 redirects; `false` returns the redirect response and `location` |
+
+Results retain `status`, original `content_type`, and `bytes_read` (downloaded,
+decompressed bytes). `content_format` identifies the output representation.
+`output_bytes` counts bytes in this range, `total_bytes` counts the complete
+representation, and `offset`/`next_offset` delimit the returned range. `truncated`
+means more content follows; `eof` is its inverse. `content_sha256` hashes the complete
+representation, not just this range. `url` is the final URL; `requested_url` and
+`redirects` describe how it was reached. Complete supported images return image
+blocks; partial images and other binary formats return base64, without text extraction.
+
+Approval covers the redirect chain. HTTPS-to-HTTP redirects and cross-origin
+redirects that would forward a request body fail. On cross-origin redirects, caller
+headers are dropped except `Accept`, `Accept-Language`, and `User-Agent`; cookies
+from responses are not retained. Standard HTTP redirect method rules apply: 303
+changes non-HEAD requests to GET, 301/302 change POST to GET, and 307/308 preserve
+method and body. Redirects can reach private addresses on the runner host's network;
+this tool is not a network sandbox. HTTP statuses of 400 or higher set `is_error`.
+
+This is tool version 2. Earlier calls limited raw response bytes, returned plain
+text for HTML, and did not follow redirects. Completed calls still replay their
+recorded results without network access; new calls use the updated behavior.
+
 ## Configure a collection
 
 In the runner workspace's `config.toml`:
