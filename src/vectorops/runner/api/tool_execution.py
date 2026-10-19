@@ -127,6 +127,7 @@ async def invoke_tool(
         request,
         error,
         {
+            "tool_name": request.name,
             "instance": instance,
             "call_digest": _digest(request.model_dump(mode="json")),
             "tool_digest": (
@@ -233,6 +234,7 @@ async def _run_gated_tool(
 
     return await call.run(
         input={
+            "tool_name": request.name,
             "instance": instance,
             "call_digest": _digest(request.model_dump(mode="json")),
             "tool_digest": digest,
@@ -366,6 +368,7 @@ async def _workflow_tool(
             name="invoke_tool",
             version=3,
             input={
+                "tool_name": request.name,
                 "instance": instance,
                 "call_digest": _digest(request.model_dump(mode="json")),
                 "tool_digest": digest,

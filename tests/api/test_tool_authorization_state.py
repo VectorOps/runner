@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from typing import Literal, Optional
 from unittest.mock import patch
 
 import connect
@@ -19,8 +20,14 @@ from vectorops.runner.runner.sqlite_history import SQLiteHistory
 
 
 @pytest.mark.parametrize("workflow_tool", [False, True])
+@pytest.mark.parametrize("tool_policy_version", [None, 1])
+@pytest.mark.parametrize("legacy_input", [False, True])
 async def test_authorized_pending_call_resumes_without_reauthorization(
-    history: MemoryHistory, tmp_path: Path, workflow_tool: bool
+    history: MemoryHistory,
+    tmp_path: Path,
+    workflow_tool: bool,
+    tool_policy_version: Optional[Literal[1]],
+    legacy_input: bool,
 ) -> None:
     (tmp_path / "config.toml").write_text(
         "[components.tools.approval]\napprove_all = true\n"
@@ -67,7 +74,12 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
         ).model_dump(mode="json")
 
     task = asyncio.create_task(
-        replay.run(history, workflow, tool_policy_version=1, workspace=tmp_path)
+        replay.run(
+            history,
+            workflow,
+            tool_policy_version=tool_policy_version,
+            workspace=tmp_path,
+        )
     )
     await asyncio.wait_for(started.wait(), 2)
     task.cancel()
@@ -77,6 +89,17 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
         step for step in history.steps.values() if step.operation.kind == "llm.tool"
     )
     assert step.outcome.kind == "pending" and step.authorized is True
+    assert isinstance(step.operation, models.StepOperation)
+    assert step.operation.name == "invoke_tool"
+    assert step.operation.input["tool_name"] == "test"
+    if legacy_input:
+        recorded_input = dict(step.operation.input)
+        del recorded_input["tool_name"]
+        history.steps[step.id] = step.model_copy(
+            update={
+                "operation": step.operation.model_copy(update={"input": recorded_input})
+            }
+        )
     release.set()
     with patch.object(
         tool_policy.ToolPolicy,
@@ -84,7 +107,11 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
         side_effect=AssertionError("approval repeated"),
     ):
         completion = await replay.run(
-            history, workflow, step.id, tool_policy_version=1, workspace=tmp_path
+            history,
+            workflow,
+            step.id,
+            tool_policy_version=tool_policy_version,
+            workspace=tmp_path,
         )
     assert completion.outcome.kind == "completed"
     assert history.steps[step.id].authorized is True
