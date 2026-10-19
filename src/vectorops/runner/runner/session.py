@@ -25,6 +25,8 @@ from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.environment.target import LocalExecutionTarget
+from vectorops.runner.worktrees.runtime import ExecutionTargets
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.execution_state import timestamp
@@ -84,6 +86,8 @@ class ExecutionSession:
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
         scheduler: typing.Optional[Scheduler] = None,
+        targets: typing.Optional[ExecutionTargets] = None,
+        target: typing.Optional[LocalExecutionTarget] = None,
     ) -> None:
         self.history = history
         self.workflow = workflow
@@ -117,6 +121,8 @@ class ExecutionSession:
         )
         self.authentication = authentication
         self.environment = environment
+        self.targets = targets
+        self.target = target
         self.resources = resources
         self.mcp = mcp
         self.scheduler = scheduler if scheduler is not None else Scheduler()
@@ -547,7 +553,15 @@ class ExecutionSession:
             self.reporter.record(self.workflow.id, step.id)
         return step
 
-    async def prepare_workflow(self, workflow: models.Workflow) -> models.Workflow:
+    async def prepare_workflow(
+        self, workflow: models.Workflow, worktree_id: typing.Optional[UUID] = None
+    ) -> models.Workflow:
+        target = self.target
+        if worktree_id is not None:
+            if self.targets is None:
+                raise ValueError("worktree service is unavailable")
+            target = await self.targets.manager.resolve(worktree_id)
+        workflow = workflow.model_copy(update={"target": target})
         if self.configure_workflow is None:
             configured = workflow
         else:
@@ -643,6 +657,7 @@ class ExecutionSession:
             created_at=step.created_at,
             scheduler=self.scheduler,
             authorization_rule_id=step.authorization_rule_id,
+            targets=self.targets,
             persist_authorization_decision=record_decision,
         )
 

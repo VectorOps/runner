@@ -6,7 +6,7 @@ from typing import Optional, Self
 
 from .configuration import LocalEnvironmentConfig
 from .errors import EnvironmentError, ErrorCode
-from .processes.manager import ProcessManager
+from .processes.manager import ProcessManager, SessionCapacity
 from .target import LocalExecutionTarget
 
 
@@ -32,11 +32,12 @@ class LocalEnvironment:
         config: LocalEnvironmentConfig,
         *,
         target: Optional[LocalExecutionTarget] = None,
+        capacity: Optional[SessionCapacity] = None,
     ) -> Self:
         selected = await cls.resolve_target(
             config, None if target is None else target.root
         )
-        if target is not None and selected != target:
+        if target is not None and selected.root != target.root:
             raise EnvironmentError(
                 ErrorCode.INVALID_PATH, "execution target resolves to a different root"
             )
@@ -50,5 +51,6 @@ class LocalEnvironment:
             ProcessManager(
                 PosixProcessDriver(root, settings.processes.environment),
                 settings.processes,
+                capacity=capacity,
             ),
         )

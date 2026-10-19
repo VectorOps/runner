@@ -23,6 +23,7 @@ from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import execution_state, history_query, mailbox
 from vectorops.runner.runner import inspection
 from vectorops.runner.runner import inbox
+from vectorops.runner.worktrees import models as worktrees
 
 
 class RunnerClient:
@@ -153,6 +154,43 @@ class RunnerClient:
     async def start(self, params: p.Start) -> p.Accepted:
         return p.Accepted.model_validate(
             await self.request("executions.start", params.model_dump(mode="json"))
+        )
+
+    async def create_worktree(
+        self, params: worktrees.CreateRequest
+    ) -> worktrees.Record:
+        return worktrees.Record.model_validate(
+            await self.request(
+                "worktrees.create", params.model_dump(mode="json"), timeout=180
+            )
+        )
+
+    async def list_worktrees(
+        self, params: worktrees.Query = worktrees.Query()
+    ) -> worktrees.Page:
+        return worktrees.Page.model_validate(
+            await self.request(
+                "worktrees.list", params.model_dump(mode="json"), timeout=180
+            )
+        )
+
+    async def get_worktree(self, params: worktrees.Get) -> worktrees.Record:
+        return worktrees.Record.model_validate(
+            await self.request(
+                "worktrees.get", params.model_dump(mode="json"), timeout=180
+            )
+        )
+
+    async def update_worktree(self, params: worktrees.Update) -> worktrees.Record:
+        return worktrees.Record.model_validate(
+            await self.request("worktrees.update", params.model_dump(mode="json"))
+        )
+
+    async def delete_worktree(self, params: worktrees.Delete) -> worktrees.Record:
+        return worktrees.Record.model_validate(
+            await self.request(
+                "worktrees.delete", params.model_dump(mode="json"), timeout=180
+            )
         )
 
     async def iter_events(self) -> AsyncIterator[p.Event]:

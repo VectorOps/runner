@@ -12,6 +12,7 @@ from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.resources import CleanupRegistry
 from vectorops.runner.runner.errors import AuthorizationPersistenceError
 from vectorops.runner.runner.scheduler import Scheduler
+from vectorops.runner.worktrees.runtime import ExecutionTargets
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class ActivityExecutionContext:
     persist_authorization_decision: Optional[
         Callable[[bool, UUID], Awaitable[None]]
     ] = field(default=None, compare=False, repr=False)
+    targets: Optional[ExecutionTargets] = field(default=None, compare=False, repr=False)
 
     async def record_authorization_decision(
         self, approved: bool, rule_id: UUID

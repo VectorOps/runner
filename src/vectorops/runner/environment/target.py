@@ -5,6 +5,7 @@ import errno
 import os
 from pathlib import Path
 import typing
+from uuid import UUID
 
 import pydantic
 
@@ -27,6 +28,7 @@ class LocalExecutionTarget(pydantic.BaseModel):
 
     kind: typing.Literal["local"] = "local"
     root: ProjectPath
+    worktree_id: typing.Optional[UUID] = None
 
     @classmethod
     async def resolve(cls, path: str) -> typing.Self:

@@ -68,6 +68,7 @@ def canonical_name(name: str) -> str:
         "data_directory",
         "workflows_directory",
         "environment",
+        "worktrees",
         "logging",
         "retention",
     }:

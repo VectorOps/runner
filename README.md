@@ -28,6 +28,8 @@ See [MCP servers and workflow tools](docs/config/mcp.md) for stdio/HTTP server c
 
 See [skills](docs/config/skills.md) for project and shared skill directories and the bundled workflow-authoring guide.
 
+See [Git worktrees](docs/usage/worktrees.md) for reusable isolated checkouts, workflow targeting, management APIs, and opt-in LLM tools.
+
 ## Current scope
 
 The design in `docs/design.md` describes three major roles:

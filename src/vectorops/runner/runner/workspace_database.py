@@ -41,9 +41,9 @@ class WorkspaceDatabase:
                     time.sleep(0.01)
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ValueError("unsupported workspace database schema version")
-            if version < 2:
+            if version < 3:
                 with connection:
                     connection.execute("BEGIN IMMEDIATE")
                     current = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -54,6 +54,7 @@ class WorkspaceDatabase:
                         connection.execute(
                             "UPDATE index_state SET generation = generation + 1, refreshed_at = NULL WHERE id = 1"
                         )
+                    self._initialize_worktrees(connection)
             return connection
         except BaseException:
             connection.close()
@@ -77,6 +78,16 @@ class WorkspaceDatabase:
         )
         connection.execute("INSERT INTO index_state VALUES (1, 0, NULL)")
         self._initialize_summaries(connection)
+
+    @staticmethod
+    def _initialize_worktrees(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS worktrees (id TEXT PRIMARY KEY, operation_key TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS worktree_uses (id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL, execution_id TEXT)"
+        )
+        connection.execute("PRAGMA user_version = 3")
 
     @staticmethod
     def _initialize_summaries(connection: sqlite3.Connection) -> None:

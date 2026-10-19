@@ -28,6 +28,7 @@ from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.resources import finish_cleanup
 from vectorops.runner.runner.state_store import RunnerStateStore
 from vectorops.runner.runner.workflow import WorkflowRunner
+from vectorops.runner.worktrees import api as worktree_api, models as worktree_models
 
 EventSink: typing.TypeAlias = Callable[[dict[str, pydantic.JsonValue]], None]
 
@@ -284,6 +285,7 @@ class RunnerService:
                     reference,
                     input=start.input,
                     base_project_path=start.base_project_path,
+                    worktree_id=start.worktree_id,
                     new_execution_id=accepted.execution_id,
                     on_started=started,
                 )
@@ -323,7 +325,9 @@ class RunnerService:
         fingerprint = json.dumps(
             [
                 type(params).__name__,
-                params.model_dump(exclude={"idempotency_key"}, exclude_none=True),
+                params.model_dump(
+                    mode="json", exclude={"idempotency_key"}, exclude_none=True
+                ),
             ],
             sort_keys=True,
             separators=(",", ":"),
@@ -486,6 +490,15 @@ class RunnerService:
         *,
         session_id: str = "embedded",
     ) -> pydantic.JsonValue:
+        if method.startswith("worktrees."):
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            try:
+                return await worktree_api.dispatch(
+                    (await self.runner.project()).worktrees, method, params
+                )
+            except worktree_models.WorktreeError as exc:
+                raise p.RemoteError("worktree_error", str(exc)) from exc
         if method.startswith("tools.rules."):
             if self.shutdown_requested.is_set():
                 raise p.RemoteError("runner_stopping", "runner is shutting down")

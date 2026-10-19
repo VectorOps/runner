@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 import typing
+from uuid import UUID
 
 import pydantic
 
@@ -60,6 +61,7 @@ class SpawnRequest:
     contract_kind: typing.Optional[str] = None
     version: typing.Optional[int] = None
     description: typing.Optional[str] = None
+    worktree_id: typing.Optional[UUID] = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,7 @@ class WorkflowExecutionContext:
         kind: typing.Optional[str] = None,
         version: typing.Optional[int] = None,
         description: typing.Optional[str] = None,
+        worktree_id: typing.Optional[UUID] = None,
     ) -> ChildWorkflowHandle:
         response = await self.submitter.submit(
             SpawnRequest(
@@ -155,6 +158,7 @@ class WorkflowExecutionContext:
                 kind,
                 version,
                 description,
+                worktree_id,
             )
         )
         if response.kind != "spawn":

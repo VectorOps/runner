@@ -12,6 +12,7 @@ from .builtin_tools.read_file import read_file_tool as read_file_tool
 from .builtin_tools.plan import update_plan_tool as update_plan_tool
 from .builtin_tools.web_fetch import web_fetch_tool as web_fetch_tool
 from .builtin_tools.list_files import list_files_tool as list_files_tool
+from .builtin_tools import worktrees as _worktrees
 from .mcp import configured_tools as _configured_mcp_tools
 from .tool_registry import ToolConfig as ToolConfig, register_tool as register_tool
 from .tool_collections import (
@@ -25,6 +26,9 @@ poll_process_tool = _environment.poll_process_tool
 write_stdin_tool = _environment.write_stdin_tool
 kill_process_tool = _environment.kill_process_tool
 list_processes_tool = _environment.list_processes_tool
+worktree_create_tool = _worktrees.worktree_create_tool
+worktree_list_tool = _worktrees.worktree_list_tool
+worktree_delete_tool = _worktrees.worktree_delete_tool
 
 Tool = _tools.Tool
 ToolBinding = _tools.ToolBinding
@@ -65,4 +69,7 @@ __all__ = [
     "read_file_tool",
     "update_plan_tool",
     "web_fetch_tool",
+    "worktree_create_tool",
+    "worktree_list_tool",
+    "worktree_delete_tool",
 ]

@@ -8,6 +8,7 @@ from uuid import UUID
 import pydantic
 
 from vectorops.runner import usage as usage_models
+from vectorops.runner.environment.target import LocalExecutionTarget
 
 _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
     "workflow.spawn",
@@ -40,6 +41,7 @@ class Workflow(_JsonModel):
         default=None, min_length=1, max_length=120
     )
     usage: typing.Optional[usage_models.WorkflowUsage] = None
+    target: typing.Optional[LocalExecutionTarget] = None
 
     def same_configuration(self, other: Workflow) -> bool:
         """Compare execution configuration without mutable presentation metadata."""
@@ -82,6 +84,7 @@ class WorkflowSpawnOperation(_JsonModel):
     kind: typing.Literal["workflow.spawn"] = "workflow.spawn"
     child_workflow_id: str = pydantic.Field(min_length=1)
     description: typing.Optional[str] = None
+    worktree_id: typing.Optional[UUID] = None
 
 
 class WorkflowJoinOperation(_JsonModel):

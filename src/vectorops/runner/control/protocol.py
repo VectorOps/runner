@@ -1,6 +1,7 @@
 """Version-two packets and request parameters for bearer-authenticated control."""
 
 import typing
+from uuid import UUID
 
 import pydantic
 
@@ -105,6 +106,13 @@ class Start(Model):
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
     base_project_path: typing.Optional[ProjectPath] = None
+    worktree_id: typing.Optional[UUID] = None
+
+    @pydantic.model_validator(mode="after")
+    def target_selection(self) -> typing.Self:
+        if self.base_project_path is not None and self.worktree_id is not None:
+            raise ValueError("base_project_path and worktree_id are mutually exclusive")
+        return self
 
     @pydantic.field_validator("reference", mode="after")
     @classmethod

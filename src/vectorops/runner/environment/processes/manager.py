@@ -34,10 +34,37 @@ class Session:
     expiry: Optional[asyncio.TimerHandle] = None
 
 
+class SessionCapacity:
+    """Shared admission for starting, running, and retained sessions on one event loop."""
+
+    def __init__(self, maximum: int) -> None:
+        self._maximum = maximum
+        self._sessions: set[str] = set()
+
+    def acquire(self, identifier: str) -> None:
+        if len(self._sessions) >= self._maximum:
+            raise EnvironmentError(
+                ErrorCode.RESOURCE_LIMIT, "process session limit reached"
+            )
+        self._sessions.add(identifier)
+
+    def release(self, identifier: str) -> None:
+        self._sessions.discard(identifier)
+
+
 class ProcessManager:
-    def __init__(self, driver: ProcessDriver, config: m.ProcessConfig) -> None:
+    def __init__(
+        self,
+        driver: ProcessDriver,
+        config: m.ProcessConfig,
+        *,
+        capacity: Optional[SessionCapacity] = None,
+    ) -> None:
         self._driver = driver
         self._config = config.model_copy(deep=True)
+        self._capacity = (
+            capacity if capacity is not None else SessionCapacity(config.max_sessions)
+        )
         self._sessions: dict[str, Session] = {}
         self._operations: set[asyncio.Task[None]] = set()
         self._closed = False
@@ -83,13 +110,10 @@ class ProcessManager:
             raise EnvironmentError(
                 ErrorCode.UNSUPPORTED, "execution deadlines require termination support"
             )
-        if len(self._sessions) >= self._config.max_sessions:
-            raise EnvironmentError(
-                ErrorCode.RESOURCE_LIMIT, "process session limit reached"
-            )
         session = Session(uuid4().hex, OutputBuffer(self._config.max_output_bytes))
         session.kill_tree = request.kill_tree
         session.mode = request.mode
+        self._capacity.acquire(session.id)
         self._sessions[session.id] = session
         session.task = asyncio.create_task(
             self._run(session, request.model_copy(deep=True))
@@ -233,6 +257,7 @@ class ProcessManager:
         if session.expiry is not None:
             session.expiry.cancel()
         self._sessions.pop(session.id, None)
+        self._capacity.release(session.id)
 
     def _result(
         self, session: Session, cursor: int, *, release: bool = True

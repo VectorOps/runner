@@ -9,7 +9,7 @@ from pathlib import Path
 from functools import partial
 import shutil
 import typing
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pydantic
 
@@ -21,7 +21,7 @@ from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.target import LocalExecutionTarget
-from vectorops.runner.environment.lifecycle import close_processes
+from vectorops.runner.worktrees.runtime import ExecutionTargets
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.runner.cached_history import CachedHistory
@@ -119,6 +119,7 @@ class WorkflowRunner:
         new_execution_id: typing.Optional[str] = None,
         on_started: typing.Optional[Callable[[], None]] = None,
         base_project_path: typing.Optional[str] = None,
+        worktree_id: typing.Optional[UUID] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
         task = asyncio.create_task(
@@ -132,6 +133,7 @@ class WorkflowRunner:
                 new_execution_id=new_execution_id,
                 on_started=on_started,
                 base_project_path=base_project_path,
+                worktree_id=worktree_id,
             )
         )
         self._executions.add(task)
@@ -366,14 +368,19 @@ class WorkflowRunner:
         new_execution_id: typing.Optional[str],
         on_started: typing.Optional[Callable[[], None]],
         base_project_path: typing.Optional[str],
+        worktree_id: typing.Optional[UUID],
     ) -> pydantic.JsonValue:
         project = await self.project()
         environment_config = project.config.environment
         assert environment_config is not None
-        if base_project_path is not None and (
+        if base_project_path is not None and worktree_id is not None:
+            raise ValueError("base_project_path and worktree_id are mutually exclusive")
+        if (base_project_path is not None or worktree_id is not None) and (
             execution_id is not None or continue_from_step_id is not None
         ):
-            raise ValueError("base_project_path can only be set for a new execution")
+            raise ValueError(
+                "base_project_path and worktree_id can only be set for a new execution"
+            )
         if new_execution_id is not None and (
             execution_id is not None or self.history is not None
         ):
@@ -393,8 +400,12 @@ class WorkflowRunner:
                     record = execution_models.ExecutionRecord(
                         id=execution_id,
                         root_workflow_id=root_id,
-                        target=await LocalEnvironment.resolve_target(
-                            environment_config, base_project_path
+                        target=(
+                            await project.worktrees.resolve(worktree_id)
+                            if worktree_id is not None
+                            else await LocalEnvironment.resolve_target(
+                                environment_config, base_project_path
+                            )
                         ),
                     )
                     if await asyncio.to_thread(
@@ -636,8 +647,12 @@ class WorkflowRunner:
             project,
             self.history,
             reference,
-            target=await LocalEnvironment.resolve_target(
-                environment_config, base_project_path
+            target=(
+                await project.worktrees.resolve(worktree_id)
+                if worktree_id is not None
+                else await LocalEnvironment.resolve_target(
+                    environment_config, base_project_path
+                )
             ),
             input=input,
             workflow_id=workflow_id,
@@ -720,13 +735,13 @@ class WorkflowRunner:
             mcp = MCPRuntime(self.authentication, execution_id, pool=self.mcp_pool)
             resources.register("mcp", mcp.close)
             environment = None
+            targets = None
             if project.config.environment is not None:
-                environment = await LocalEnvironment.open(
-                    project.config.environment, target=target
+                targets = ExecutionTargets(
+                    project.worktrees, project.config.environment, execution_id
                 )
-                resources.register(
-                    "processes", partial(close_processes, environment.processes)
-                )
+                resources.register("targets", targets.close)
+                environment = await targets.open(target)
             executor = WorkflowExecutor(
                 project,
                 history,
@@ -736,6 +751,8 @@ class WorkflowRunner:
                 mailbox_owner,
                 self.authentication,
                 environment=environment,
+                targets=targets,
+                target=target,
                 resources=resources,
                 mcp=mcp,
                 scheduler=self._scheduler,

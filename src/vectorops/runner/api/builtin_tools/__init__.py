@@ -13,6 +13,7 @@ def register_builtins() -> None:
         "read_file",
         "subworkflows",
         "web_fetch",
+        "worktrees",
     ):
         importlib.import_module(f"{__name__}.{name}")
     importlib.import_module("vectorops.runner.api.mcp")

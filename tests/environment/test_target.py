@@ -32,7 +32,11 @@ async def test_override_ignores_missing_default_and_roots_processes(
     root = tmp_path.resolve()
     config = LocalEnvironmentConfig(base_project_path=str(root / "missing"))
     target = await LocalEnvironment.resolve_target(config, str(root))
-    assert target.model_dump(mode="json") == {"kind": "local", "root": str(root)}
+    assert target.model_dump(mode="json") == {
+        "kind": "local",
+        "root": str(root),
+        "worktree_id": None,
+    }
     assert LocalExecutionTarget.model_validate_json(target.model_dump_json()) == target
     environment = await LocalEnvironment.open(config, target=target)
     try:

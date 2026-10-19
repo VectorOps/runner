@@ -241,7 +241,7 @@ async def test_legacy_history_and_workspace_are_backfilled(tmp_path: Path) -> No
     assert result.usage is not None and result.usage.totals.calls == 1
     assert await restarted.execution_ids() == ["execution"]
     with closing(sqlite3.connect(project.database.path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
 
 
 async def test_startup_rebuilds_corrupt_projection_and_restored_source(

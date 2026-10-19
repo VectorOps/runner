@@ -22,6 +22,9 @@ from vectorops.runner.environment.configuration import (
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 from vectorops.runner.runner.usage_store import UsageStore
 from vectorops.runner.runner.summary_store import SummaryStore
+from vectorops.runner.worktrees import models as worktree_models
+from vectorops.runner.worktrees.manager import Manager as WorktreeManager
+from vectorops.runner.worktrees.backend import WorktreeBackend
 
 if typing.TYPE_CHECKING:
     from vectorops.runner.runner.resolver import WorkflowResolver
@@ -50,6 +53,9 @@ class RunnerConfig(pydantic.BaseModel):
     )
     components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     environment: typing.Optional[EnvironmentConfig] = None
+    worktrees: worktree_models.Settings = pydantic.Field(
+        default_factory=worktree_models.Settings
+    )
 
     @pydantic.model_validator(mode="before")
     @classmethod
@@ -273,6 +279,9 @@ class RunnerProject:
     workflow_resolver: typing.Optional[WorkflowResolver] = field(
         default=None, compare=False, repr=False
     )
+    worktree_backend: typing.Optional[WorktreeBackend] = field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "config", self.config.for_project(self.root))
@@ -297,6 +306,17 @@ class RunnerProject:
     @cached_property
     def summaries(self) -> SummaryStore:
         return SummaryStore(self.database)
+
+    @cached_property
+    def worktrees(self) -> WorktreeManager:
+        assert self.config.environment is not None
+        return WorktreeManager(
+            self.workspace_path,
+            Path(self.config.environment.base_project_path),
+            self.database,
+            self.config.worktrees,
+            backend=self.worktree_backend,
+        )
 
     @cached_property
     def resolver(self) -> WorkflowResolver:

@@ -216,6 +216,31 @@ async def test_unknown_workspace_schema_is_rejected(tmp_path: Path) -> None:
         await WorkspaceDatabase(tmp_path).index_status()
 
 
+async def test_worktree_schema_migrates_existing_workspace(tmp_path: Path) -> None:
+    database = WorkspaceDatabase(tmp_path)
+    await database.save_document("existing", "preserved")
+    with closing(sqlite3.connect(database.path)) as connection:
+        connection.execute("DROP TABLE worktrees")
+        connection.execute("DROP TABLE worktree_uses")
+        connection.execute("PRAGMA user_version = 2")
+    reopened = WorkspaceDatabase(tmp_path)
+    assert await reopened.load_document("existing", lambda: "lost") == "preserved"
+    assert (
+        await reopened.run(
+            lambda connection: connection.execute("PRAGMA user_version").fetchone()[0]
+        )
+        == 3
+    )
+    assert (
+        await reopened.run(
+            lambda connection: connection.execute(
+                "SELECT count(*) FROM worktrees"
+            ).fetchone()[0]
+        )
+        == 0
+    )
+
+
 async def test_concurrent_first_open(tmp_path: Path) -> None:
     databases = [WorkspaceDatabase(tmp_path) for _ in range(8)]
     assert (
@@ -230,7 +255,7 @@ def test_journal_mode_retries_contention(tmp_path: Path, code: int) -> None:
     error.sqlite_errorcode = code
     connection = Mock(spec=sqlite3.Connection)
     cursor = Mock(spec=sqlite3.Cursor)
-    cursor.fetchone.return_value = (2,)
+    cursor.fetchone.return_value = (3,)
     connection.execute.side_effect = [cursor, error, cursor, cursor, cursor]
     with (
         patch(

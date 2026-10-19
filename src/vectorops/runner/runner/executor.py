@@ -14,6 +14,8 @@ from vectorops.runner import diagnostics
 from vectorops.runner.api import composition, definitions
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
+from vectorops.runner.environment.target import LocalExecutionTarget
+from vectorops.runner.worktrees.runtime import ExecutionTargets
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.context import WorkflowExecutionContext
@@ -24,7 +26,7 @@ from vectorops.runner.runner.execution_state import timestamp
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.session import ExecutionSession
 from vectorops.runner.runner.mailbox import Mailbox
-from vectorops.runner.runner.resources import CleanupRegistry
+from vectorops.runner.runner.resources import CleanupRegistry, ExecutionResources
 from vectorops.runner.runner.resolver import WorkflowCallable, WorkflowEntryPoint
 from vectorops.runner.runner.scheduler import Scheduler
 
@@ -43,6 +45,8 @@ class WorkflowExecutor:
         resources: typing.Optional[CleanupRegistry] = None,
         mcp: typing.Optional[MCPRuntime] = None,
         scheduler: typing.Optional[Scheduler] = None,
+        targets: typing.Optional[ExecutionTargets] = None,
+        target: typing.Optional[LocalExecutionTarget] = None,
     ) -> None:
         self.project = project
         self.history = history
@@ -52,6 +56,8 @@ class WorkflowExecutor:
         self.mailbox = mailbox
         self.authentication = authentication
         self.environment = environment
+        self.targets = targets
+        self.target = target
         self.resources = resources
         self.mcp = mcp
         self.scheduler = scheduler if scheduler is not None else Scheduler()
@@ -90,12 +96,65 @@ class WorkflowExecutor:
         *,
         continue_from_step_id: typing.Optional[str] = None,
         child_heads: typing.Optional[Mapping[str, str]] = None,
+        inherited_environment: typing.Optional[LocalEnvironment] = None,
+        inherited_target: typing.Optional[LocalExecutionTarget] = None,
+        inherited_resources: typing.Optional[CleanupRegistry] = None,
     ) -> models.WorkflowStep:
         """Run a session and return its exact workflow completion record."""
+        parent_target = inherited_target or self.target
+        target = configuration.target or parent_target
+        environment = inherited_environment or self.environment
+        resources = inherited_resources or self.resources
+        if target != parent_target:
+            if self.targets is None or target is None:
+                raise ValueError("target attachment service is unavailable")
+            async with self.targets.attach(target) as selected:
+                async with ExecutionResources() as child_resources:
+                    return await self._execute(
+                        configuration,
+                        selected,
+                        target,
+                        continue_from_step_id,
+                        child_heads,
+                        child_resources,
+                    )
+        return await self._execute(
+            configuration,
+            environment,
+            target,
+            continue_from_step_id,
+            child_heads,
+            resources,
+        )
+
+    async def _execute(
+        self,
+        configuration: models.Workflow,
+        environment: typing.Optional[LocalEnvironment],
+        target: typing.Optional[LocalExecutionTarget],
+        continue_from_step_id: typing.Optional[str],
+        child_heads: typing.Optional[Mapping[str, str]],
+        resources: typing.Optional[CleanupRegistry],
+    ) -> models.WorkflowStep:
+        async def execute_child(
+            configuration: models.Workflow,
+            *,
+            continue_from_step_id: typing.Optional[str] = None,
+            child_heads: typing.Optional[Mapping[str, str]] = None,
+        ) -> models.WorkflowStep:
+            return await self.execute(
+                configuration,
+                continue_from_step_id=continue_from_step_id,
+                child_heads=child_heads,
+                inherited_environment=environment,
+                inherited_target=target,
+                inherited_resources=resources,
+            )
+
         session = ExecutionSession(
             self.history,
             configuration,
-            self.execute,
+            execute_child,
             continue_from_step_id=continue_from_step_id,
             child_heads={} if child_heads is None else child_heads,
             reporter=self.reporter,
@@ -104,8 +163,10 @@ class WorkflowExecutor:
             configure_workflow=self.configure,
             mailbox=self.mailbox,
             authentication=self.authentication,
-            environment=self.environment,
-            resources=self.resources,
+            environment=environment,
+            targets=self.targets,
+            target=target,
+            resources=resources,
             mcp=self.mcp,
             scheduler=self.scheduler,
         )

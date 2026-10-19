@@ -92,7 +92,8 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `executions.active` | `after`, `limit` (default 100, maximum 500) | Lexically ordered `executions` with ID/status and `next_after` |
 | `executions.list` | `after`, `limit` (default 100, maximum 500) | Lexically ordered execution IDs and `next_after` |
 | `executions.get` | `execution_id` | Persisted execution record and checkpoint |
-| `executions.start` | `reference`, `input`, `idempotency_key`, optional `base_project_path` | Execution ID and `starting` status |
+| `executions.start` | `reference`, `input`, `idempotency_key`, optional `base_project_path` or `worktree_id` | Execution ID and `starting` status |
+| `worktrees.create`, `worktrees.list`, `worktrees.get`, `worktrees.update`, `worktrees.delete` | [Worktree CRUD parameters](../usage/worktrees.md#crud-protocol) | Worktree records or paginated listing |
 | `executions.resume` | `execution_id`, `idempotency_key` | Execution ID and `starting` status |
 | `executions.stop` | `execution_id` | Active execution with `stopping` status |
 | `history.query` | History query below | Ordered history items and `next_cursor` |
@@ -141,6 +142,11 @@ Start and resume receipts are persisted before launch. Repeating the same idempo
 Stop is cooperative and addresses the specific active execution. It returns before cleanup; wait for `execution.cancelled`, `execution.completed`, or `execution.failed`. Workflows that block the event loop or suppress cancellation can delay shutdown. Forced termination is not supported.
 
 ### Execution target override
+
+An optional UUID `worktree_id` selects a managed workspace worktree instead of a
+raw path. It is mutually exclusive with `base_project_path`; the persisted target
+includes its nullable `worktree_id`. See [Git worktrees](../usage/worktrees.md) for
+child-workflow inheritance, exec overrides, limits, and safe deletion.
 
 `executions.start.base_project_path` is an optional absolute directory path.
 Omitting it or sending null uses `environment.base_project_path` from workspace

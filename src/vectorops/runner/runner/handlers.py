@@ -8,7 +8,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from functools import partial
 import typing
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pydantic
 
@@ -29,7 +29,9 @@ class HandlerRuntime(typing.Protocol):
     history: WorkflowHistory
     workflow: models.Workflow
 
-    async def prepare_workflow(self, workflow: models.Workflow) -> models.Workflow: ...
+    async def prepare_workflow(
+        self, workflow: models.Workflow, worktree_id: typing.Optional[UUID] = None
+    ) -> models.Workflow: ...
 
     async def recorded(
         self, operation: typing.Optional[models.WorkflowOperation]
@@ -259,6 +261,7 @@ class SpawnHandler:
             child = await self.runtime.history.get_workflow(operation.child_workflow_id)
             if (
                 child.definition_ref != definition
+                or operation.worktree_id != request.worktree_id
                 or child.input != request.input
                 or (
                     request.contract_kind is not None
@@ -278,11 +281,13 @@ class SpawnHandler:
                 ),
                 version=1 if request.version is None else request.version,
             )
-            child = await self.runtime.prepare_workflow(child)
+            child = await self.runtime.prepare_workflow(child, request.worktree_id)
             await self.runtime.history.save_workflow(child)
             step = await self.runtime.append(
                 models.WorkflowSpawnOperation(
-                    child_workflow_id=child.id, description=request.description
+                    child_workflow_id=child.id,
+                    description=request.description,
+                    worktree_id=request.worktree_id,
                 ),
                 models.StepCompleted(),
             )

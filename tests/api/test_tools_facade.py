@@ -4,6 +4,7 @@ import pytest
 
 from vectorops.runner.api import llm, tools
 from vectorops.runner.api import tool_collections, tool_contracts, tool_registry
+from vectorops.runner.api.builtin_tools import worktrees
 import vectorops.runner.api.llm.list_files as list_files
 import vectorops.runner.api.llm.environment_tools as environment_tools
 import vectorops.runner.api.llm.patch as patch
@@ -45,6 +46,9 @@ def test_exports_preserve_implementation_identity() -> None:
         "read_file_tool": read_file.read_file_tool,
         "update_plan_tool": plan.update_plan_tool,
         "web_fetch_tool": web_fetch.web_fetch_tool,
+        "worktree_create_tool": worktrees.worktree_create_tool,
+        "worktree_list_tool": worktrees.worktree_list_tool,
+        "worktree_delete_tool": worktrees.worktree_delete_tool,
     }
     assert set(tools.__all__) == set(expected)
     for name, implementation in expected.items():
