@@ -1,6 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
+from typing import Literal
 
 import pydantic
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.processes import models as m
-from vectorops.runner.environment.processes.local import LocalProcessDriver
+from vectorops.runner.environment.processes.posix import PosixProcessDriver
 from vectorops.runner.environment.processes.manager import ProcessManager
 from tests.environment import test_processes as helpers
 
@@ -22,8 +23,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
 async def test_shell_and_environment_filtering(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Literal["pipe", "pty"]
 ) -> None:
     monkeypatch.setenv("PROCESS_SECRET", "hidden")
     target = await LocalEnvironment.open(
@@ -45,6 +47,8 @@ async def test_shell_and_environment_filtering(
                     script='printf "%s:%s" "$VALUE" "${PROCESS_SECRET-unset}"'
                 ),
                 env={"VALUE": "overlay"},
+                mode=mode,
+                keep_stdin_open=True,
                 yield_timeout_ms=5000,
             )
         )
@@ -73,7 +77,10 @@ async def test_initial_stdin_and_binary_output(tmp_path: Path) -> None:
         await environment.close()
 
 
-async def test_kill_escalation_cleans_ordinary_child_group(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
+async def test_kill_escalation_cleans_ordinary_child_group(
+    tmp_path: Path, mode: Literal["pipe", "pty"]
+) -> None:
     target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
@@ -83,7 +90,12 @@ async def test_kill_escalation_cleans_ordinary_child_group(tmp_path: Path) -> No
     environment = target.processes
     try:
         result = await environment.exec(
-            m.ExecRequest(command=command("child_group"), yield_timeout_ms=100)
+            m.ExecRequest(
+                command=command("child_group"),
+                mode=mode,
+                keep_stdin_open=True,
+                yield_timeout_ms=100,
+            )
         )
         async with asyncio.timeout(5):
             while b"ready" not in output(result):
@@ -145,7 +157,7 @@ async def test_spawn_cleanup_survives_repeated_cancellation(
 
     handle = Handle()
 
-    class Driver(LocalProcessDriver):
+    class Driver(PosixProcessDriver):
         async def _spawn(self, request: m.ExecRequest) -> Handle:
             started.set()
             await spawned.wait()

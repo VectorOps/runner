@@ -9,7 +9,6 @@ from typing import Self
 
 from .configuration import LocalEnvironmentConfig
 from .errors import EnvironmentError, ErrorCode
-from .processes.local import LocalProcessDriver
 from .processes.manager import ProcessManager
 
 
@@ -37,12 +36,14 @@ class LocalEnvironment:
             root = await asyncio.to_thread(attach)
         except OSError as exc:
             raise EnvironmentError.from_os_error(exc) from exc
+        from .processes.posix import PosixProcessDriver
+
         settings = config.model_copy(deep=True)
         return cls(
             root,
             settings,
             ProcessManager(
-                LocalProcessDriver(root, settings.processes.environment),
+                PosixProcessDriver(root, settings.processes.environment),
                 settings.processes,
             ),
         )

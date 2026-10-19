@@ -63,11 +63,17 @@ class ShellCommand(Model):
 Command = typing.Union[ArgvCommand, ShellCommand]
 
 
+class TerminalSize(Model):
+    rows: int = pydantic.Field(default=50, gt=0, le=65535, strict=True)
+    cols: int = pydantic.Field(default=160, gt=0, le=65535, strict=True)
+
+
 class ExecRequest(Model):
     command: Command
     cwd: str = "."
     env: dict[str, str] = pydantic.Field(default_factory=dict)
     mode: typing.Literal["pipe", "pty"] = "pipe"
+    terminal_size: typing.Optional[TerminalSize] = None
     stdin: bytes = b""
     keep_stdin_open: bool = False
     kill_tree: bool = True
@@ -77,6 +83,12 @@ class ExecRequest(Model):
     )
 
     _validate_env = pydantic.field_validator("env")(validate_environment)
+
+    @pydantic.model_validator(mode="after")
+    def validate_terminal_size(self) -> typing.Self:
+        if self.terminal_size is not None and self.mode != "pty":
+            raise ValueError("terminal_size requires PTY mode")
+        return self
 
 
 class SessionRequest(Model):
@@ -96,7 +108,11 @@ class StdinRequest(SessionRequest):
 class DriverCapabilities(Model):
     pty: bool = False
     stdin_eof: bool = True
+    pty_stdin_eof: bool = False
     termination_scope: typing.Literal["process", "group", "none"] = "none"
+
+    def supports_stdin_eof(self, mode: typing.Literal["pipe", "pty"]) -> bool:
+        return self.pty_stdin_eof if mode == "pty" else self.stdin_eof
 
 
 class OutputChunk(Model):

@@ -104,7 +104,8 @@ async def test_missing_environment_and_path_errors(
         await tools.read_file_tool().execute(context, {"path": "../outside"})
 
 
-async def test_process_tools(context: ActivityExecutionContext) -> None:
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
+async def test_process_tools(context: ActivityExecutionContext, mode: str) -> None:
     result = payload(
         await tools.exec_tool().execute(
             context,
@@ -119,6 +120,8 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
                     ],
                 },
                 "keep_stdin_open": True,
+                "mode": mode,
+                "terminal_size": {"rows": 30, "cols": 100} if mode == "pty" else None,
                 "yield_timeout_ms": 100,
             },
         )
@@ -127,9 +130,14 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
     assert isinstance(process_id, str)
     listing = await tools.list_processes_tool().execute(context, {})
     assert process_id in str(listing.content)
-    await tools.write_stdin_tool().execute(
-        context, {"process_id": process_id, "data": "hello", "eof": True}
-    )
+    if mode == "pty":
+        await tools.write_stdin_tool().execute(
+            context, {"process_id": process_id, "data": "hello\n\u0004"}
+        )
+    else:
+        await tools.write_stdin_tool().execute(
+            context, {"process_id": process_id, "data": "hello", "eof": True}
+        )
     output = ""
     cursor = result["cursor"]
     async with asyncio.timeout(5):
@@ -149,6 +157,8 @@ async def test_process_tools(context: ActivityExecutionContext) -> None:
             if result["output_complete"]:
                 break
     assert "hello" in output
+    if mode == "pty":
+        assert "terminal" in output
     failed = await tools.exec_tool().execute(
         context,
         {

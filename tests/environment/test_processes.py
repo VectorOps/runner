@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import AsyncIterator
+import json
 import os
 from pathlib import Path
 import sys
+from typing import Literal
 
 import pydantic
 import pytest
@@ -12,7 +14,10 @@ from vectorops.runner.environment.configuration import LocalEnvironmentConfig
 from vectorops.runner.environment.errors import EnvironmentError, ErrorCode
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.processes import models as m
-from vectorops.runner.environment.processes.environment import build_environment
+from vectorops.runner.environment.processes.environment import (
+    PLAIN_OUTPUT_DEFAULTS,
+    build_environment,
+)
 from vectorops.runner.environment.processes.manager import ProcessManager
 from vectorops.runner.environment.processes.output import OutputBuffer
 
@@ -173,12 +178,19 @@ async def test_independent_processes_and_stdin(environment: ProcessManager) -> N
     assert final.returncode == 0 and data == b"HELLO\n"
 
 
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
 async def test_cancelled_exec_and_poll_leave_session_alive(
     environment: ProcessManager,
+    mode: Literal["pipe", "pty"],
 ) -> None:
     task = asyncio.create_task(
         environment.exec(
-            m.ExecRequest(command=command("sleep", "60"), yield_timeout_ms=30000)
+            m.ExecRequest(
+                command=command("sleep", "60"),
+                mode=mode,
+                keep_stdin_open=True,
+                yield_timeout_ms=30000,
+            )
         )
     )
     async with asyncio.timeout(5):
@@ -242,12 +254,9 @@ async def test_cwd_and_environment(
     assert invalid.state == "failed" and invalid.error
 
 
-async def test_unsupported_pty_shell_and_spawn_failure(
+async def test_unsupported_shell_and_spawn_failure(
     environment: ProcessManager,
 ) -> None:
-    with pytest.raises(EnvironmentError) as pty:
-        await environment.exec(m.ExecRequest(command=command("noop"), mode="pty"))
-    assert pty.value.code == ErrorCode.UNSUPPORTED
     with pytest.raises(EnvironmentError) as shell:
         await environment.exec(
             m.ExecRequest(command=m.ShellCommand(script="echo test"))
@@ -260,7 +269,10 @@ async def test_unsupported_pty_shell_and_spawn_failure(
     assert not result.retained
 
 
-async def test_large_output_is_bounded_and_drained(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
+async def test_large_output_is_bounded_and_drained(
+    tmp_path: Path, mode: Literal["pipe", "pty"]
+) -> None:
     target = await LocalEnvironment.open(
         LocalEnvironmentConfig(
             base_project_path=str(tmp_path),
@@ -272,6 +284,8 @@ async def test_large_output_is_bounded_and_drained(tmp_path: Path) -> None:
         result = await environment.exec(
             m.ExecRequest(
                 command=command("large_output"),
+                mode=mode,
+                keep_stdin_open=True,
                 yield_timeout_ms=5000,
             )
         )
@@ -359,7 +373,7 @@ def test_environment_policy_matches_codeng_precedence() -> None:
     }
     assert build_environment(
         m.EnvPolicy(inherit_parent=False, defaults={"A": "a"}), parent, {"B": "b"}
-    ) == {"A": "a", "B": "b"}
+    ) == {**PLAIN_OUTPUT_DEFAULTS, "A": "a", "B": "b"}
     assert (
         build_environment(
             m.EnvPolicy(denylist=["SECRET"]), parent, {"SECRET": "explicit"}
@@ -367,6 +381,64 @@ def test_environment_policy_matches_codeng_precedence() -> None:
         == "explicit"
     )
     assert parent["SECRET"] == "secret"
+
+
+@pytest.mark.parametrize("inherit_parent", [True, False])
+def test_plain_output_defaults_and_overrides(inherit_parent: bool) -> None:
+    expected = {
+        "TERM": "dumb",
+        "NO_COLOR": "1",
+        "COLORTERM": "",
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+        "GH_PAGER": "cat",
+    }
+    parent = dict.fromkeys(expected, "inherited")
+    policy = m.EnvPolicy(inherit_parent=inherit_parent)
+    assert build_environment(policy, parent, {}) == expected
+    configured = dict.fromkeys(expected, "configured")
+    overlay = dict.fromkeys(expected, "explicit")
+    policy = policy.model_copy(update={"defaults": configured})
+    assert build_environment(policy, parent, {}) == configured
+    assert build_environment(policy, parent, overlay) == overlay
+    assert parent == dict.fromkeys(expected, "inherited")
+
+
+def test_plain_output_defaults_respect_filters() -> None:
+    assert build_environment(m.EnvPolicy(allowlist=[]), {}, {}) == {}
+    assert build_environment(m.EnvPolicy(allowlist=["TERM"]), {}, {}) == {
+        "TERM": "dumb"
+    }
+    assert "TERM" not in build_environment(m.EnvPolicy(denylist=["TERM"]), {}, {})
+    assert build_environment(
+        m.EnvPolicy(allowlist=[], defaults={"TERM": "vt100"}), {}, {"TERM": "ansi"}
+    ) == {"TERM": "ansi"}
+
+
+@pytest.mark.parametrize("mode", ["pipe", "pty"])
+@pytest.mark.parametrize("override", [False, True])
+async def test_plain_output_environment_reaches_child(
+    environment: ProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: Literal["pipe", "pty"],
+    override: bool,
+) -> None:
+    for key in PLAIN_OUTPUT_DEFAULTS:
+        monkeypatch.setenv(key, "inherited")
+    overlay = (
+        {"TERM": "xterm-256color", "NO_COLOR": "", "PAGER": "less"} if override else {}
+    )
+    result = await environment.exec(
+        m.ExecRequest(
+            command=command("output_environment", *PLAIN_OUTPUT_DEFAULTS),
+            mode=mode,
+            keep_stdin_open=True,
+            env=overlay,
+            yield_timeout_ms=5000,
+        )
+    )
+    assert result.returncode == 0
+    assert json.loads(output(result)) == {**PLAIN_OUTPUT_DEFAULTS, **overlay}
 
 
 def test_output_buffer_partial_chunks_and_gaps() -> None:

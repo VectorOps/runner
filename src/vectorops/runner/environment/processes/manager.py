@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from ..errors import EnvironmentError, ErrorCode
 from . import models as m
-from .local import LocalProcessDriver, LocalProcessHandle
+from .driver import ProcessDriver, ProcessHandle
 from .output import OutputBuffer
 
 
@@ -16,8 +16,9 @@ class Session:
     id: str
     buffer: OutputBuffer
     kill_tree: bool = True
+    mode: Literal["pipe", "pty"] = "pipe"
     state: Literal["starting", "running", "exited", "failed", "unknown"] = "starting"
-    handle: Optional[LocalProcessHandle] = None
+    handle: Optional[ProcessHandle] = None
     task: Optional[asyncio.Task[None]] = None
     stop_task: Optional[asyncio.Task[m.KillResult]] = None
     input_task: Optional[asyncio.Task[None]] = None
@@ -34,7 +35,7 @@ class Session:
 
 
 class ProcessManager:
-    def __init__(self, driver: LocalProcessDriver, config: m.ProcessConfig) -> None:
+    def __init__(self, driver: ProcessDriver, config: m.ProcessConfig) -> None:
         self._driver = driver
         self._config = config.model_copy(deep=True)
         self._sessions: dict[str, Session] = {}
@@ -67,8 +68,14 @@ class ProcessManager:
             raise EnvironmentError(
                 ErrorCode.RESOURCE_LIMIT, "initial stdin exceeds limit"
             )
-        if not request.keep_stdin_open and not self._driver.capabilities.stdin_eof:
-            raise EnvironmentError(ErrorCode.UNSUPPORTED, "stdin EOF is unsupported")
+        if (
+            not request.keep_stdin_open
+            and not self._driver.capabilities.supports_stdin_eof(request.mode)
+        ):
+            raise EnvironmentError(
+                ErrorCode.UNSUPPORTED,
+                "stdin EOF is unsupported in this mode; use keep_stdin_open=True",
+            )
         if (
             request.execution_timeout_ms is not None
             and self._driver.capabilities.termination_scope == "none"
@@ -82,6 +89,7 @@ class ProcessManager:
             )
         session = Session(uuid4().hex, OutputBuffer(self._config.max_output_bytes))
         session.kill_tree = request.kill_tree
+        session.mode = request.mode
         self._sessions[session.id] = session
         session.task = asyncio.create_task(
             self._run(session, request.model_copy(deep=True))
@@ -95,7 +103,7 @@ class ProcessManager:
                 pass
         return self._result(session, 0)
 
-    async def _collect(self, session: Session, handle: LocalProcessHandle) -> None:
+    async def _collect(self, session: Session, handle: ProcessHandle) -> None:
         async for chunk in handle.read_output():
             session.buffer.append(chunk)
             session.changed.set()
@@ -286,7 +294,9 @@ class ProcessManager:
         session = self._get(request.process_id)
         if len(request.data) > self._config.max_stdin_bytes:
             raise EnvironmentError(ErrorCode.RESOURCE_LIMIT, "stdin exceeds limit")
-        if request.eof and not self._driver.capabilities.stdin_eof:
+        if request.eof and not self._driver.capabilities.supports_stdin_eof(
+            session.mode
+        ):
             raise EnvironmentError(ErrorCode.UNSUPPORTED, "stdin EOF is unsupported")
         if session.input_pending:
             raise EnvironmentError(

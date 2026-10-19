@@ -49,6 +49,11 @@ def exec_tool(
         "Execute a command in the target environment. Provide exactly one of command.argv "
         "(an argument list for direct execution) or command.script (a shell script). "
         "command.kind is optional. Shell scripts require environment allow_shell. "
+        "PTY mode supports interactive terminal apps and requires keep_stdin_open=True; "
+        "terminal_size optionally sets rows/cols (default 50/160). Output is a merged terminal stream. "
+        "Process defaults request plain output: TERM=dumb, NO_COLOR=1, COLORTERM empty, "
+        "and PAGER/GIT_PAGER/GH_PAGER=cat. Override via env when needed, "
+        "for example TERM=xterm-256color for full-screen TUIs. "
         "Returns bounded output and a process_id/cursor; poll running processes for more output. "
         "Cancellation of this call does not kill the process.",
         processes.ExecRequest,
@@ -101,7 +106,8 @@ def write_stdin_tool(
 
     return tools.Tool(
         "write_stdin",
-        "Send UTF-8 text to a process, optionally closing stdin with eof.",
+        "Send UTF-8 text or terminal key sequences to a process. "
+        "eof closes pipe stdin but is unsupported for PTYs; send Ctrl-D explicitly if appropriate.",
         StdinArguments,
         execute,
         approval=approval,

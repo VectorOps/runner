@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import signal
@@ -35,6 +36,8 @@ def main() -> None:
             print(os.getcwd())
             print(os.environ["PROCESS_TEST_INHERITED"])
             print(os.environ["PROCESS_TEST_OVERLAY"])
+        case "output_environment":
+            print(json.dumps({key: os.environ.get(key) for key in sys.argv[2:]}))
         case "child_group":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             subprocess.Popen([sys.executable, __file__, "sleep", "60"])
