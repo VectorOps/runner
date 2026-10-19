@@ -2,9 +2,17 @@
 
 import sqlite3
 from decimal import Decimal
-from typing import Optional
+from typing import Final, Optional
 
 from vectorops.runner import models, usage
+from vectorops.runner.runner import sql
+
+WORKFLOWS: Final = sql.Table("workflows")
+STEPS: Final = sql.Table("steps")
+PARENTS: Final = sql.Table("workflow_parents")
+STATE: Final = sql.Table("usage_state")
+ANCESTORS: Final = sql.Table("generation_ancestors")
+HEADS: Final = sql.Table("workflow_heads")
 
 
 def contribution(step: models.WorkflowStep) -> usage.Totals:
@@ -56,16 +64,22 @@ class UsageHistory:
         connection.execute(
             "CREATE TABLE usage_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL, payload TEXT NOT NULL)"
         )
-        connection.execute(
-            "INSERT INTO usage_state VALUES (1, 0, ?)",
-            (usage.Totals().model_dump_json(),),
+        sql.execute(
+            connection,
+            sql.Query.into(STATE).insert(1, 0, usage.Totals().model_dump_json()),
         )
-        connection.execute(
-            "UPDATE workflows SET payload = json_remove(payload, '$.usage')"
+        sql.execute(
+            connection,
+            sql.Query.update(WORKFLOWS).set(
+                WORKFLOWS.payload, sql.json_remove(WORKFLOWS.payload, "$.usage")
+            ),
         )
         steps = [
             models.WorkflowStep.model_validate_json(row[0])
-            for row in connection.execute("SELECT payload FROM steps ORDER BY rowid")
+            for row in sql.execute(
+                connection,
+                sql.Query.from_(STEPS).select(STEPS.payload).orderby(STEPS.rowid),
+            )
         ]
         for step in steps:
             UsageHistory.link(connection, step)
@@ -82,7 +96,10 @@ class UsageHistory:
         connection.execute(
             "CREATE TABLE generation_ancestors (step_id TEXT PRIMARY KEY, generation_id TEXT)"
         )
-        for row in connection.execute("SELECT payload FROM steps ORDER BY rowid"):
+        for row in sql.execute(
+            connection,
+            sql.Query.from_(STEPS).select(STEPS.payload).orderby(STEPS.rowid),
+        ):
             UsageHistory._link_context(
                 connection, models.WorkflowStep.model_validate_json(row[0])
             )
@@ -95,25 +112,32 @@ class UsageHistory:
         if step.operation.kind == "llm.generate":
             generation_id = step.id
         elif step.previous_step_id is not None:
-            row = connection.execute(
-                "SELECT generation_id FROM generation_ancestors WHERE step_id = ?",
-                (step.previous_step_id,),
+            row = sql.execute(
+                connection,
+                sql.Query.from_(ANCESTORS)
+                .select(ANCESTORS.generation_id)
+                .where(ANCESTORS.step_id == step.previous_step_id),
             ).fetchone()
             if row is None:
                 raise KeyError(step.previous_step_id)
             generation_id = row[0]
-        connection.execute(
-            "INSERT OR IGNORE INTO generation_ancestors VALUES (?, ?)",
-            (step.id, generation_id),
+        sql.execute(
+            connection,
+            sql.Query.into(ANCESTORS)
+            .insert(step.id, generation_id)
+            .on_conflict()
+            .do_nothing(),
         )
 
     @staticmethod
     def workflow_usage(
         connection: sqlite3.Connection, workflow_id: str
     ) -> usage.WorkflowUsage:
-        row = connection.execute(
-            "SELECT json_extract(payload, '$.usage') FROM workflows WHERE id = ?",
-            (workflow_id,),
+        row = sql.execute(
+            connection,
+            sql.Query.from_(WORKFLOWS)
+            .select(sql.json_extract(WORKFLOWS.payload, "$.usage"))
+            .where(WORKFLOWS.id == workflow_id),
         ).fetchone()
         if row is None:
             raise KeyError(workflow_id)
@@ -127,9 +151,18 @@ class UsageHistory:
     def save_usage(
         connection: sqlite3.Connection, workflow_id: str, totals: usage.WorkflowUsage
     ) -> None:
-        connection.execute(
-            "UPDATE workflows SET payload = json_set(payload, '$.usage', json(?)) WHERE id = ?",
-            (totals.model_dump_json(), workflow_id),
+        sql.execute(
+            connection,
+            sql.Query.update(WORKFLOWS)
+            .set(
+                WORKFLOWS.payload,
+                sql.json_set(
+                    WORKFLOWS.payload,
+                    "$.usage",
+                    sql.json_value(totals.model_dump_json()),
+                ),
+            )
+            .where(WORKFLOWS.id == workflow_id),
         )
 
     @staticmethod
@@ -139,8 +172,11 @@ class UsageHistory:
             return
         child = step.operation.child_workflow_id
         parent = step.workflow_id
-        row = connection.execute(
-            "SELECT parent_id FROM workflow_parents WHERE child_id = ?", (child,)
+        row = sql.execute(
+            connection,
+            sql.Query.from_(PARENTS)
+            .select(PARENTS.parent_id)
+            .where(PARENTS.child_id == child),
         ).fetchone()
         if row is not None:
             if row[0] != parent:
@@ -149,8 +185,9 @@ class UsageHistory:
         ancestors = UsageHistory.ancestors(connection, parent)
         if child in ancestors:
             raise ValueError("cycle in workflow tree")
-        connection.execute(
-            "INSERT INTO workflow_parents VALUES (?, ?)", (child, parent)
+        sql.execute(
+            connection,
+            sql.Query.into(PARENTS).insert(child, parent),
         )
         child_usage = UsageHistory.workflow_usage(connection, child)
         for identifier in ancestors:
@@ -175,16 +212,22 @@ class UsageHistory:
             if current in result:
                 raise ValueError("cycle in workflow tree")
             result.append(current)
-            row = connection.execute(
-                "SELECT parent_id FROM workflow_parents WHERE child_id = ?", (current,)
+            row = sql.execute(
+                connection,
+                sql.Query.from_(PARENTS)
+                .select(PARENTS.parent_id)
+                .where(PARENTS.child_id == current),
             ).fetchone()
             current = None if row is None else str(row[0])
         return result
 
     @staticmethod
     def snapshot(connection: sqlite3.Connection) -> tuple[int, usage.Totals]:
-        row = connection.execute(
-            "SELECT revision, payload FROM usage_state WHERE id = 1"
+        row = sql.execute(
+            connection,
+            sql.Query.from_(STATE)
+            .select(STATE.revision, STATE.payload)
+            .where(STATE.id == 1),
         ).fetchone()
         return int(row[0]), usage.Totals.model_validate_json(row[1])
 
@@ -199,9 +242,12 @@ class UsageHistory:
         if old == new:
             return
         revision, total = UsageHistory.snapshot(connection)
-        connection.execute(
-            "UPDATE usage_state SET revision = ?, payload = ? WHERE id = 1",
-            (revision + 1, total.replace(old, new).model_dump_json()),
+        sql.execute(
+            connection,
+            sql.Query.update(STATE)
+            .set(STATE.revision, revision + 1)
+            .set(STATE.payload, total.replace(old, new).model_dump_json())
+            .where(STATE.id == 1),
         )
         for identifier in UsageHistory.ancestors(connection, step.workflow_id):
             totals = UsageHistory.workflow_usage(connection, identifier)
@@ -225,20 +271,30 @@ class UsageHistory:
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'generation_ancestors'"
         ).fetchone():
-            row = connection.execute(
-                "SELECT CASE WHEN a.step_id IS NULL THEN h.step_id ELSE a.generation_id END "
-                "FROM workflow_heads h LEFT JOIN generation_ancestors a ON a.step_id = h.step_id "
-                "WHERE h.workflow_id = ?",
-                (root_id,),
+            row = sql.execute(
+                connection,
+                sql.Query.from_(HEADS)
+                .left_join(ANCESTORS)
+                .on(ANCESTORS.step_id == HEADS.step_id)
+                .select(
+                    sql.Case()
+                    .when(ANCESTORS.step_id.isnull(), HEADS.step_id)
+                    .else_(ANCESTORS.generation_id)
+                )
+                .where(HEADS.workflow_id == root_id),
             ).fetchone()
         else:
-            row = connection.execute(
-                "SELECT step_id FROM workflow_heads WHERE workflow_id = ?", (root_id,)
+            row = sql.execute(
+                connection,
+                sql.Query.from_(HEADS)
+                .select(HEADS.step_id)
+                .where(HEADS.workflow_id == root_id),
             ).fetchone()
         current = None if row is None or row[0] is None else str(row[0])
         while current is not None:
-            row = connection.execute(
-                "SELECT payload FROM steps WHERE id = ?", (current,)
+            row = sql.execute(
+                connection,
+                sql.Query.from_(STEPS).select(STEPS.payload).where(STEPS.id == current),
             ).fetchone()
             step = models.WorkflowStep.model_validate_json(row[0])
             if step.operation.kind == "llm.generate":

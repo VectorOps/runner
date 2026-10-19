@@ -3,12 +3,16 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import sqlite3
-from typing import Optional
+from typing import Final, Optional
 from uuid import UUID
 
+from vectorops.runner.runner import sql
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 from . import models as m
+
+WORKTREES: Final = sql.Table("worktrees")
+USES: Final = sql.Table("worktree_uses")
 
 
 @dataclass(frozen=True)
@@ -23,8 +27,11 @@ class Store:
 
     @staticmethod
     def _find(connection: sqlite3.Connection, identifier: UUID) -> Optional[m.Record]:
-        row = connection.execute(
-            "SELECT payload FROM worktrees WHERE id = ?", (str(identifier),)
+        row = sql.execute(
+            connection,
+            sql.Query.from_(WORKTREES)
+            .select(WORKTREES.payload)
+            .where(WORKTREES.id == str(identifier)),
         ).fetchone()
         return None if row is None else m.Record.model_validate_json(row[0])
 
@@ -47,9 +54,11 @@ class Store:
 
     async def lookup(self, key: str, fingerprint: str) -> Optional[m.Record]:
         def read(connection: sqlite3.Connection) -> Optional[m.Record]:
-            row = connection.execute(
-                "SELECT fingerprint, payload FROM worktrees WHERE operation_key = ?",
-                (key,),
+            row = sql.execute(
+                connection,
+                sql.Query.from_(WORKTREES)
+                .select(WORKTREES.fingerprint, WORKTREES.payload)
+                .where(WORKTREES.operation_key == key),
             ).fetchone()
             if row is None:
                 return None
@@ -67,9 +76,11 @@ class Store:
         def write(connection: sqlite3.Connection) -> tuple[m.Record, bool]:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT fingerprint, payload FROM worktrees WHERE operation_key = ?",
-                    (key,),
+                row = sql.execute(
+                    connection,
+                    sql.Query.from_(WORKTREES)
+                    .select(WORKTREES.fingerprint, WORKTREES.payload)
+                    .where(WORKTREES.operation_key == key),
                 ).fetchone()
                 if row is not None:
                     if row[0] != fingerprint:
@@ -77,16 +88,23 @@ class Store:
                             "idempotency key was used with different arguments"
                         )
                     return m.Record.model_validate_json(row[1]), False
-                count = connection.execute(
-                    "SELECT count(*) FROM worktrees WHERE json_extract(payload, '$.status') != 'deleted'"
+                count = sql.execute(
+                    connection,
+                    sql.Query.from_(WORKTREES)
+                    .select(sql.functions.Count("*"))
+                    .where(
+                        sql.json_extract(WORKTREES.payload, "$.status") != "deleted"
+                    ),
                 ).fetchone()[0]
                 if limit is not None and count >= limit:
                     raise m.WorktreeError(
                         "workspace worktree limit reached; explicitly delete a worktree or increase the limit"
                     )
-                connection.execute(
-                    "INSERT INTO worktrees VALUES (?, ?, ?, ?)",
-                    (str(record.id), key, fingerprint, record.model_dump_json()),
+                sql.execute(
+                    connection,
+                    sql.Query.into(WORKTREES).insert(
+                        str(record.id), key, fingerprint, record.model_dump_json()
+                    ),
                 )
                 return record, True
 
@@ -99,9 +117,11 @@ class Store:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 record = update(self._get(connection, identifier))
-                connection.execute(
-                    "UPDATE worktrees SET payload = ? WHERE id = ?",
-                    (record.model_dump_json(), str(identifier)),
+                sql.execute(
+                    connection,
+                    sql.Query.update(WORKTREES)
+                    .set(WORKTREES.payload, record.model_dump_json())
+                    .where(WORKTREES.id == str(identifier)),
                 )
                 return record
 
@@ -109,13 +129,17 @@ class Store:
 
     async def page(self, query: m.Query) -> m.Page:
         def read(connection: sqlite3.Connection) -> m.Page:
-            rows = connection.execute(
-                "SELECT payload FROM worktrees WHERE id > ? AND (? OR json_extract(payload, '$.status') != 'deleted') ORDER BY id LIMIT ?",
-                (
-                    str(query.after) if query.after else "",
-                    query.include_deleted,
-                    query.limit + 1,
-                ),
+            statement = (
+                sql.Query.from_(WORKTREES)
+                .select(WORKTREES.payload)
+                .where(WORKTREES.id > (str(query.after) if query.after else ""))
+            )
+            if not query.include_deleted:
+                statement = statement.where(
+                    sql.json_extract(WORKTREES.payload, "$.status") != "deleted"
+                )
+            rows = sql.execute(
+                connection, statement.orderby(WORKTREES.id).limit(query.limit + 1)
             ).fetchall()
             records = [m.Record.model_validate_json(row[0]) for row in rows]
             return m.Page(
@@ -136,14 +160,18 @@ class Store:
                 record = self._get(connection, identifier)
                 if record.status != "ready":
                     raise m.WorktreeError(f"worktree is not ready: {record.status}")
-                connection.execute(
-                    "INSERT INTO worktree_uses VALUES (?, ?, ?)",
-                    (str(token), str(identifier), execution_id),
+                sql.execute(
+                    connection,
+                    sql.Query.into(USES).insert(
+                        str(token), str(identifier), execution_id
+                    ),
                 )
                 record = record.model_copy(update={"last_used_at": m.timestamp()})
-                connection.execute(
-                    "UPDATE worktrees SET payload = ? WHERE id = ?",
-                    (record.model_dump_json(), str(identifier)),
+                sql.execute(
+                    connection,
+                    sql.Query.update(WORKTREES)
+                    .set(WORKTREES.payload, record.model_dump_json())
+                    .where(WORKTREES.id == str(identifier)),
                 )
                 return record
 
@@ -152,8 +180,9 @@ class Store:
     async def release(self, token: UUID) -> None:
         def write(connection: sqlite3.Connection) -> None:
             with connection:
-                connection.execute(
-                    "DELETE FROM worktree_uses WHERE id = ?", (str(token),)
+                sql.execute(
+                    connection,
+                    sql.Query.from_(USES).delete().where(USES.id == str(token)),
                 )
 
         await self.database.run(write)
@@ -165,9 +194,11 @@ class Store:
         return await self.database.run(
             lambda connection: [
                 Usage(UUID(row[0]), None if row[1] is None else str(row[1]))
-                for row in connection.execute(
-                    "SELECT id, execution_id FROM worktree_uses WHERE worktree_id = ?",
-                    (str(identifier),),
+                for row in sql.execute(
+                    connection,
+                    sql.Query.from_(USES)
+                    .select(USES.id, USES.execution_id)
+                    .where(USES.worktree_id == str(identifier)),
                 )
             ]
         )

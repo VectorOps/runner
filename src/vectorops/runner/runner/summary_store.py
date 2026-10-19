@@ -1,13 +1,19 @@
 """Rebuildable workspace summaries and ordering, never workflow execution state."""
 
 from collections.abc import Sequence
-import json
 import sqlite3
 from time import time
+from typing import Final
 from uuid import UUID
 
-from vectorops.runner.runner import inspection, summary_history
+from vectorops.runner.runner import inspection, summary_history, sql
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
+
+SUMMARIES: Final = sql.Table("execution_summaries")
+TOMBSTONES: Final = sql.Table("summary_tombstones")
+INDEX: Final = sql.Table("execution_index")
+STATE: Final = sql.Table("index_state")
+TARGETS: Final = sql.Table("execution_targets")
 
 
 class SummaryStore:
@@ -23,16 +29,28 @@ class SummaryStore:
     ) -> None:
         identifier = snapshot.summary.execution_id
         payload = snapshot.summary.model_dump_json()
-        if connection.execute(
-            "SELECT 1 FROM summary_tombstones WHERE execution_id = ? AND source_id = ?",
-            (identifier, snapshot.source_id),
+        if sql.execute(
+            connection,
+            sql.Query.from_(TOMBSTONES)
+            .select(1)
+            .where(
+                (TOMBSTONES.execution_id == identifier)
+                & (TOMBSTONES.source_id == snapshot.source_id)
+            ),
         ).fetchone():
             return
-        previous = connection.execute(
-            "SELECT s.source_id, s.revision, s.payload, i.updated_at "
-            "FROM execution_summaries s LEFT JOIN execution_index i USING(execution_id) "
-            "WHERE s.execution_id = ?",
-            (identifier,),
+        previous = sql.execute(
+            connection,
+            sql.Query.from_(SUMMARIES)
+            .left_join(INDEX)
+            .on(SUMMARIES.execution_id == INDEX.execution_id)
+            .select(
+                SUMMARIES.source_id,
+                SUMMARIES.revision,
+                SUMMARIES.payload,
+                INDEX.updated_at,
+            )
+            .where(SUMMARIES.execution_id == identifier),
         ).fetchone()
         if previous is not None:
             if previous[0] == snapshot.source_id:
@@ -43,28 +61,34 @@ class SummaryStore:
                         SummaryStore._targets(connection, snapshot)
                     return
             if previous[0] != snapshot.source_id:
-                connection.execute(
-                    "INSERT OR IGNORE INTO summary_tombstones VALUES (?, ?)",
-                    (identifier, previous[0]),
+                sql.execute(
+                    connection,
+                    sql.Query.into(TOMBSTONES)
+                    .insert(identifier, previous[0])
+                    .on_conflict()
+                    .do_nothing(),
                 )
-        connection.execute(
-            "INSERT INTO execution_summaries VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(execution_id) DO UPDATE SET source_id = excluded.source_id, "
-            "revision = excluded.revision, payload = excluded.payload",
-            (
-                identifier,
-                snapshot.source_id,
-                snapshot.revision,
-                payload,
-            ),
+        sql.execute(
+            connection,
+            sql.Query.into(SUMMARIES)
+            .insert(identifier, snapshot.source_id, snapshot.revision, payload)
+            .on_conflict(SUMMARIES.execution_id)
+            .do_update(SUMMARIES.source_id)
+            .do_update(SUMMARIES.revision)
+            .do_update(SUMMARIES.payload),
         )
-        connection.execute(
-            "INSERT INTO execution_index VALUES (?, ?) ON CONFLICT(execution_id) "
-            "DO UPDATE SET updated_at = excluded.updated_at",
-            (identifier, snapshot.updated_at),
+        sql.execute(
+            connection,
+            sql.Query.into(INDEX)
+            .insert(identifier, snapshot.updated_at)
+            .on_conflict(INDEX.execution_id)
+            .do_update(INDEX.updated_at),
         )
-        connection.execute(
-            "UPDATE index_state SET generation = generation + 1 WHERE id = 1"
+        sql.execute(
+            connection,
+            sql.Query.update(STATE)
+            .set(STATE.generation, STATE.generation + 1)
+            .where(STATE.id == 1),
         )
         SummaryStore._targets(connection, snapshot)
 
@@ -73,15 +97,18 @@ class SummaryStore:
         connection: sqlite3.Connection, snapshot: summary_history.Snapshot
     ) -> None:
         identifier = snapshot.summary.execution_id
-        connection.execute(
-            "DELETE FROM execution_targets WHERE execution_id = ?", (identifier,)
+        sql.execute(
+            connection,
+            sql.Query.from_(TARGETS).delete().where(TARGETS.execution_id == identifier),
         )
-        connection.executemany(
-            "INSERT OR IGNORE INTO execution_targets VALUES (?, ?, ?)",
+        sql.insert_many(
+            connection,
+            TARGETS,
             [
                 (identifier, target.root, str(target.worktree_id or ""))
                 for target in snapshot.targets
             ],
+            ignore=True,
         )
 
     async def worktree_executions(self, identifier: UUID, path: str) -> set[str]:
@@ -89,11 +116,23 @@ class SummaryStore:
         return await self.database.run(
             lambda connection: {
                 str(row[0])
-                for row in connection.execute(
-                    "SELECT execution_id FROM execution_targets WHERE worktree_id = ? "
-                    "UNION SELECT execution_id FROM execution_targets WHERE root = ? "
-                    "UNION SELECT execution_id FROM execution_targets WHERE root >= ? AND root < ?",
-                    (str(identifier), path, path + "/", path + "0"),
+                for row in sql.execute(
+                    connection,
+                    sql.Query.from_(TARGETS)
+                    .select(TARGETS.execution_id)
+                    .where(TARGETS.worktree_id == str(identifier))
+                    .union(
+                        sql.Query.from_(TARGETS)
+                        .select(TARGETS.execution_id)
+                        .where(TARGETS.root == path)
+                    )
+                    .union(
+                        sql.Query.from_(TARGETS)
+                        .select(TARGETS.execution_id)
+                        .where(
+                            (TARGETS.root >= path + "/") & (TARGETS.root < path + "0")
+                        )
+                    ),
                 )
             }
         )
@@ -122,10 +161,11 @@ class SummaryStore:
         ) -> dict[str, inspection.ExecutionSummary]:
             return {
                 str(row[0]): inspection.ExecutionSummary.model_validate_json(row[1])
-                for row in connection.execute(
-                    "SELECT execution_id, payload FROM execution_summaries "
-                    "WHERE execution_id IN (SELECT value FROM json_each(?))",
-                    (json.dumps(list(execution_ids)),),
+                for row in sql.execute(
+                    connection,
+                    sql.Query.from_(SUMMARIES)
+                    .select(SUMMARIES.execution_id, SUMMARIES.payload)
+                    .where(SUMMARIES.execution_id.isin(sql.json_values(execution_ids))),
                 )
             }
 
@@ -133,27 +173,37 @@ class SummaryStore:
 
     @staticmethod
     def _remove(connection: sqlite3.Connection, identifiers: Sequence[str]) -> None:
-        selected = json.dumps(list(identifiers))
-        connection.execute(
-            "INSERT OR IGNORE INTO summary_tombstones "
-            "SELECT execution_id, source_id FROM execution_summaries "
-            "WHERE execution_id IN (SELECT value FROM json_each(?))",
-            (selected,),
+        selected = sql.json_values(identifiers)
+        sql.execute(
+            connection,
+            sql.Query.into(TOMBSTONES)
+            .from_(SUMMARIES)
+            .select(SUMMARIES.execution_id, SUMMARIES.source_id)
+            .where(SUMMARIES.execution_id.isin(selected))
+            .on_conflict()
+            .do_nothing(),
         )
-        connection.execute(
-            "DELETE FROM execution_summaries WHERE execution_id IN (SELECT value FROM json_each(?))",
-            (selected,),
+        sql.execute(
+            connection,
+            sql.Query.from_(SUMMARIES)
+            .delete()
+            .where(SUMMARIES.execution_id.isin(selected)),
         )
-        connection.execute(
-            "DELETE FROM execution_index WHERE execution_id IN (SELECT value FROM json_each(?))",
-            (selected,),
+        sql.execute(
+            connection,
+            sql.Query.from_(INDEX).delete().where(INDEX.execution_id.isin(selected)),
         )
-        connection.execute(
-            "DELETE FROM execution_targets WHERE execution_id IN (SELECT value FROM json_each(?))",
-            (selected,),
+        sql.execute(
+            connection,
+            sql.Query.from_(TARGETS)
+            .delete()
+            .where(TARGETS.execution_id.isin(selected)),
         )
-        connection.execute(
-            "UPDATE index_state SET generation = generation + 1 WHERE id = 1"
+        sql.execute(
+            connection,
+            sql.Query.update(STATE)
+            .set(STATE.generation, STATE.generation + 1)
+            .where(STATE.id == 1),
         )
 
     async def remove(self, identifiers: Sequence[str]) -> None:
@@ -173,32 +223,51 @@ class SummaryStore:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 if (
-                    connection.execute(
-                        "SELECT generation FROM index_state WHERE id = 1"
+                    sql.execute(
+                        connection,
+                        sql.Query.from_(STATE)
+                        .select(STATE.generation)
+                        .where(STATE.id == 1),
                     ).fetchone()[0]
                     != generation
                 ):
                     return False
                 identifiers = [snapshot.summary.execution_id for snapshot in snapshots]
+                candidates = (
+                    sql.Query.from_(INDEX)
+                    .select(INDEX.execution_id)
+                    .union(sql.Query.from_(SUMMARIES).select(SUMMARIES.execution_id))
+                    .union(sql.Query.from_(TARGETS).select(TARGETS.execution_id))
+                    .as_("candidates")
+                )
                 removed = [
                     str(row[0])
-                    for row in connection.execute(
-                        "SELECT execution_id FROM (SELECT execution_id FROM execution_index "
-                        "UNION SELECT execution_id FROM execution_summaries "
-                        "UNION SELECT execution_id FROM execution_targets) "
-                        "WHERE execution_id NOT IN (SELECT value FROM json_each(?))",
-                        (json.dumps(identifiers),),
+                    for row in sql.execute(
+                        connection,
+                        sql.Query.from_(candidates)
+                        .select(candidates.execution_id)
+                        .where(
+                            candidates.execution_id.notin(sql.json_values(identifiers))
+                        ),
                     )
                 ]
                 self._remove(connection, removed)
                 for snapshot in snapshots:
-                    connection.execute(
-                        "DELETE FROM summary_tombstones WHERE execution_id = ? AND source_id = ?",
-                        (snapshot.summary.execution_id, snapshot.source_id),
+                    sql.execute(
+                        connection,
+                        sql.Query.from_(TOMBSTONES)
+                        .delete()
+                        .where(
+                            (TOMBSTONES.execution_id == snapshot.summary.execution_id)
+                            & (TOMBSTONES.source_id == snapshot.source_id)
+                        ),
                     )
                     self._record(connection, snapshot, repair=True)
-                connection.execute(
-                    "UPDATE index_state SET refreshed_at = ? WHERE id = 1", (time(),)
+                sql.execute(
+                    connection,
+                    sql.Query.update(STATE)
+                    .set(STATE.refreshed_at, time())
+                    .where(STATE.id == 1),
                 )
                 return True
 

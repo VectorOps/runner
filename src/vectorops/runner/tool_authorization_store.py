@@ -6,15 +6,21 @@ import sqlite3
 import asyncio
 from collections.abc import Iterable, Set
 from typing import Optional, Protocol, TYPE_CHECKING
+import typing
 from uuid import UUID, uuid4
 
 import pydantic
 
 from vectorops.runner import tool_policy
+from vectorops.runner.runner import sql
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 if TYPE_CHECKING:
     from vectorops.runner.runner.project import Configuration
+
+RULES: typing.Final = sql.Table("tool_authorization_rules")
+OUTBOX: typing.Final = sql.Table("tool_rule_outbox")
+RECEIPTS: typing.Final = sql.Table("tool_rule_receipts")
 
 
 def equivalent_rule(
@@ -243,12 +249,18 @@ class SQLiteWorkflowGrants:
         workflow_id: str,
         tool_name: Optional[str] = None,
     ) -> list[tool_policy.AuthorizationRule]:
+        query = (
+            sql.Query.from_(RULES)
+            .select(RULES.payload)
+            .where(RULES.workflow_id == workflow_id)
+        )
+        if tool_name is not None:
+            query = query.where(
+                sql.json_extract(RULES.payload, "$.tool_name") == tool_name
+            )
         return [
             tool_policy.AuthorizationRule.model_validate_json(row[0])
-            for row in connection.execute(
-                "SELECT payload FROM tool_authorization_rules WHERE workflow_id = ? AND (? IS NULL OR json_extract(payload, '$.tool_name') = ?) ORDER BY id",
-                (workflow_id, tool_name, tool_name),
-            )
+            for row in sql.execute(connection, query.orderby(RULES.id))
         ]
 
     @staticmethod
@@ -270,20 +282,26 @@ class SQLiteWorkflowGrants:
                 raise ValueError(
                     f"equivalent authorization rule already exists: {existing.id}"
                 )
-            connection.execute(
-                "UPDATE tool_authorization_rules SET request_id = NULL WHERE id = ?",
-                (str(existing.id),),
+            sql.execute(
+                connection,
+                sql.Query.update(RULES)
+                .set(RULES.request_id, None)
+                .where(RULES.id == str(existing.id)),
             )
             return existing
         if rule_id is None:
-            connection.execute(
-                "INSERT INTO tool_authorization_rules VALUES (?, ?, NULL, ?)",
-                (str(rule.id), workflow_id, rule.model_dump_json()),
+            sql.execute(
+                connection,
+                sql.Query.into(RULES).insert(
+                    str(rule.id), workflow_id, None, rule.model_dump_json()
+                ),
             )
         elif (
-            connection.execute(
-                "UPDATE tool_authorization_rules SET payload = ? WHERE id = ? AND workflow_id = ?",
-                (rule.model_dump_json(), str(rule.id), workflow_id),
+            sql.execute(
+                connection,
+                sql.Query.update(RULES)
+                .set(RULES.payload, rule.model_dump_json())
+                .where((RULES.id == str(rule.id)) & (RULES.workflow_id == workflow_id)),
             ).rowcount
             != 1
         ):
@@ -314,33 +332,48 @@ class SQLiteWorkflowGrants:
             )
             if existing is not None:
                 rule = existing
-        connection.execute(
-            "INSERT INTO tool_rule_receipts VALUES (?, ?)", (request_id, str(rule.id))
+        sql.execute(
+            connection,
+            sql.Query.into(RECEIPTS).insert(request_id, str(rule.id)),
         )
         if answer.scope == "workspace":
-            connection.execute(
-                "INSERT INTO tool_rule_outbox (id, request_id, payload) VALUES (?, ?, ?)",
-                (str(rule.id), request_id, rule.model_dump_json()),
+            sql.execute(
+                connection,
+                sql.Query.into(OUTBOX)
+                .columns(OUTBOX.id, OUTBOX.request_id, OUTBOX.payload)
+                .insert(str(rule.id), request_id, rule.model_dump_json()),
             )
         elif existing is None:
-            connection.execute(
-                "INSERT INTO tool_authorization_rules VALUES (?, ?, ?, ?)",
-                (str(rule.id), workflow_id, request_id, rule.model_dump_json()),
+            sql.execute(
+                connection,
+                sql.Query.into(RULES).insert(
+                    str(rule.id), workflow_id, request_id, rule.model_dump_json()
+                ),
             )
 
     @staticmethod
     def retain(connection: sqlite3.Connection, step_ids: Set[str]) -> None:
-        grants = connection.execute(
-            "SELECT id FROM tool_authorization_rules WHERE request_id IS NOT NULL"
+        grants = sql.execute(
+            connection,
+            sql.Query.from_(RULES).select(RULES.id).where(RULES.request_id.notnull()),
         ).fetchall()
         retained_rules = {
             row[1]
-            for row in connection.execute(
-                "SELECT request_id, rule_id FROM tool_rule_receipts"
+            for row in sql.execute(
+                connection,
+                sql.Query.from_(RECEIPTS).select(RECEIPTS.request_id, RECEIPTS.rule_id),
             )
             if row[0] in step_ids
         }
-        connection.executemany(
-            "DELETE FROM tool_authorization_rules WHERE id = ?",
-            [(row[0],) for row in grants if row[0] not in retained_rules],
+        sql.execute(
+            connection,
+            sql.Query.from_(RULES)
+            .delete()
+            .where(
+                RULES.id.isin(
+                    sql.json_values(
+                        [row[0] for row in grants if row[0] not in retained_rules]
+                    )
+                )
+            ),
         )

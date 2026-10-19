@@ -17,7 +17,7 @@ from vectorops.runner.tool_authorization_store import (
     WorkspaceRules,
 )
 from vectorops.runner.runner import execution_state as state
-from vectorops.runner.runner import inspection
+from vectorops.runner.runner import inspection, sql
 from vectorops.runner.runner import history_query as queries
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import branching
@@ -31,6 +31,16 @@ from vectorops.runner.runner.summary_store import SummaryStore
 from vectorops.runner.runner.resources import finish_cleanup
 
 T = typing.TypeVar("T")
+WORKFLOWS: typing.Final = sql.Table("workflows")
+STEPS: typing.Final = sql.Table("steps")
+EXECUTION: typing.Final = sql.Table("execution")
+HEADS: typing.Final = sql.Table("workflow_heads")
+INPUTS: typing.Final = sql.Table("input_requests")
+BRANCHES: typing.Final = sql.Table("branch_operations")
+RULES: typing.Final = sql.Table("tool_authorization_rules")
+RECEIPTS: typing.Final = sql.Table("tool_rule_receipts")
+OUTBOX: typing.Final = sql.Table("tool_rule_outbox")
+REPLAY: typing.Final = sql.Table("replay")
 
 
 async def _offload(function: Callable[[], T]) -> T:
@@ -294,8 +304,11 @@ class SQLiteHistory:
 
     @staticmethod
     def _workflow(connection: sqlite3.Connection, workflow_id: str) -> models.Workflow:
-        row = connection.execute(
-            "SELECT payload FROM workflows WHERE id = ?", (workflow_id,)
+        row = sql.execute(
+            connection,
+            sql.Query.from_(WORKFLOWS)
+            .select(WORKFLOWS.payload)
+            .where(WORKFLOWS.id == workflow_id),
         ).fetchone()
         if row is None:
             raise KeyError(workflow_id)
@@ -303,8 +316,9 @@ class SQLiteHistory:
 
     @staticmethod
     def _step(connection: sqlite3.Connection, step_id: str) -> models.WorkflowStep:
-        row = connection.execute(
-            "SELECT payload FROM steps WHERE id = ?", (step_id,)
+        row = sql.execute(
+            connection,
+            sql.Query.from_(STEPS).select(STEPS.payload).where(STEPS.id == step_id),
         ).fetchone()
         if row is None:
             raise KeyError(step_id)
@@ -316,8 +330,11 @@ class SQLiteHistory:
         def save(connection: sqlite3.Connection) -> None:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT payload FROM workflows WHERE id = ?", (workflow.id,)
+                row = sql.execute(
+                    connection,
+                    sql.Query.from_(WORKFLOWS)
+                    .select(WORKFLOWS.payload)
+                    .where(WORKFLOWS.id == workflow.id),
                 ).fetchone()
                 if row is not None:
                     if not models.Workflow.model_validate_json(
@@ -325,8 +342,9 @@ class SQLiteHistory:
                     ).same_configuration(workflow):
                         raise ValueError("workflow configuration conflict")
                     return
-                connection.execute(
-                    "INSERT INTO workflows VALUES (?, ?)", (workflow.id, payload)
+                sql.execute(
+                    connection,
+                    sql.Query.into(WORKFLOWS).insert(workflow.id, payload),
                 )
 
         await self._run(save, workflow_ids=(workflow.id,))
@@ -362,9 +380,11 @@ class SQLiteHistory:
                         "referenced_targets": [*execution.referenced_targets, target]
                     }
                 )
-                connection.execute(
-                    "UPDATE execution SET payload = ? WHERE singleton = 1",
-                    (execution.model_dump_json(),),
+                sql.execute(
+                    connection,
+                    sql.Query.update(EXECUTION)
+                    .set(EXECUTION.payload, execution.model_dump_json())
+                    .where(EXECUTION.singleton == 1),
                 )
 
         await self._run(write, notify=True)
@@ -381,9 +401,11 @@ class SQLiteHistory:
                 updated = models.Workflow.model_validate(
                     {**workflow.model_dump(), "name": name}
                 )
-                connection.execute(
-                    "UPDATE workflows SET payload = ? WHERE id = ?",
-                    (updated.model_dump_json(), workflow_id),
+                sql.execute(
+                    connection,
+                    sql.Query.update(WORKFLOWS)
+                    .set(WORKFLOWS.payload, updated.model_dump_json())
+                    .where(WORKFLOWS.id == workflow_id),
                 )
                 return updated
 
@@ -397,13 +419,19 @@ class SQLiteHistory:
         def read(
             connection: sqlite3.Connection,
         ) -> typing.Optional[mailbox.InputRequest]:
-            row = connection.execute(
-                "SELECT payload FROM input_requests "
-                "WHERE json_extract(payload, '$.workflow_id') = ? "
-                "AND json_extract(payload, '$.request_type') = ? "
-                "AND json_extract(payload, '$.status') = 'answered' "
-                "ORDER BY json_extract(payload, '$.answered_at'), rowid LIMIT 1",
-                (workflow_id, request_type),
+            row = sql.execute(
+                connection,
+                sql.Query.from_(INPUTS)
+                .select(INPUTS.payload)
+                .where(sql.json_extract(INPUTS.payload, "$.workflow_id") == workflow_id)
+                .where(
+                    sql.json_extract(INPUTS.payload, "$.request_type") == request_type
+                )
+                .where(sql.json_extract(INPUTS.payload, "$.status") == "answered")
+                .orderby(
+                    sql.json_extract(INPUTS.payload, "$.answered_at"), INPUTS.rowid
+                )
+                .limit(1),
             ).fetchone()
             return (
                 None
@@ -425,8 +453,11 @@ class SQLiteHistory:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._workflow(connection, execution.root_workflow_id)
-                existing = connection.execute(
-                    "SELECT payload FROM execution WHERE singleton = 1"
+                existing = sql.execute(
+                    connection,
+                    sql.Query.from_(EXECUTION)
+                    .select(EXECUTION.payload)
+                    .where(EXECUTION.singleton == 1),
                 ).fetchone()
                 if existing is not None:
                     previous = state.ExecutionRecord.model_validate_json(existing[0])
@@ -467,14 +498,18 @@ class SQLiteHistory:
                 for workflow_id, step_id in execution.checkpoint.heads.items():
                     if self._step(connection, step_id).workflow_id != workflow_id:
                         raise ValueError("checkpoint head belongs to another workflow")
-                connection.execute(
-                    "INSERT INTO execution VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET payload = excluded.payload",
-                    (saved.model_dump_json(),),
+                sql.execute(
+                    connection,
+                    sql.Query.into(EXECUTION)
+                    .insert(1, saved.model_dump_json())
+                    .on_conflict(EXECUTION.singleton)
+                    .do_update(EXECUTION.payload),
                 )
                 if existing is None or replace_heads:
-                    connection.execute("DELETE FROM workflow_heads")
-                    connection.executemany(
-                        "INSERT INTO workflow_heads VALUES (?, ?)",
+                    sql.execute(connection, sql.Query.from_(HEADS).delete())
+                    sql.insert_many(
+                        connection,
+                        HEADS,
                         execution.checkpoint.heads.items(),
                     )
 
@@ -503,10 +538,20 @@ class SQLiteHistory:
     def _set_status(
         connection: sqlite3.Connection, status: state.ExecutionStatus
     ) -> None:
-        connection.execute(
-            "UPDATE execution SET payload = json_set(payload, '$.status', ?, '$.updated_at', ?) "
-            "WHERE singleton = 1",
-            (status, state.timestamp()),
+        sql.execute(
+            connection,
+            sql.Query.update(EXECUTION)
+            .set(
+                EXECUTION.payload,
+                sql.json_set(
+                    EXECUTION.payload,
+                    "$.status",
+                    status,
+                    "$.updated_at",
+                    state.timestamp(),
+                ),
+            )
+            .where(EXECUTION.singleton == 1),
         )
 
     async def wake_execution(self) -> bool:
@@ -555,9 +600,11 @@ class SQLiteHistory:
         def accept(connection: sqlite3.Connection) -> branching.Operation:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT payload FROM branch_operations WHERE idempotency_key = ?",
-                    (request.idempotency_key,),
+                row = sql.execute(
+                    connection,
+                    sql.Query.from_(BRANCHES)
+                    .select(BRANCHES.payload)
+                    .where(BRANCHES.idempotency_key == request.idempotency_key),
                 ).fetchone()
                 if row is not None:
                     previous = branching.Operation.model_validate_json(row[0])
@@ -566,8 +613,13 @@ class SQLiteHistory:
                             "idempotency key already used for different arguments"
                         )
                     return previous
-                if connection.execute(
-                    "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                if sql.execute(
+                    connection,
+                    sql.Query.from_(BRANCHES)
+                    .select(1)
+                    .where(
+                        sql.json_extract(BRANCHES.payload, "$.status") == "accepted"
+                    ),
                 ).fetchone():
                     raise branching.BranchConflict("another branch is being prepared")
                 operation = branching.Operation(
@@ -579,9 +631,9 @@ class SQLiteHistory:
                     ),
                 )
                 self._branch_plan(connection, operation)
-                connection.execute(
-                    "INSERT INTO branch_operations VALUES (?, ?, ?)",
-                    (
+                sql.execute(
+                    connection,
+                    sql.Query.into(BRANCHES).insert(
                         operation.id,
                         request.idempotency_key,
                         operation.model_dump_json(),
@@ -593,8 +645,11 @@ class SQLiteHistory:
 
     async def pending_branch(self) -> bool:
         return await self._run(
-            lambda connection: connection.execute(
-                "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+            lambda connection: sql.execute(
+                connection,
+                sql.Query.from_(BRANCHES)
+                .select(1)
+                .where(sql.json_extract(BRANCHES.payload, "$.status") == "accepted"),
             ).fetchone()
             is not None
         )
@@ -610,8 +665,13 @@ class SQLiteHistory:
         ) -> typing.Optional[branching.Operation]:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT payload FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                row = sql.execute(
+                    connection,
+                    sql.Query.from_(BRANCHES)
+                    .select(BRANCHES.payload)
+                    .where(
+                        sql.json_extract(BRANCHES.payload, "$.status") == "accepted"
+                    ),
                 ).fetchone()
                 if row is None:
                     return None
@@ -626,9 +686,9 @@ class SQLiteHistory:
                     self._cancel_inputs(connection, notifications)
                     step = plan.input_step
                     if step is not None:
-                        cursor = connection.execute(
-                            "INSERT INTO steps VALUES (?, ?, ?, ?)",
-                            (
+                        cursor = sql.execute(
+                            connection,
+                            sql.Query.into(STEPS).insert(
                                 step.id,
                                 step.workflow_id,
                                 step.previous_step_id,
@@ -646,20 +706,22 @@ class SQLiteHistory:
                             )
                         )
                         assert plan.input_request is not None
-                        connection.execute(
-                            "INSERT INTO input_requests VALUES (?, ?)",
-                            (step.id, plan.input_request.model_dump_json()),
+                        sql.execute(
+                            connection,
+                            sql.Query.into(INPUTS).insert(
+                                step.id, plan.input_request.model_dump_json()
+                            ),
                         )
-                    connection.execute("DELETE FROM workflow_heads")
-                    connection.executemany(
-                        "INSERT INTO workflow_heads VALUES (?, ?)", plan.heads.items()
-                    )
+                    sql.execute(connection, sql.Query.from_(HEADS).delete())
+                    sql.insert_many(connection, HEADS, plan.heads.items())
                     SQLiteWorkflowGrants.retain(connection, plan.retained_step_ids)
                     self._set_status(connection, "running")
                     operation = operation.model_copy(update={"status": "applied"})
-                connection.execute(
-                    "UPDATE branch_operations SET payload = ? WHERE id = ?",
-                    (operation.model_dump_json(), operation.id),
+                sql.execute(
+                    connection,
+                    sql.Query.update(BRANCHES)
+                    .set(BRANCHES.payload, operation.model_dump_json())
+                    .where(BRANCHES.id == operation.id),
                 )
                 return operation
 
@@ -678,14 +740,20 @@ class SQLiteHistory:
 
     @staticmethod
     def _execution(connection: sqlite3.Connection) -> state.ExecutionRecord:
-        row = connection.execute(
-            "SELECT payload FROM execution WHERE singleton = 1"
+        row = sql.execute(
+            connection,
+            sql.Query.from_(EXECUTION)
+            .select(EXECUTION.payload)
+            .where(EXECUTION.singleton == 1),
         ).fetchone()
         if row is None:
             raise KeyError("execution state")
         execution = state.ExecutionRecord.model_validate_json(row[0])
         heads = dict(
-            connection.execute("SELECT workflow_id, step_id FROM workflow_heads")
+            sql.execute(
+                connection,
+                sql.Query.from_(HEADS).select(HEADS.workflow_id, HEADS.step_id),
+            )
         )
         root_head = heads.get(execution.root_workflow_id)
         completion_id = None
@@ -741,12 +809,16 @@ class SQLiteHistory:
             with closing(self._connect_readonly()) as connection:
                 execution = self._execution(connection)
                 stats = inspection.ExecutionStats(
-                    workflows=connection.execute(
-                        "SELECT COUNT(*) FROM workflows"
+                    workflows=sql.execute(
+                        connection,
+                        sql.Query.from_(WORKFLOWS).select(sql.functions.Count("*")),
                     ).fetchone()[0],
                     steps=0,
                 )
-                cursor = connection.execute("SELECT payload FROM steps ORDER BY rowid")
+                cursor = sql.execute(
+                    connection,
+                    sql.Query.from_(STEPS).select(STEPS.payload).orderby(STEPS.rowid),
+                )
                 while rows := cursor.fetchmany(self.batch_size):
                     for row in rows:
                         step = models.WorkflowStep.model_validate_json(row[0])
@@ -768,16 +840,22 @@ class SQLiteHistory:
                     execution=self._execution(connection),
                     workflows=[
                         models.Workflow.model_validate_json(row[0])
-                        for row in connection.execute(
-                            "SELECT payload FROM workflows ORDER BY rowid"
+                        for row in sql.execute(
+                            connection,
+                            sql.Query.from_(WORKFLOWS)
+                            .select(WORKFLOWS.payload)
+                            .orderby(WORKFLOWS.rowid),
                         )
                     ],
                 )
                 with output.open("x", encoding="utf-8") as stream:
                     try:
                         stream.write(header.model_dump_json() + "\n")
-                        cursor = connection.execute(
-                            "SELECT payload FROM steps ORDER BY rowid"
+                        cursor = sql.execute(
+                            connection,
+                            sql.Query.from_(STEPS)
+                            .select(STEPS.payload)
+                            .orderby(STEPS.rowid),
                         )
                         while rows := cursor.fetchmany(self.batch_size):
                             for row in rows:
@@ -806,43 +884,58 @@ class SQLiteHistory:
                 boundary = (
                     cursor.boundary
                     if cursor
-                    else connection.execute(
-                        "SELECT COALESCE(MAX(rowid), 0) FROM steps"
+                    else sql.execute(
+                        connection,
+                        sql.Query.from_(STEPS).select(
+                            sql.functions.Coalesce(sql.functions.Max(STEPS.rowid), 0)
+                        ),
                     ).fetchone()[0]
                 )
-                clauses = ["s.rowid <= ?"]
-                values: list[typing.Union[str, int]] = [boundary]
+                statement = (
+                    sql.Query.from_(STEPS)
+                    .select(STEPS.rowid, STEPS.payload)
+                    .where(STEPS.rowid <= boundary)
+                )
                 if cursor:
-                    clauses.append(
-                        "s.rowid < ?" if query.selection == "tail" else "s.rowid > ?"
+                    statement = statement.where(
+                        STEPS.rowid < cursor.position
+                        if query.selection == "tail"
+                        else STEPS.rowid > cursor.position
                     )
-                    values.append(cursor.position)
                 workflow_id = query.workflow_id
                 if workflow_id is None and not query.include_children:
                     workflow_id = execution.root_workflow_id
                 if workflow_id is not None:
-                    clauses.append("s.workflow_id = ?")
-                    values.append(workflow_id)
+                    statement = statement.where(STEPS.workflow_id == workflow_id)
                 if query.step_ids is not None:
-                    clauses.append(
-                        "s.id IN (" + ",".join("?" for _ in query.step_ids) + ")"
+                    statement = statement.where(
+                        STEPS.id.isin(sql.json_values(query.step_ids))
                     )
-                    values.extend(query.step_ids)
-                prefix = ""
                 if query.head_step_id is not None:
                     self._step(connection, query.head_step_id)
-                    prefix = "WITH RECURSIVE path(id, previous_step_id) AS (SELECT id, previous_step_id FROM steps WHERE id = ? UNION SELECT s.id, s.previous_step_id FROM steps s JOIN path p ON s.id = p.previous_step_id) "
-                    clauses.append("s.id IN (SELECT id FROM path)")
-                    values.insert(0, query.head_step_id)
-                direction = "DESC" if query.selection == "tail" else "ASC"
-                rows = connection.execute(
-                    prefix
-                    + "SELECT s.rowid, s.payload FROM steps s WHERE "
-                    + " AND ".join(clauses)
-                    + " ORDER BY s.rowid "
-                    + direction
-                    + " LIMIT ?",
-                    [*values, query.limit + 1],
+                    path = sql.Table("path")
+                    ancestors = (
+                        sql.Query.from_(STEPS)
+                        .select(STEPS.id, STEPS.previous_step_id)
+                        .where(STEPS.id == query.head_step_id)
+                        .union(
+                            sql.Query.from_(STEPS)
+                            .join(path)
+                            .on(STEPS.id == path.previous_step_id)
+                            .select(STEPS.id, STEPS.previous_step_id)
+                        )
+                    )
+                    statement = statement.with_(ancestors, "path").where(
+                        STEPS.id.isin(sql.Query.from_(path).select(path.id))
+                    )
+                direction = (
+                    sql.Order.desc if query.selection == "tail" else sql.Order.asc
+                )
+                rows = sql.execute(
+                    connection,
+                    statement.orderby(STEPS.rowid, order=direction).limit(
+                        query.limit + 1
+                    ),
                 ).fetchall()
                 selected = rows[: query.limit]
                 next_cursor = None
@@ -869,8 +962,9 @@ class SQLiteHistory:
 
     async def get_step_position(self, step_id: str) -> int:
         def read(connection: sqlite3.Connection) -> int:
-            row = connection.execute(
-                "SELECT rowid FROM steps WHERE id = ?", (step_id,)
+            row = sql.execute(
+                connection,
+                sql.Query.from_(STEPS).select(STEPS.rowid).where(STEPS.id == step_id),
             ).fetchone()
             if row is None:
                 raise KeyError(step_id)
@@ -886,9 +980,11 @@ class SQLiteHistory:
                 head = self._step(connection, head_id)
                 target = self._step(connection, step_id)
                 updated = head.delivered(target)
-                connection.execute(
-                    "UPDATE steps SET payload = ? WHERE id = ?",
-                    (updated.model_dump_json(), head_id),
+                sql.execute(
+                    connection,
+                    sql.Query.update(STEPS)
+                    .set(STEPS.payload, updated.model_dump_json())
+                    .where(STEPS.id == head_id),
                 )
                 return updated
 
@@ -898,8 +994,11 @@ class SQLiteHistory:
     def _input(
         connection: sqlite3.Connection, request_id: str
     ) -> mailbox.StoredInputRequest:
-        row = connection.execute(
-            "SELECT payload FROM input_requests WHERE request_id = ?", (request_id,)
+        row = sql.execute(
+            connection,
+            sql.Query.from_(INPUTS)
+            .select(INPUTS.payload)
+            .where(INPUTS.request_id == request_id),
         ).fetchone()
         if row is None:
             raise KeyError(request_id)
@@ -936,9 +1035,11 @@ class SQLiteHistory:
                     execution_id=execution.id,
                     workflow_id=step.workflow_id,
                 )
-                connection.execute(
-                    "INSERT INTO input_requests VALUES (?, ?)",
-                    (request_id, request.model_dump_json()),
+                sql.execute(
+                    connection,
+                    sql.Query.into(INPUTS).insert(
+                        request_id, request.model_dump_json()
+                    ),
                 )
                 return request.public()
 
@@ -988,9 +1089,14 @@ class SQLiteHistory:
         def delete(connection: sqlite3.Connection) -> None:
             with connection:
                 if (
-                    connection.execute(
-                        "DELETE FROM tool_authorization_rules WHERE workflow_id = ? AND id = ?",
-                        (workflow_id, str(rule_id)),
+                    sql.execute(
+                        connection,
+                        sql.Query.from_(RULES)
+                        .delete()
+                        .where(
+                            (RULES.workflow_id == workflow_id)
+                            & (RULES.id == str(rule_id))
+                        ),
                     ).rowcount
                     != 1
                 ):
@@ -1002,9 +1108,11 @@ class SQLiteHistory:
         await self.publish_authorization_rules()
 
         def read(connection: sqlite3.Connection) -> typing.Optional[UUID]:
-            row = connection.execute(
-                "SELECT rule_id FROM tool_rule_receipts WHERE request_id = ?",
-                (request_id,),
+            row = sql.execute(
+                connection,
+                sql.Query.from_(RECEIPTS)
+                .select(RECEIPTS.rule_id)
+                .where(RECEIPTS.request_id == request_id),
             ).fetchone()
             return UUID(row[0]) if row is not None else None
 
@@ -1016,8 +1124,11 @@ class SQLiteHistory:
         pending = await self._run(
             lambda connection: [
                 tool_policy.AuthorizationRule.model_validate_json(row[0])
-                for row in connection.execute(
-                    "SELECT payload FROM tool_rule_outbox WHERE delivered = 0"
+                for row in sql.execute(
+                    connection,
+                    sql.Query.from_(OUTBOX)
+                    .select(OUTBOX.payload)
+                    .where(OUTBOX.delivered == 0),
                 )
             ]
         )
@@ -1027,14 +1138,22 @@ class SQLiteHistory:
             def delivered(connection: sqlite3.Connection) -> None:
                 with connection:
                     connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        "UPDATE tool_rule_receipts SET rule_id = ? WHERE request_id = "
-                        "(SELECT request_id FROM tool_rule_outbox WHERE id = ?)",
-                        (str(canonical_id), str(rule.id)),
+                    sql.execute(
+                        connection,
+                        sql.Query.update(RECEIPTS)
+                        .set(RECEIPTS.rule_id, str(canonical_id))
+                        .where(
+                            RECEIPTS.request_id
+                            == sql.Query.from_(OUTBOX)
+                            .select(OUTBOX.request_id)
+                            .where(OUTBOX.id == str(rule.id))
+                        ),
                     )
-                    connection.execute(
-                        "UPDATE tool_rule_outbox SET delivered = 1 WHERE id = ?",
-                        (str(rule.id),),
+                    sql.execute(
+                        connection,
+                        sql.Query.update(OUTBOX)
+                        .set(OUTBOX.delivered, 1)
+                        .where(OUTBOX.id == str(rule.id)),
                     )
 
             await self._run(delivered)
@@ -1046,23 +1165,24 @@ class SQLiteHistory:
                 execution = self._execution(connection)
                 if execution.id != query.execution_id:
                     raise ValueError("execution identity mismatch")
-                clauses = ["json_extract(payload, '$.status') = 'pending'"]
-                values: list[typing.Union[str, int]] = []
+                statement = (
+                    sql.Query.from_(INPUTS)
+                    .select(INPUTS.payload)
+                    .where(sql.json_extract(INPUTS.payload, "$.status") == "pending")
+                )
                 for field, value in (
-                    ("workflow_id", query.workflow_id),
-                    ("channel", query.channel),
+                    ("$.workflow_id", query.workflow_id),
+                    ("$.channel", query.channel),
                 ):
                     if value is not None:
-                        clauses.append(f"json_extract(payload, '$.{field}') = ?")
-                        values.append(value)
+                        statement = statement.where(
+                            sql.json_extract(INPUTS.payload, field) == value
+                        )
                 if query.after is not None:
-                    clauses.append("request_id > ?")
-                    values.append(query.after)
-                rows = connection.execute(
-                    "SELECT payload FROM input_requests WHERE "
-                    + " AND ".join(clauses)
-                    + " ORDER BY request_id LIMIT ?",
-                    [*values, query.limit + 1],
+                    statement = statement.where(INPUTS.request_id > query.after)
+                rows = sql.execute(
+                    connection,
+                    statement.orderby(INPUTS.request_id).limit(query.limit + 1),
                 ).fetchall()
                 requests = [
                     mailbox.StoredInputRequest.model_validate_json(row[0]).public()
@@ -1088,8 +1208,13 @@ class SQLiteHistory:
                 request = self._input(connection, answer.request_id)
                 if request.execution_id != answer.execution_id:
                     raise mailbox.MailboxConflict("execution identity mismatch")
-                if connection.execute(
-                    "SELECT 1 FROM branch_operations WHERE json_extract(payload, '$.status') = 'accepted'"
+                if sql.execute(
+                    connection,
+                    sql.Query.from_(BRANCHES)
+                    .select(1)
+                    .where(
+                        sql.json_extract(BRANCHES.payload, "$.status") == "accepted"
+                    ),
                 ).fetchone():
                     raise mailbox.MailboxConflict("branch transition is in progress")
                 if request.status == "answered":
@@ -1119,9 +1244,11 @@ class SQLiteHistory:
                         "answered_at": state.timestamp(),
                     }
                 )
-                connection.execute(
-                    "UPDATE input_requests SET payload = ? WHERE request_id = ?",
-                    (request.model_dump_json(), request.request_id),
+                sql.execute(
+                    connection,
+                    sql.Query.update(INPUTS)
+                    .set(INPUTS.payload, request.model_dump_json())
+                    .where(INPUTS.request_id == request.request_id),
                 )
                 if self._execution(connection).status == "paused":
                     self._set_status(connection, "running")
@@ -1146,11 +1273,15 @@ class SQLiteHistory:
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]],
         request_id: typing.Optional[str] = None,
     ) -> None:
-        rows = connection.execute(
-            "UPDATE input_requests SET payload = json_set(payload, '$.status', 'cancelled') "
-            "WHERE json_extract(payload, '$.status') = 'pending' AND (? IS NULL OR request_id = ?) "
-            "RETURNING request_id",
-            (request_id, request_id),
+        statement = (
+            sql.Query.update(INPUTS)
+            .set(INPUTS.payload, sql.json_set(INPUTS.payload, "$.status", "cancelled"))
+            .where(sql.json_extract(INPUTS.payload, "$.status") == "pending")
+        )
+        if request_id is not None:
+            statement = statement.where(INPUTS.request_id == request_id)
+        rows = sql.execute(
+            connection, statement.returning(INPUTS.request_id)
         ).fetchall()
         if rows:
             notifications.append(
@@ -1192,15 +1323,20 @@ class SQLiteHistory:
                             "unfinished activity steps cannot have descendants"
                         )
                 try:
-                    connection.execute(
-                        "INSERT INTO steps VALUES (?, ?, ?, ?)",
-                        (step.id, step.workflow_id, step.previous_step_id, payload),
+                    sql.execute(
+                        connection,
+                        sql.Query.into(STEPS).insert(
+                            step.id, step.workflow_id, step.previous_step_id, payload
+                        ),
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ValueError("duplicate step ID") from exc
-                connection.execute(
-                    "INSERT INTO workflow_heads VALUES (?, ?) ON CONFLICT(workflow_id) DO UPDATE SET step_id = excluded.step_id",
-                    (step.workflow_id, step.id),
+                sql.execute(
+                    connection,
+                    sql.Query.into(HEADS)
+                    .insert(step.workflow_id, step.id)
+                    .on_conflict(HEADS.workflow_id)
+                    .do_update(HEADS.step_id),
                 )
                 UsageHistory.link(connection, step)
                 UsageHistory.update(connection, step)
@@ -1238,8 +1374,11 @@ class SQLiteHistory:
                     ):
                         raise ValueError("step identity and links cannot change")
                     step.validate_authorization_update(previous)
-                    connection.execute(
-                        "UPDATE steps SET payload = ? WHERE id = ?", (payload, step.id)
+                    sql.execute(
+                        connection,
+                        sql.Query.update(STEPS)
+                        .set(STEPS.payload, payload)
+                        .where(STEPS.id == step.id),
                     )
                     UsageHistory.update(connection, step, previous)
 
@@ -1273,9 +1412,11 @@ class SQLiteHistory:
                     ):
                         raise ValueError("unfinished activity must be the replay head")
                     try:
-                        connection.execute(
-                            "INSERT INTO replay VALUES (?, ?, ?)",
-                            (depth, step.id, step.model_dump_json()),
+                        sql.execute(
+                            connection,
+                            sql.Query.into(REPLAY).insert(
+                                depth, step.id, step.model_dump_json()
+                            ),
                         )
                     except sqlite3.IntegrityError as exc:
                         raise ValueError("cycle in replay path") from exc
@@ -1301,8 +1442,11 @@ class SQLiteHistory:
             assert connection is not None
             database = connection
             cursor = await _offload(
-                lambda: database.execute(
-                    "SELECT payload FROM replay ORDER BY depth DESC"
+                lambda: sql.execute(
+                    database,
+                    sql.Query.from_(REPLAY)
+                    .select(REPLAY.payload)
+                    .orderby(REPLAY.depth, order=sql.Order.desc),
                 )
             )
             while True:

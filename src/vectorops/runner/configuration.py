@@ -11,6 +11,7 @@ import typing
 
 import pydantic
 
+from vectorops.runner.runner import sql
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 
@@ -168,8 +169,12 @@ class Store:
             )
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT payload FROM documents WHERE name = 'configuration'"
+                documents = sql.Table("documents")
+                row = sql.execute(
+                    connection,
+                    sql.Query.from_(documents)
+                    .select(documents.payload)
+                    .where(documents.name == "configuration"),
                 ).fetchone()
                 items = Manifest.model_validate_json(row[0]).overrides
                 valid = {
