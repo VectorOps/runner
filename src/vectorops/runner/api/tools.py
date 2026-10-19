@@ -13,7 +13,6 @@ from .builtin_tools.plan import update_plan_tool as update_plan_tool
 from .builtin_tools.web_fetch import web_fetch_tool as web_fetch_tool
 from .builtin_tools.list_files import list_files_tool as list_files_tool
 from .builtin_tools import worktrees as _worktrees
-from .mcp import configured_tools as _configured_mcp_tools
 from .tool_registry import ToolConfig as ToolConfig, register_tool as register_tool
 from .tool_collections import (
     ToolCollection as ToolCollection,

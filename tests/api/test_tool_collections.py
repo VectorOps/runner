@@ -9,7 +9,7 @@ from tests.fixtures import replay, sources
 from tests.api.test_llm import FakeProvider, answer
 from tests.fixtures.history import MemoryHistory
 from tests.mcp.test_replay import configure
-from vectorops.runner.api import tools, tool_registry
+from vectorops.runner.api import builtin_tools, tools, tool_registry
 from vectorops.runner.api.llm import plan
 from vectorops.runner.api.llm import provider
 from vectorops.runner.mcp.runtime import MCPRuntime
@@ -18,6 +18,7 @@ from vectorops.runner.workflows import tools as workflow_tools
 
 
 def test_auto_registration_and_forwarding() -> None:
+    builtin_tools.register_builtins()
     assert set(tool_registry.registrations()) >= {
         "read_file",
         "list_files",

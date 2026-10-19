@@ -14,6 +14,6 @@ def register_builtins() -> None:
         "subworkflows",
         "web_fetch",
         "worktrees",
+        "mcp",
     ):
         importlib.import_module(f"{__name__}.{name}")
-    importlib.import_module("vectorops.runner.api.mcp")

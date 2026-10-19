@@ -8,6 +8,7 @@ from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
 from tests.mcp.test_discovery import catalog, search
 from vectorops.runner.api import mcp, tools, tool_sets
+from vectorops.runner.api.mcp import configuration, discovery
 from vectorops.runner.mcp import models
 from vectorops.runner.mcp.discovery import Discovery
 from vectorops.runner.mcp.runtime import MCPRuntime
@@ -116,8 +117,8 @@ async def test_configured_large_catalog_and_activation_limit(mode: str) -> None:
         ],
     )
     with (
-        patch.object(mcp, "_settings", return_value=settings),
-        patch.object(mcp, "_discover", return_value=snapshot),
+        patch.object(configuration, "settings", return_value=settings),
+        patch.object(discovery, "_discover", return_value=snapshot),
     ):
         selected = await mcp.configured_tool_set(mcp.ToolSelectionConfig())
         assert len(selected.bindings) == (150 if mode == "static" else 1)
@@ -137,9 +138,9 @@ async def test_explicit_selection_cannot_bypass_server_filters() -> None:
         }
     )
     with (
-        patch.object(mcp, "_settings", return_value=settings),
+        patch.object(configuration, "settings", return_value=settings),
         patch.object(
-            mcp, "_discover", side_effect=AssertionError("disabled discovery")
+            discovery, "_discover", side_effect=AssertionError("disabled discovery")
         ),
     ):
         selected = await mcp.configured_tool_set(
