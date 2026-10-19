@@ -1,13 +1,19 @@
 """Control protocol adapter for workspace worktree management."""
 
 import pydantic
+from collections.abc import Awaitable, Callable
+from typing import Optional
 
 from . import models as m
 from .manager import Manager
 
 
 async def dispatch(
-    manager: Manager, method: str, params: dict[str, pydantic.JsonValue]
+    manager: Manager,
+    method: str,
+    params: dict[str, pydantic.JsonValue],
+    *,
+    delete: Optional[Callable[[m.Delete], Awaitable[m.Record]]] = None,
 ) -> pydantic.JsonValue:
     if method == "worktrees.create":
         request = m.CreateRequest.model_validate(params)
@@ -27,7 +33,7 @@ async def dispatch(
             mode="json"
         )
     if method == "worktrees.delete":
-        return (await manager.delete(m.Delete.model_validate(params))).model_dump(
-            mode="json"
-        )
+        return (
+            await (delete or manager.delete)(m.Delete.model_validate(params))
+        ).model_dump(mode="json")
     raise m.WorktreeError("unsupported worktree method")

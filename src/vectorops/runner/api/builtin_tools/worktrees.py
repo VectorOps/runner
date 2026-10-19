@@ -78,14 +78,16 @@ def worktree_delete_tool(
     async def execute(
         context: ActivityExecutionContext, arguments: m.Delete
     ) -> tools.ToolResponse:
-        record = await manager(context).delete(arguments)
+        owner = manager(context)
+        assert context.targets is not None
+        record = await owner.delete(arguments, workflows=context.targets.workflows)
         return tools.ToolResponse(
             content=[connect.TextBlock(text=record.model_dump_json())]
         )
 
     return tools.Tool(
         "worktree_delete",
-        "Explicitly remove a workspace worktree, retaining its Git branch and audit record. Active use blocks deletion even with force. force discards dirty/untracked files and acknowledges abandoned crash leases; inspect orphaned processes first. Omitting deletion keeps the worktree for future workflows.",
+        "Explicitly remove an unused workspace worktree, retaining its Git branch and audit record. Running or paused executions referencing the worktree block deletion even with force, including completed children, previous workflow-history branches, and process overrides. This tool never cancels workflows; only user deletion through the control API can do that. force discards dirty/untracked files and acknowledges abandoned crash leases; inspect orphaned processes first. Omitting deletion keeps the worktree for future workflows.",
         m.Delete,
         execute,
         approval=approval,

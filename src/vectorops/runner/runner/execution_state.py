@@ -41,3 +41,6 @@ class ExecutionRecord(pydantic.BaseModel):
     )
     completion_step_id: typing.Optional[str] = None
     target: typing.Optional[LocalExecutionTarget] = None
+    referenced_targets: list[LocalExecutionTarget] = pydantic.Field(
+        default_factory=list
+    )

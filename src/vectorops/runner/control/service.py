@@ -235,13 +235,9 @@ class RunnerService:
         active = self._active.get(execution_id)
         if active is None or active.status == "stopping":
             return
-        started = active.status != "starting"
         self._active[execution_id] = active.model_copy(update={"status": "stopping"})
         self._changed(execution_id, ())
-        if started:
-            self._tasks[execution_id].cancel()
-        else:
-            self.runner.request_stop(execution_id)
+        self.runner.request_stop(execution_id)
 
     def _schedule(
         self,
@@ -495,7 +491,10 @@ class RunnerService:
                 raise p.RemoteError("runner_stopping", "runner is shutting down")
             try:
                 return await worktree_api.dispatch(
-                    (await self.runner.project()).worktrees, method, params
+                    (await self.runner.project()).worktrees,
+                    method,
+                    params,
+                    delete=self.runner.delete_worktree,
                 )
             except worktree_models.WorktreeError as exc:
                 raise p.RemoteError("worktree_error", str(exc)) from exc
@@ -778,7 +777,7 @@ class RunnerService:
                     )
                 if selected.execution_id not in self._active:
                     try:
-                        await self.runner.stop_unloaded(selected.execution_id)
+                        await self.runner.stop_execution(selected.execution_id)
                     except (ValueError, KeyError, FileNotFoundError) as exc:
                         raise p.RemoteError(
                             "execution_conflict", "execution is not active"

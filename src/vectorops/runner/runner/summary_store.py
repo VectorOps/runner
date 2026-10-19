@@ -4,6 +4,7 @@ from collections.abc import Sequence
 import json
 import sqlite3
 from time import time
+from uuid import UUID
 
 from vectorops.runner.runner import inspection, summary_history
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
@@ -38,6 +39,8 @@ class SummaryStore:
                 if not repair and previous[1] >= snapshot.revision:
                     return
                 if previous[1:] == (snapshot.revision, payload, snapshot.updated_at):
+                    if repair:
+                        SummaryStore._targets(connection, snapshot)
                     return
             if previous[0] != snapshot.source_id:
                 connection.execute(
@@ -62,6 +65,37 @@ class SummaryStore:
         )
         connection.execute(
             "UPDATE index_state SET generation = generation + 1 WHERE id = 1"
+        )
+        SummaryStore._targets(connection, snapshot)
+
+    @staticmethod
+    def _targets(
+        connection: sqlite3.Connection, snapshot: summary_history.Snapshot
+    ) -> None:
+        identifier = snapshot.summary.execution_id
+        connection.execute(
+            "DELETE FROM execution_targets WHERE execution_id = ?", (identifier,)
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO execution_targets VALUES (?, ?, ?)",
+            [
+                (identifier, target.root, str(target.worktree_id or ""))
+                for target in snapshot.targets
+            ],
+        )
+
+    async def worktree_executions(self, identifier: UUID, path: str) -> set[str]:
+        """Find reference candidates by UUID or an indexed raw directory-prefix range."""
+        return await self.database.run(
+            lambda connection: {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT execution_id FROM execution_targets WHERE worktree_id = ? "
+                    "UNION SELECT execution_id FROM execution_targets WHERE root = ? "
+                    "UNION SELECT execution_id FROM execution_targets WHERE root >= ? AND root < ?",
+                    (str(identifier), path, path + "/", path + "0"),
+                )
+            }
         )
 
     async def record(self, snapshot: summary_history.Snapshot) -> None:
@@ -115,6 +149,10 @@ class SummaryStore:
             (selected,),
         )
         connection.execute(
+            "DELETE FROM execution_targets WHERE execution_id IN (SELECT value FROM json_each(?))",
+            (selected,),
+        )
+        connection.execute(
             "UPDATE index_state SET generation = generation + 1 WHERE id = 1"
         )
 
@@ -146,7 +184,8 @@ class SummaryStore:
                     str(row[0])
                     for row in connection.execute(
                         "SELECT execution_id FROM (SELECT execution_id FROM execution_index "
-                        "UNION SELECT execution_id FROM execution_summaries) "
+                        "UNION SELECT execution_id FROM execution_summaries "
+                        "UNION SELECT execution_id FROM execution_targets) "
                         "WHERE execution_id NOT IN (SELECT value FROM json_each(?))",
                         (json.dumps(identifiers),),
                     )

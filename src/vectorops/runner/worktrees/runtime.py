@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Optional
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from vectorops.runner.runner.resources import finish_cleanup
 
 from . import models as m
 from .manager import Manager
+from .workflows import WorkflowControl
 
 
 class ExecutionTargets:
@@ -27,10 +28,17 @@ class ExecutionTargets:
         manager: Manager,
         config: LocalEnvironmentConfig,
         execution_id: Optional[str],
+        *,
+        workflows: Optional[WorkflowControl] = None,
+        reference_target: Optional[
+            Callable[[LocalExecutionTarget], Awaitable[None]]
+        ] = None,
     ) -> None:
         self.manager = manager
         self.config = config
         self.execution_id = execution_id
+        self.workflows = workflows
+        self._reference_target = reference_target
         self._capacity = SessionCapacity(config.processes.max_sessions)
         self._stacks: list[AsyncExitStack] = []
         self._processes: dict[str, ProcessManager] = {}
@@ -49,6 +57,10 @@ class ExecutionTargets:
                 )
                 if target.worktree_id is not None and selected != target:
                     raise m.WorktreeError("recorded worktree target changed")
+                if self._reference_target is not None:
+                    await self._reference_target(
+                        target.model_copy(update={"worktree_id": worktree_id})
+                    )
             environment = await LocalEnvironment.open(
                 self.config, target=target, capacity=self._capacity
             )

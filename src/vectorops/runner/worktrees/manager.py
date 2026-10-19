@@ -1,8 +1,8 @@
 """Workspace worktree lifecycle, idempotency, and protected target attachment."""
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections import abc
+from contextlib import AsyncExitStack, asynccontextmanager
 import json
 from pathlib import Path
 from typing import Optional
@@ -16,7 +16,8 @@ from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 from . import models as m
 from .backend import WorktreeBackend
 from .git import GitBackend
-from .store import Store
+from .store import Store, Usage
+from .workflows import WorkflowControl
 
 
 class Manager:
@@ -57,7 +58,7 @@ class Manager:
         await asyncio.to_thread(prepare)
 
     @asynccontextmanager
-    async def _lock(self, name: str) -> AsyncIterator[None]:
+    async def _lock(self, name: str) -> abc.AsyncIterator[None]:
         await self._prepare()
         lease = FileLease(self.directory / ".locks" / name)
         try:
@@ -226,63 +227,134 @@ class Manager:
 
         return await self.store.change(request.worktree_id, update)
 
-    async def delete(self, request: m.Delete) -> m.Record:
-        return await finish_cleanup(asyncio.create_task(self._delete(request)))
+    async def delete(
+        self,
+        request: m.Delete,
+        *,
+        workflows: Optional[WorkflowControl] = None,
+        cancel_workflows: bool = False,
+    ) -> m.Record:
+        return await finish_cleanup(
+            asyncio.create_task(self._delete(request, workflows, cancel_workflows))
+        )
 
-    async def _delete(self, request: m.Delete) -> m.Record:
-        """Serialize removal against attachment; stale crash leases require explicit force."""
-        await self.backend.repository(self.target)
-        async with self._lock(f"operation-{request.worktree_id}"):
-            record = await self.store.get(request.worktree_id)
-            self._check_path(record)
-            if record.status == "deleted":
-                return record
-            for token in await self.store.uses(record.id):
-                lease = FileLease(self.directory / ".locks" / f"use-{token}")
-                try:
-                    await asyncio.to_thread(lease.acquire)
-                except RuntimeError as exc:
-                    raise m.WorktreeError(
-                        "worktree is in use by a workflow or process"
-                    ) from exc
-                finally:
-                    await asyncio.to_thread(lease.release)
-                if not request.force:
-                    raise m.WorktreeError(
-                        "worktree has an abandoned usage lease; inspect orphaned processes before force removal"
-                    )
-                await self.store.release(token)
-            previous = record.status
-            record = await self.store.change(
-                record.id,
-                lambda current: current.model_copy(
-                    update={"status": "deleting", "updated_at": m.timestamp()}
-                ),
-            )
+    async def _live(self, token: UUID) -> bool:
+        lease = FileLease(self.directory / ".locks" / f"use-{token}")
+        try:
+            await asyncio.to_thread(lease.acquire)
+            return False
+        except RuntimeError:
+            return True
+        finally:
+            await asyncio.to_thread(lease.release)
+
+    async def _delete(
+        self,
+        request: m.Delete,
+        workflows: Optional[WorkflowControl],
+        cancel_workflows: bool,
+    ) -> m.Record:
+        """Block attachment, stop eligible executions, and verify cleanup before removal."""
+
+        async def prepare(
+            record: m.Record, usages: list[Usage]
+        ) -> abc.Callable[[], abc.Awaitable[None]]:
+            if workflows is None:
+
+                async def nothing_to_wait_for() -> None:
+                    pass
+
+                return nothing_to_wait_for
             try:
-                await self.backend.delete(record, force=request.force)
-            except Exception as exc:
-                await self.store.change(
+                async with asyncio.timeout(self.settings.timeout_seconds):
+                    return await workflows.prepare_worktree_deletion(
+                        record,
+                        {
+                            usage.execution_id
+                            for usage in usages
+                            if usage.execution_id is not None
+                        },
+                        force=request.force,
+                        cancel=cancel_workflows,
+                    )
+            except TimeoutError as exc:
+                raise m.WorktreeError(
+                    "timed out preparing worktree executions; worktree was not deleted"
+                ) from exc
+
+        await self.backend.repository(self.target)
+        async with self._lock(f"delete-{request.worktree_id}"):
+            async with self._lock(f"operation-{request.worktree_id}"):
+                record = await self.store.get(request.worktree_id)
+                self._check_path(record)
+                if record.status == "deleted":
+                    return record
+                usages = await self.store.usages(record.id)
+                live = [usage for usage in usages if await self._live(usage.id)]
+                if live and (
+                    not cancel_workflows
+                    or workflows is None
+                    or any(usage.execution_id is None for usage in live)
+                ):
+                    raise m.WorktreeError(
+                        "worktree is still in use by a workflow or process"
+                    )
+                wait_for_cleanup = await prepare(record, live)
+                previous = record.status
+                record = await self.store.change(
                     record.id,
                     lambda current: current.model_copy(
-                        update={
-                            "status": previous,
-                            "error": str(exc),
-                            "updated_at": m.timestamp(),
-                        }
+                        update={"status": "deleting", "updated_at": m.timestamp()}
                     ),
                 )
+            try:
+                try:
+                    async with asyncio.timeout(self.settings.timeout_seconds):
+                        await wait_for_cleanup()
+                except TimeoutError as exc:
+                    raise m.WorktreeError(
+                        "timed out stopping worktree executions; worktree was not deleted"
+                    ) from exc
+                async with self._lock(f"operation-{record.id}"):
+                    live_tokens = {usage.id for usage in live}
+                    for token in await self.store.uses(record.id):
+                        if await self._live(token):
+                            raise m.WorktreeError(
+                                "worktree is still in use by a workflow or process"
+                            )
+                        if token in live_tokens:
+                            raise m.WorktreeError(
+                                "workflow cleanup did not release the worktree; inspect orphaned processes before retrying"
+                            )
+                        if not request.force:
+                            raise m.WorktreeError(
+                                "worktree has an abandoned usage lease; inspect orphaned processes before force removal"
+                            )
+                        await self.store.release(token)
+                    await self.backend.delete(record, force=request.force)
+                    return await self.store.change(
+                        record.id,
+                        lambda current: current.model_copy(
+                            update={
+                                "status": "deleted",
+                                "error": None,
+                                "updated_at": m.timestamp(),
+                            }
+                        ),
+                    )
+            except Exception as exc:
+                async with self._lock(f"operation-{record.id}"):
+                    await self.store.change(
+                        record.id,
+                        lambda current: current.model_copy(
+                            update={
+                                "status": previous,
+                                "error": str(exc),
+                                "updated_at": m.timestamp(),
+                            }
+                        ),
+                    )
                 raise
-            return await self.store.change(
-                record.id,
-                lambda current: current.model_copy(
-                    update={
-                        "status": "deleted",
-                        "error": None,
-                        "updated_at": m.timestamp(),
-                    }
-                ),
-            )
 
     async def owning_worktree(self, target: LocalExecutionTarget) -> Optional[UUID]:
         """Identify registered raw-path targets without changing their selected root."""
@@ -312,9 +384,28 @@ class Manager:
         return target.model_copy(update={"worktree_id": identifier})
 
     @asynccontextmanager
+    async def protect_references(
+        self, targets: abc.Sequence[LocalExecutionTarget]
+    ) -> abc.AsyncIterator[None]:
+        """Serialize execution activation against deletion without creating attachment leases."""
+        identifiers = set()
+        for target in targets:
+            identifier = await self.owning_worktree(target)
+            if identifier is not None:
+                identifiers.add(identifier)
+        async with AsyncExitStack() as stack:
+            for identifier in sorted(identifiers):
+                await stack.enter_async_context(self._lock(f"operation-{identifier}"))
+                record = await self.store.get(identifier)
+                self._check_path(record)
+                if record.status != "ready":
+                    raise m.WorktreeError(f"worktree is not ready: {record.status}")
+            yield
+
+    @asynccontextmanager
     async def use(
         self, identifier: UUID, execution_id: Optional[str]
-    ) -> AsyncIterator[LocalExecutionTarget]:
+    ) -> abc.AsyncIterator[LocalExecutionTarget]:
         token = uuid4()
         await self._prepare()
         lease = FileLease(self.directory / ".locks" / f"use-{token}")

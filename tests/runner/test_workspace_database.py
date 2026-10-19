@@ -229,7 +229,7 @@ async def test_worktree_schema_migrates_existing_workspace(tmp_path: Path) -> No
         await reopened.run(
             lambda connection: connection.execute("PRAGMA user_version").fetchone()[0]
         )
-        == 3
+        == 4
     )
     assert (
         await reopened.run(
@@ -255,7 +255,7 @@ def test_journal_mode_retries_contention(tmp_path: Path, code: int) -> None:
     error.sqlite_errorcode = code
     connection = Mock(spec=sqlite3.Connection)
     cursor = Mock(spec=sqlite3.Cursor)
-    cursor.fetchone.return_value = (3,)
+    cursor.fetchone.return_value = (4,)
     connection.execute.side_effect = [cursor, error, cursor, cursor, cursor]
     with (
         patch(

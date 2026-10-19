@@ -6,6 +6,7 @@ from uuid import uuid4
 import pydantic
 
 from vectorops.runner import models, usage
+from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.runner import execution_state, inspection
 from vectorops.runner.runner.usage_history import UsageHistory
 
@@ -15,6 +16,7 @@ class Snapshot(pydantic.BaseModel):
     revision: int = pydantic.Field(ge=0)
     updated_at: str
     summary: inspection.ExecutionSummary
+    targets: list[LocalExecutionTarget] = pydantic.Field(default_factory=list)
 
 
 class SummaryHistory:
@@ -85,6 +87,23 @@ class SummaryHistory:
         return SummaryHistory._read(connection)[1]
 
     @staticmethod
+    def targets(
+        connection: sqlite3.Connection, execution: execution_state.ExecutionRecord
+    ) -> list[LocalExecutionTarget]:
+        """Collect execution-wide references without interpreting selected branch heads."""
+        targets = set(execution.referenced_targets)
+        if execution.target is not None:
+            targets.add(execution.target)
+        for (payload,) in connection.execute(
+            "SELECT json_extract(payload, '$.target') FROM workflows "
+            "WHERE json_type(payload, '$.target') = 'object'"
+        ):
+            targets.add(LocalExecutionTarget.model_validate_json(payload))
+        return sorted(
+            targets, key=lambda target: (target.root, str(target.worktree_id))
+        )
+
+    @staticmethod
     def snapshot(connection: sqlite3.Connection) -> Snapshot:
         execution, summary = SummaryHistory._read(connection)
         source_id, revision = connection.execute(
@@ -95,4 +114,5 @@ class SummaryHistory:
             revision=revision,
             updated_at=execution.updated_at,
             summary=summary,
+            targets=SummaryHistory.targets(connection, execution),
         )

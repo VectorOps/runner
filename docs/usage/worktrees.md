@@ -146,17 +146,58 @@ Keeping one means not deleting it; a later workflow can reuse any ready record,
 including one created by an LLM. Humans can manage all workspace records. There
 are no ownership-based permission restrictions or automatic age-based eviction.
 
-Deletion retains the Git branch and a database tombstone. It refuses live usage
-leases even with `force`. Dirty, untracked, or ignored files require `force`, which
-discards those files. External editors/processes are not tracked by the harness;
-operators must coordinate them separately.
+Deletion retains the Git branch and a database tombstone. User deletion through
+`worktrees.delete` (or `WorkflowRunner.delete_worktree`) differs from the LLM tool:
+
+| Caller | Workflows still using the worktree | Behavior |
+| --- | --- | --- |
+| User, without `force` | Any execution is running | Reject without stopping the paused users |
+| User, without `force` | Only paused executions waiting for input | Cancel those executions and their pending inputs, await cleanup, then delete |
+| User, with `force` | Running or paused executions | Cancel affected executions, await cleanup, then delete |
+| LLM `worktree_delete`, with or without `force` | Any running or paused execution referencing the worktree | Reject; the tool never cancels workflows |
+
+Ownership belongs to the entire execution. While an execution is running or
+paused, every worktree referenced by its root, children, or process overrides is
+protected. Completing a child or switching workflow-history branches does not
+release ownership. For example, if an old branch used worktree A and the current
+branch uses B, both remain protected until the execution stops. Branching history
+is unchanged.
+
+Stopped, failed, and completed executions need no cancellation and keep their
+recorded status. Paused bindings are checked even after restart when their tasks
+are unloaded. Cancellation uses the existing root-execution scope: stopping an
+execution using a worktree through a child also stops its other children.
+
+Execution history is authoritative. A rebuildable workspace index scopes deletion
+checks to executions referencing the requested worktree; their current status and
+references are rechecked in history before cancellation. Runtime worktree references
+are recorded before using files or starting processes and survive checkpoint writes
+and branching. Older process-only associations whose leases have already been
+released cannot be reconstructed from tool-call digests.
+
+Deletion blocks new attachments and execution activation while checking users and
+waiting for cleanup. Resuming an unfinished execution path requires its historical
+worktrees to remain ready. Replaying an already-completed root can still reuse
+recorded child results without reattaching their worktrees.
+If an input answer resumes a paused execution before its cancellation is committed,
+normal user deletion fails and requires `force`. Timeout or unconfirmed cleanup
+prevents file removal. An LLM cannot opt into cancellation through tool arguments.
+
+Dirty, untracked, or ignored files still require `force`, which discards those
+files. Stopping executions and removing a checkout are not atomic: a subsequent
+Git removal failure does not restart cancelled executions. External editors and
+processes without a runner-owned execution cannot be cancelled by this API;
+operators must coordinate them separately. Low-level manager calls without an
+execution-control capability continue to reject live leases even with `force`.
 
 Git and SQLite are not one transaction. The manager reserves `creating`/`deleting`
 state before effects. Retrying an interrupted operation reconciles the same UUID
 and path rather than allocating another checkout. Unregistered directories are
 never recursively deleted as a fallback.
 
-Usage leases combine SQLite records with OS file locks. After a crash or unconfirmed
+Usage leases combine SQLite records with OS file locks. They protect physical
+attachments and cleanup, not logical workflow ownership: an abandoned lease does
+not make a completed execution active. After a crash or unconfirmed
 process cleanup, an abandoned lease blocks normal deletion. Inspect and stop any
 orphaned processes before using force to acknowledge that lease. The harness does
 not recover process handles after a crash. Worktree creation does not implement

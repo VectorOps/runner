@@ -1,6 +1,7 @@
 """Transactional workspace persistence for worktree records and usage leases."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 import sqlite3
 from typing import Optional
 from uuid import UUID
@@ -8,6 +9,12 @@ from uuid import UUID
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 from . import models as m
+
+
+@dataclass(frozen=True)
+class Usage:
+    id: UUID
+    execution_id: Optional[str]
 
 
 class Store:
@@ -152,11 +159,14 @@ class Store:
         await self.database.run(write)
 
     async def uses(self, identifier: UUID) -> list[UUID]:
+        return [usage.id for usage in await self.usages(identifier)]
+
+    async def usages(self, identifier: UUID) -> list[Usage]:
         return await self.database.run(
             lambda connection: [
-                UUID(row[0])
+                Usage(UUID(row[0]), None if row[1] is None else str(row[1]))
                 for row in connection.execute(
-                    "SELECT id FROM worktree_uses WHERE worktree_id = ?",
+                    "SELECT id, execution_id FROM worktree_uses WHERE worktree_id = ?",
                     (str(identifier),),
                 )
             ]

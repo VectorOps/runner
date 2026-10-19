@@ -22,6 +22,7 @@ from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.worktrees.runtime import ExecutionTargets
+from vectorops.runner.worktrees import models as worktree_models
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.mcp.pool import SharedPool
 from vectorops.runner.runner.cached_history import CachedHistory
@@ -82,6 +83,7 @@ class WorkflowRunner:
         self._stop_requests: set[str] = set()
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
+        self._execution_tasks: dict[str, asyncio.Task[pydantic.JsonValue]] = {}
         self._project = project
         self._project_lock = asyncio.Lock()
         self._execution_index: typing.Optional[ExecutionIndex] = None
@@ -164,7 +166,17 @@ class WorkflowRunner:
             await self._naming.aclose()
 
     def request_stop(self, execution_id: str) -> None:
+        """Stop resident work or mark an execution that is still starting."""
         self._stop_requests.add(execution_id)
+        self._suspending.discard(execution_id)
+        owner = self._mailboxes.get(execution_id)
+        if owner is not None:
+            owner.suspending = False
+            if owner.pause is not None:
+                owner.pause.frozen = True
+            task = self._execution_tasks.get(execution_id)
+            if task is not None and not task.done() and not task.cancelling():
+                task.cancel()
 
     @asynccontextmanager
     async def _writer(self, project: RunnerProject) -> AsyncIterator[RunnerStateStore]:
@@ -188,6 +200,9 @@ class WorkflowRunner:
     ) -> AsyncIterator[RunnerStateStore]:
         async with self._writer(project) as store:
             async with store.reserve(execution_id):
+                task = asyncio.current_task()
+                assert task is not None
+                self._execution_tasks[execution_id] = task
                 cancelled = False
                 try:
                     yield store
@@ -217,9 +232,12 @@ class WorkflowRunner:
                         elif record.status != "running":
                             await store.deactivate(execution_id)
 
-                    await finish_cleanup(asyncio.create_task(settle()))
-                    self._suspending.discard(execution_id)
-                    self._stop_requests.discard(execution_id)
+                    try:
+                        await finish_cleanup(asyncio.create_task(settle()))
+                    finally:
+                        self._execution_tasks.pop(execution_id, None)
+                        self._suspending.discard(execution_id)
+                        self._stop_requests.discard(execution_id)
 
     def request_suspend(self, execution_id: str) -> None:
         """Preserve execution state when interrupting work for server shutdown."""
@@ -348,13 +366,128 @@ class WorkflowRunner:
             database = await self._database(project, request.execution_id)
             return await database.accept_branch(request)
 
-    async def stop_unloaded(self, execution_id: str) -> None:
+    async def stop_unloaded(
+        self, execution_id: str, *, require_paused: bool = False
+    ) -> None:
         project = await self.project()
         async with self._writer(project) as store:
             async with store.reserve(execution_id):
                 database = await self._database(project, execution_id)
-                await database.stop_execution()
+                await database.stop_execution(require_paused=require_paused)
                 await store.deactivate(execution_id)
+
+    async def delete_worktree(
+        self, request: worktree_models.Delete
+    ) -> worktree_models.Record:
+        """Delete on behalf of a user; workflow tools use the non-cancelling policy."""
+        return await (await self.project()).worktrees.delete(
+            request, workflows=self, cancel_workflows=True
+        )
+
+    async def stop_execution(
+        self,
+        execution_id: str,
+        *,
+        require_paused: bool = False,
+        allow_terminal: bool = False,
+    ) -> typing.Optional[asyncio.Task[pydantic.JsonValue]]:
+        """Commit cancellation before signalling resident work; tolerate completion only when requested."""
+        project = await self.project()
+        database = await self._database(project, execution_id)
+        task = self._execution_tasks.get(execution_id)
+        try:
+            if task is None:
+                await self.stop_unloaded(execution_id, require_paused=require_paused)
+            else:
+                await database.stop_execution(
+                    require_paused=require_paused and not task.cancelling()
+                )
+        except ValueError:
+            if not allow_terminal or (await database.get_execution()).status in (
+                "running",
+                "paused",
+            ):
+                raise
+        if task is not None and not task.done():
+            self.request_stop(execution_id)
+        elif (
+            self._state_store is not None
+            and execution_id in self._state_store.scheduled
+        ):
+            self.request_stop(execution_id)
+        return task
+
+    async def prepare_worktree_deletion(
+        self,
+        worktree: worktree_models.Record,
+        execution_ids: set[str],
+        *,
+        force: bool,
+        cancel: bool,
+    ) -> Callable[[], typing.Awaitable[None]]:
+        """Check indexed canonical owners separately from live attachment cleanup."""
+        project = await self.project()
+        waiting: set[asyncio.Task[pydantic.JsonValue]] = set()
+
+        async def wait_for_cleanup() -> None:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in waiting), return_exceptions=True
+            )
+
+        identifiers = await (await self.execution_index()).worktree_executions(
+            worktree.id, worktree.path
+        )
+        selected: dict[str, execution_models.ExecutionRecord] = {}
+        identifiers.update(execution_ids)
+        for identifier in sorted(identifiers):
+            owner = self._mailboxes.get(identifier)
+            if owner is not None and owner.pause is not None:
+                await owner.pause.flush()
+            try:
+                database = await self._database(project, identifier)
+                record = await database.get_execution()
+            except (FileNotFoundError, KeyError):
+                continue
+            task = self._execution_tasks.get(identifier)
+            if identifier in execution_ids and task is not None:
+                waiting.add(task)
+            if record.status not in ("running", "paused"):
+                continue
+            for target in await database.referenced_targets():
+                if await project.worktrees.owning_worktree(target) == worktree.id:
+                    selected[identifier] = record
+                    break
+        if not cancel:
+            if selected:
+                raise worktree_models.WorktreeError(
+                    "worktree is still in use by a workflow; only user deletion can cancel executions"
+                )
+            return wait_for_cleanup
+        if not force:
+            running = [
+                identifier
+                for identifier, record in selected.items()
+                if record.status == "running"
+                and not (
+                    identifier in self._execution_tasks
+                    and self._execution_tasks[identifier].cancelling()
+                )
+            ]
+            if running:
+                raise worktree_models.WorktreeError(
+                    "worktree has running executions; force is required: "
+                    + ", ".join(running)
+                )
+        for identifier in selected:
+            try:
+                task = await self.stop_execution(
+                    identifier, require_paused=not force, allow_terminal=True
+                )
+            except ValueError as exc:
+                raise worktree_models.WorktreeError(str(exc)) from exc
+            if task is not None:
+                waiting.add(task)
+        return wait_for_cleanup
 
     async def _execute(
         self,
@@ -517,8 +650,13 @@ class WorkflowRunner:
                         if continue_from_step_id is not None
                         else heads.get(record.root_workflow_id)
                     )
+                    terminal_replay = False
                     if root_head is not None:
                         selected = await history.get_step(root_head)
+                        terminal_replay = (
+                            selected.operation.kind == "workflow.complete"
+                            and selected.outcome.kind in ("completed", "failed")
+                        )
                         if selected.workflow_id != record.root_workflow_id:
                             raise ValueError(
                                 "continuation must target the root workflow"
@@ -545,7 +683,11 @@ class WorkflowRunner:
                     )
                     checkpointer = ExecutionCheckpointer(database, history, record)
                     assert record.target is not None
-                    await database.save_execution(record, replace_heads=True)
+                    references = [record.target]
+                    if not is_new and not terminal_replay:
+                        references.extend(await database.referenced_targets())
+                    async with project.worktrees.protect_references(references):
+                        await database.save_execution(record, replace_heads=True)
                     self.last_execution_id = execution_id
                     await checkpointer.persist()
                     await store.activate(execution_id)
@@ -737,8 +879,21 @@ class WorkflowRunner:
             environment = None
             targets = None
             if project.config.environment is not None:
+                target_history = (
+                    await self._database(project, execution_id)
+                    if execution_id is not None
+                    else None
+                )
                 targets = ExecutionTargets(
-                    project.worktrees, project.config.environment, execution_id
+                    project.worktrees,
+                    project.config.environment,
+                    execution_id,
+                    workflows=self,
+                    reference_target=(
+                        target_history.reference_target
+                        if target_history is not None
+                        else None
+                    ),
                 )
                 resources.register("targets", targets.close)
                 environment = await targets.open(target)

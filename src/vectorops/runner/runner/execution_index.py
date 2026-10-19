@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 import typing
+from uuid import UUID
 
 from vectorops.runner.runner.summary_history import Snapshot
 from vectorops.runner.runner.summary_store import SummaryStore
@@ -85,3 +86,11 @@ class ExecutionIndex:
             return await self.database.index_page(
                 after, limit, active=active, active_only=active_only
             )
+
+    async def worktree_executions(self, identifier: UUID, path: str) -> set[str]:
+        """Repair invalidated projections before using the scoped ownership index."""
+        async with self._lock:
+            _, refreshed = await self.database.index_status()
+            if not self._initialized or refreshed is None:
+                await self._reconcile()
+            return await self.summaries.worktree_executions(identifier, path)

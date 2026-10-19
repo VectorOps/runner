@@ -41,9 +41,9 @@ class WorkspaceDatabase:
                     time.sleep(0.01)
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError("unsupported workspace database schema version")
-            if version < 3:
+            if version < 4:
                 with connection:
                     connection.execute("BEGIN IMMEDIATE")
                     current = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -54,7 +54,10 @@ class WorkspaceDatabase:
                         connection.execute(
                             "UPDATE index_state SET generation = generation + 1, refreshed_at = NULL WHERE id = 1"
                         )
-                    self._initialize_worktrees(connection)
+                    if current < 3:
+                        self._initialize_worktrees(connection)
+                    if current < 4:
+                        self._initialize_targets(connection)
             return connection
         except BaseException:
             connection.close()
@@ -88,6 +91,21 @@ class WorkspaceDatabase:
             "CREATE TABLE IF NOT EXISTS worktree_uses (id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL, execution_id TEXT)"
         )
         connection.execute("PRAGMA user_version = 3")
+
+    @staticmethod
+    def _initialize_targets(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS execution_targets (execution_id TEXT NOT NULL, "
+            "root TEXT NOT NULL, worktree_id TEXT NOT NULL, "
+            "PRIMARY KEY (execution_id, root, worktree_id))"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS execution_targets_worktree ON execution_targets (worktree_id, execution_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS execution_targets_root ON execution_targets (root, execution_id)"
+        )
+        connection.execute("PRAGMA user_version = 4")
 
     @staticmethod
     def _initialize_summaries(connection: sqlite3.Connection) -> None:

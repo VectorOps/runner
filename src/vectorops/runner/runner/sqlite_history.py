@@ -11,6 +11,7 @@ import typing
 from uuid import UUID, uuid4
 
 from vectorops.runner import models, usage, tool_policy
+from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.tool_authorization_store import (
     SQLiteWorkflowGrants,
     WorkspaceRules,
@@ -242,6 +243,7 @@ class SQLiteHistory:
         except KeyError:
             return
         except Exception as exc:
+            await self._summary_store.database.invalidate_index()
             diagnostics.log(
                 "summary.snapshot_failed", level=diagnostics.Level.ERROR, error=exc
             )
@@ -249,6 +251,7 @@ class SQLiteHistory:
         try:
             await self._summary_store.record(snapshot)
         except Exception as exc:
+            await self._summary_store.database.invalidate_index()
             diagnostics.log(
                 "summary.publish_failed", level=diagnostics.Level.ERROR, error=exc
             )
@@ -333,6 +336,39 @@ class SQLiteHistory:
             lambda connection: self._workflow(connection, workflow_id)
         )
 
+    async def referenced_targets(self) -> list[LocalExecutionTarget]:
+        """Return all durable bindings, including completed and historical children."""
+
+        def read(connection: sqlite3.Connection) -> list[LocalExecutionTarget]:
+            with connection:
+                connection.execute("BEGIN")
+                return summary_history.SummaryHistory.targets(
+                    connection, self._execution(connection)
+                )
+
+        return await self._run(read)
+
+    async def reference_target(self, target: LocalExecutionTarget) -> None:
+        """Retain runtime worktree references before using their files or processes."""
+
+        def write(connection: sqlite3.Connection) -> None:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                execution = self._execution(connection)
+                if target in execution.referenced_targets:
+                    return
+                execution = execution.model_copy(
+                    update={
+                        "referenced_targets": [*execution.referenced_targets, target]
+                    }
+                )
+                connection.execute(
+                    "UPDATE execution SET payload = ? WHERE singleton = 1",
+                    (execution.model_dump_json(),),
+                )
+
+        await self._run(write, notify=True)
+
     async def set_workflow_name(self, workflow_id: str, name: str) -> models.Workflow:
         """Set presentation metadata once without replacing execution configuration."""
 
@@ -406,6 +442,18 @@ class SQLiteHistory:
                         raise ValueError("execution target cannot change")
                     if preserve_status:
                         saved = execution.model_copy(update={"status": previous.status})
+                    saved = saved.model_copy(
+                        update={
+                            "referenced_targets": list(
+                                dict.fromkeys(
+                                    [
+                                        *previous.referenced_targets,
+                                        *saved.referenced_targets,
+                                    ]
+                                )
+                            )
+                        }
+                    )
                     if not replace_heads:
                         authoritative = self._execution(connection)
                         saved = saved.model_copy(
@@ -472,7 +520,7 @@ class SQLiteHistory:
 
         return await self._run(wake, notify=True)
 
-    async def stop_execution(self) -> None:
+    async def stop_execution(self, *, require_paused: bool = False) -> None:
         """Cancel an unloaded execution and its requests in one transaction."""
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
             []
@@ -481,8 +529,11 @@ class SQLiteHistory:
         def stop(connection: sqlite3.Connection) -> None:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                if self._execution(connection).status not in ("running", "paused"):
+                status = self._execution(connection).status
+                if status not in ("running", "paused"):
                     raise ValueError("execution is not active")
+                if require_paused and status != "paused":
+                    raise ValueError("execution is running; force is required")
                 self._cancel_inputs(connection, notifications)
                 self._set_status(connection, "cancelled")
 
