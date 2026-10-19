@@ -5,6 +5,7 @@ import typing
 import pydantic
 
 from vectorops.runner.references import WorkflowReference
+from vectorops.runner.environment.target import ProjectPath
 from vectorops.runner.api.definitions import WorkflowDescriptor
 from vectorops.runner.runner import catalog, inspection
 from vectorops.runner.runner.branching import (
@@ -103,6 +104,7 @@ class Start(Model):
     reference: str = pydantic.Field(min_length=1, max_length=4096)
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
+    base_project_path: typing.Optional[ProjectPath] = None
 
     @pydantic.field_validator("reference", mode="after")
     @classmethod

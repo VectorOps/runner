@@ -30,7 +30,7 @@ async def test_non_posix_attachment(
 ) -> None:
     config = LocalEnvironmentConfig(base_project_path=str(tmp_path))
     with monkeypatch.context() as patch:
-        patch.setattr(local.os, "name", "nt")
+        patch.setattr(os, "name", "nt")
         with pytest.raises(EnvironmentError) as error:
             await local.LocalEnvironment.open(config)
     assert error.value.code == ErrorCode.UNSUPPORTED
@@ -46,7 +46,7 @@ async def test_failed_replacement_preserves_original_and_cleans_temporary(
     def fail_replace(source: Path, destination: Path) -> None:
         raise OSError(errno.ENOSPC, "no space")
 
-    monkeypatch.setattr(local.os, "replace", fail_replace)
+    monkeypatch.setattr(os, "replace", fail_replace)
     result = await PatchService(tmp_path).apply(
         "*** Begin Patch\n*** Update File: file\n@@\n-original\n+new\n*** End Patch"
     )

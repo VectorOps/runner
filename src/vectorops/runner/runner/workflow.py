@@ -20,6 +20,7 @@ from vectorops.runner import tool_rule_api
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
+from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.environment.lifecycle import close_processes
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.mcp.pool import SharedPool
@@ -117,6 +118,7 @@ class WorkflowRunner:
         execution_id: typing.Optional[str] = None,
         new_execution_id: typing.Optional[str] = None,
         on_started: typing.Optional[Callable[[], None]] = None,
+        base_project_path: typing.Optional[str] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
         task = asyncio.create_task(
@@ -129,6 +131,7 @@ class WorkflowRunner:
                 execution_id=execution_id,
                 new_execution_id=new_execution_id,
                 on_started=on_started,
+                base_project_path=base_project_path,
             )
         )
         self._executions.add(task)
@@ -362,8 +365,15 @@ class WorkflowRunner:
         execution_id: typing.Optional[str],
         new_execution_id: typing.Optional[str],
         on_started: typing.Optional[Callable[[], None]],
+        base_project_path: typing.Optional[str],
     ) -> pydantic.JsonValue:
         project = await self.project()
+        environment_config = project.config.environment
+        assert environment_config is not None
+        if base_project_path is not None and (
+            execution_id is not None or continue_from_step_id is not None
+        ):
+            raise ValueError("base_project_path can only be set for a new execution")
         if new_execution_id is not None and (
             execution_id is not None or self.history is not None
         ):
@@ -383,6 +393,9 @@ class WorkflowRunner:
                     record = execution_models.ExecutionRecord(
                         id=execution_id,
                         root_workflow_id=root_id,
+                        target=await LocalEnvironment.resolve_target(
+                            environment_config, base_project_path
+                        ),
                     )
                     if await asyncio.to_thread(
                         (project.data_path / "executions" / execution_id).exists
@@ -421,6 +434,14 @@ class WorkflowRunner:
                                 branch.error or "branch preparation failed"
                             )
                     record = await database.get_execution()
+                    if record.target is None:
+                        record = record.model_copy(
+                            update={
+                                "target": await LocalEnvironment.resolve_target(
+                                    environment_config
+                                )
+                            }
+                        )
                     if (
                         workflow_id is not None
                         and workflow_id != record.root_workflow_id
@@ -512,6 +533,7 @@ class WorkflowRunner:
                         }
                     )
                     checkpointer = ExecutionCheckpointer(database, history, record)
+                    assert record.target is not None
                     await database.save_execution(record, replace_heads=True)
                     self.last_execution_id = execution_id
                     await checkpointer.persist()
@@ -561,6 +583,7 @@ class WorkflowRunner:
                                 execution_id=execution_id,
                                 mailbox_owner=owner,
                                 tool_grants=database,
+                                target=record.target,
                             )
                     except asyncio.CancelledError:
                         if owner.suspending:
@@ -613,6 +636,9 @@ class WorkflowRunner:
             project,
             self.history,
             reference,
+            target=await LocalEnvironment.resolve_target(
+                environment_config, base_project_path
+            ),
             input=input,
             workflow_id=workflow_id,
             continue_from_step_id=continue_from_step_id,
@@ -625,6 +651,7 @@ class WorkflowRunner:
         history: WorkflowHistory,
         reference: str,
         *,
+        target: LocalExecutionTarget,
         input: typing.Optional[dict[str, pydantic.JsonValue]],
         workflow_id: typing.Optional[str],
         continue_from_step_id: typing.Optional[str],
@@ -668,6 +695,7 @@ class WorkflowRunner:
                 project,
                 history,
                 configuration,
+                target=target,
                 continue_from_step_id=continue_from_step_id,
                 child_heads=child_heads,
                 reporter=reporter,
@@ -681,6 +709,7 @@ class WorkflowRunner:
         history: WorkflowHistory,
         configuration: models.Workflow,
         *,
+        target: LocalExecutionTarget,
         continue_from_step_id: typing.Optional[str],
         child_heads: typing.Optional[dict[str, str]],
         reporter: typing.Optional[ExecutionCheckpointer],
@@ -692,7 +721,9 @@ class WorkflowRunner:
             resources.register("mcp", mcp.close)
             environment = None
             if project.config.environment is not None:
-                environment = await LocalEnvironment.open(project.config.environment)
+                environment = await LocalEnvironment.open(
+                    project.config.environment, target=target
+                )
                 resources.register(
                     "processes", partial(close_processes, environment.processes)
                 )

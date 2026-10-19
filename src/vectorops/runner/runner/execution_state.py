@@ -5,6 +5,8 @@ import typing
 
 import pydantic
 
+from vectorops.runner.environment.target import LocalExecutionTarget
+
 ExecutionStatus: typing.TypeAlias = typing.Literal[
     "running", "paused", "completed", "failed", "cancelled"
 ]
@@ -38,3 +40,4 @@ class ExecutionRecord(pydantic.BaseModel):
         default_factory=ExecutionCheckpoint
     )
     completion_step_id: typing.Optional[str] = None
+    target: typing.Optional[LocalExecutionTarget] = None

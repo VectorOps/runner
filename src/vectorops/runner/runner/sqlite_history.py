@@ -399,6 +399,11 @@ class SQLiteHistory:
                         execution.root_workflow_id,
                     ):
                         raise ValueError("execution identity cannot change")
+                    if (
+                        previous.target is not None
+                        and previous.target != execution.target
+                    ):
+                        raise ValueError("execution target cannot change")
                     if preserve_status:
                         saved = execution.model_copy(update={"status": previous.status})
                     if not replace_heads:

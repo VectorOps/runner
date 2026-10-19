@@ -24,6 +24,45 @@ def payload(response: tools.ToolResponse) -> dict[str, pydantic.JsonValue]:
     return pydantic.TypeAdapter(dict[str, pydantic.JsonValue]).validate_json(block.text)
 
 
+async def test_override_controls_file_access_and_scope(tmp_path: Path) -> None:
+    default = tmp_path / "default"
+    default.mkdir()
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (default / "file").write_text("default")
+    (selected / "file").write_text("selected")
+    config = LocalEnvironmentConfig(base_project_path=str(default))
+    target = await LocalEnvironment.resolve_target(config, str(selected))
+    environment = await LocalEnvironment.open(config, target=target)
+    context = ActivityExecutionContext(
+        None, "workflow", "step", environment=environment
+    )
+    binding = tools.read_file_tool()
+    try:
+        assert (
+            payload(await binding.execute(context, {"path": "file"}))["content"]
+            == "selected"
+        )
+        for root, expected in ((default, "external"), (selected, "internal")):
+            metadata = await auth.ToolAuthorizationService.resolve_auth_context(
+                binding,
+                connect.ToolCallBlock(
+                    id="call", name="read_file", arguments={"path": str(root / "file")}
+                ),
+                context,
+            )
+            assert metadata.properties == {"scope": expected}
+        patch = tools.apply_patch_tool()
+        text = "*** Begin Patch\n*** Add File: created\n+ok\n*** End Patch"
+        assert not (await patch.execute(context, {"text": text})).is_error
+        assert (selected / "created").read_text() == "ok\n"
+        assert not (default / "created").exists()
+        listing = payload(await tools.list_files_tool().execute(context, {"path": "."}))
+        assert "created" in str(listing["entries"])
+    finally:
+        await environment.processes.close()
+
+
 @pytest.mark.parametrize("home_relative", [False, True])
 async def test_absolute_and_home_relative_patch_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home_relative: bool

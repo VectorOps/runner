@@ -92,7 +92,7 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `executions.active` | `after`, `limit` (default 100, maximum 500) | Lexically ordered `executions` with ID/status and `next_after` |
 | `executions.list` | `after`, `limit` (default 100, maximum 500) | Lexically ordered execution IDs and `next_after` |
 | `executions.get` | `execution_id` | Persisted execution record and checkpoint |
-| `executions.start` | `reference`, `input`, `idempotency_key` | Execution ID and `starting` status |
+| `executions.start` | `reference`, `input`, `idempotency_key`, optional `base_project_path` | Execution ID and `starting` status |
 | `executions.resume` | `execution_id`, `idempotency_key` | Execution ID and `starting` status |
 | `executions.stop` | `execution_id` | Active execution with `stopping` status |
 | `history.query` | History query below | Ordered history items and `next_cursor` |
@@ -132,12 +132,42 @@ Authentication is managed separately through explicit `auth.login` or `mcp.login
 and the [authentication protocol](../config/authentication.md#authentication-rpc-reference).
 Missing or failing authentication fails workflow execution without creating a login request.
 Pagination is lexical by execution ID
-and views can change between requests. Existing `executions.list` and
-`executions.get` response shapes remain unchanged.
+and views can change between requests. The `executions.list` response is unchanged.
+`executions.get` returns the persisted execution record, including its nullable
+`target` binding (`{"kind":"local","root":"/absolute/resolved/path"}`).
 
 Start and resume receipts are persisted before launch. Repeating the same idempotency key and arguments returns the original acceptance, even after restart; different arguments produce `idempotency_conflict`. Acceptance is not proof of successful execution. A crash between receipt persistence and launch can leave an accepted ID without execution history; retries do not automatically execute it. Retention can also remove history without removing its receipt. Use a new key only for an intentional new attempt.
 
 Stop is cooperative and addresses the specific active execution. It returns before cleanup; wait for `execution.cancelled`, `execution.completed`, or `execution.failed`. Workflows that block the event loop or suppress cancellation can delay shutdown. Forced termination is not supported.
+
+### Execution target override
+
+`executions.start.base_project_path` is an optional absolute directory path.
+Omitting it or sending null uses `environment.base_project_path` from workspace
+configuration. The directory must already exist; starting an execution does not
+create it. Empty paths, relative paths, and NULs are rejected.
+
+```json
+{"kind":"request","id":"start-1","method":"executions.start","params":{"reference":"review:main","input":{},"idempotency_key":"review-worktree-1","base_project_path":"/projects/app-worktree"}}
+```
+
+Before workflow activities begin, the runner resolves symlinks and persists the
+selected target. Root and child activities use this root for file tools,
+internal/external authorization scope, process working directories, and agent
+context. The override does not change workspace configuration, workflow discovery,
+or the runner data directory. Different root executions can use different targets.
+
+`executions.resume` restores the persisted target and does not accept an override.
+Changing workspace configuration does not redirect an existing execution. A missing
+target fails execution rather than falling back to the configured default. Legacy
+records without a target bind and persist the current configured default on first
+resume. The target binding does not snapshot filesystem contents or recover processes.
+
+The Python API accepts the same optional keyword:
+
+```python
+await runner.run("review:main", base_project_path="/projects/app-worktree")
+```
 
 ### Configuration reads and overrides
 

@@ -283,6 +283,7 @@ class RunnerService:
                 await self.runner.run(
                     reference,
                     input=start.input,
+                    base_project_path=start.base_project_path,
                     new_execution_id=accepted.execution_id,
                     on_started=started,
                 )
@@ -320,7 +321,10 @@ class RunnerService:
         assert self._requests is not None
         assert self._store is not None
         fingerprint = json.dumps(
-            [type(params).__name__, params.model_dump(exclude={"idempotency_key"})],
+            [
+                type(params).__name__,
+                params.model_dump(exclude={"idempotency_key"}, exclude_none=True),
+            ],
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,

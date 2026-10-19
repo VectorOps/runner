@@ -1,6 +1,6 @@
 # Target environments
 
-Status: filesystem operations, local pipe processes, and root-workflow resource ownership are implemented. Patching, remote drivers, PTYs, and durable target-binding recovery remain proposed design.
+Status: filesystem operations, local pipe processes, root-workflow resource ownership, and durable local target binding are implemented. Patching, remote drivers, and PTYs remain proposed design in this document.
 
 A target environment is the filesystem and execution context that agent tools can inspect and modify. This design separates target operations from the runner so the same tools can work locally or against future remote backends.
 
@@ -72,7 +72,7 @@ Byte reads return at most the requested limit, using up to one extra byte intern
 
 Per-request read limits and line byte budgets cannot exceed `max_read_bytes`; writes and listings similarly enforce their configured caps. Binary content serializes as base64 in JSON. `EnvironmentError` distinguishes missing paths, denied access, outside-root paths, invalid paths, conflicts, unsupported operations, resource limits, invalid UTF-8, and other I/O failures. Its `may_have_occurred` flag conservatively marks OS failures during mutations, which can leave partial effects, particularly recursive removal or parent creation.
 
-Race-resistant containment is not implemented. Resolved-path checks are not a sandbox or protection against hostile concurrent path replacement. The local process capability is true; patching is unsupported. Runtime workflow injection is implemented; durable target binding, process replay, rollback, and agent-facing tools are not.
+Race-resistant containment is not implemented. Resolved-path checks are not a sandbox or protection against hostile concurrent path replacement. The local process capability is true; patching is unsupported. Runtime workflow injection and durable local target binding are implemented; process replay, rollback, and agent-facing tools are not covered by this design section.
 
 ## Implemented process management
 
@@ -302,9 +302,23 @@ Other activity-owned resources can register an async, no-argument finalizer with
 
 This is runtime resource ownership, not an event subscription or saga compensation. Step notifications remain observational. Forced runner termination cannot execute finalizers. On resume a new attachment is created; a recorded process ID is not restored or automatically respawned.
 
-### Deferred durable binding and recovery
+### Durable local target binding
 
-Persist the selected target identity and relevant configuration/policy fingerprint with the execution before effects. Child workflows inherit the binding by default. Resume must not silently switch targets after a profile changes. Older executions remain valid without an environment binding.
+`WorkflowRunner.run(base_project_path=...)` and `executions.start` accept an optional
+absolute target-directory override. Without it, a new execution uses the workspace
+environment setting. The environment owner resolves and validates the directory;
+the runner persists `ExecutionRecord.target` before workflow activities begin.
+The binding contains `kind = "local"` and the canonical `root`. It does not snapshot
+environment policies or limits, and does not modify workspace configuration.
+
+Children inherit the root execution's attachment. Resume reopens the persisted
+target even if workspace settings changed; an unavailable or redirected root fails
+rather than falling back. Existing bindings cannot be changed or cleared. Legacy
+records without a binding use and persist the configured default on first resume.
+See the [start protocol](../reference/control-protocol.md#execution-target-override)
+for request examples and validation rules.
+
+### Deferred effect recovery
 
 Completed activities replay recorded results rather than repeat effects. Interrupted writes and commands can already have taken effect; they need reconciliation or an explicit recovery decision before retry. Operation identifiers help track effects but do not create exactly-once execution.
 

@@ -3,6 +3,7 @@ from pathlib import Path
 import secrets
 import struct
 
+import pydantic
 import pytest
 
 from tests.fixtures import sources
@@ -33,6 +34,8 @@ async def test_execution_history_events_and_reconnect(
 ) -> None:
     (tmp_path / "workflows").mkdir()
     (tmp_path / "workflows/job.py").write_text(sources.read("value.py"))
+    target = tmp_path / "target"
+    target.mkdir()
     secret = secrets.token_urlsafe(32)
     async with RunnerService(tmp_path) as service:
         server = RunnerServer(service, secret)
@@ -51,6 +54,7 @@ async def test_execution_history_events_and_reconnect(
                     reference="job:main",
                     input={"value": 11},
                     idempotency_key="first",
+                    base_project_path=str(target),
                 )
                 accepted = await connection.start(params)
                 assert (await terminal(connection)).event[
@@ -60,6 +64,8 @@ async def test_execution_history_events_and_reconnect(
                 assert (
                     await connection.execution(accepted.execution_id)
                 ).status == "completed"
+                record = await connection.execution(accepted.execution_id)
+                assert record.target is not None and record.target.root == str(target)
                 page = await connection.history(
                     h.HistoryQuery(execution_id=accepted.execution_id, limit=1)
                 )
@@ -69,6 +75,10 @@ async def test_execution_history_events_and_reconnect(
                 with pytest.raises(p.RemoteError, match="different arguments"):
                     await connection.start(
                         params.model_copy(update={"input": {"value": 12}})
+                    )
+                with pytest.raises(p.RemoteError, match="different arguments"):
+                    await connection.start(
+                        params.model_copy(update={"base_project_path": str(tmp_path)})
                     )
                 with pytest.raises(p.RemoteError) as error:
                     await connection.request("unsupported.method")
@@ -85,6 +95,12 @@ async def test_execution_history_events_and_reconnect(
     async with client.embedded(tmp_path) as connection:
         assert await connection.start(params) == accepted
         assert (await connection.execution(accepted.execution_id)).status == "completed"
+
+
+@pytest.mark.parametrize("path", ["", "relative", "/bad\0path"])
+def test_start_rejects_invalid_project_path(path: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        p.Start(reference="job:main", idempotency_key="start", base_project_path=path)
 
 
 async def test_concurrent_stop_disconnect_and_workspace_ownership(
