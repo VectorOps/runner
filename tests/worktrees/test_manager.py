@@ -8,15 +8,64 @@ import pydantic
 import pytest
 
 from tests.worktrees.conftest import git
+from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.worktrees import models as m
 from vectorops.runner.worktrees.manager import Manager
+
+
+async def test_default_worktree_storage_is_gitignored(repository: Path) -> None:
+    ignore = Path(__file__).resolve().parents[2] / ".gitignore"
+    (repository / ".gitignore").write_text(ignore.read_text())
+    project = await RunnerProject.open(repository, workspace_directory=".voc")
+    record = await project.worktrees.create(m.Create(name="Ignored"), key="ignored")
+    assert Path(record.path) == repository / ".voc/data/worktrees" / str(record.id)
+    assert not (project.workspace_path / "worktrees").exists()
+    ignored = [
+        f".voc/data/worktrees/{record.id}/file",
+        ".voc/data/worktrees/.locks",
+        ".voc/data/workspace.sqlite3",
+        ".voc/data/logs/example.jsonl",
+    ]
+    assert (
+        await git(repository, "check-ignore", "--", *ignored)
+    ).splitlines() == ignored
+    assert (
+        await git(
+            repository,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".voc/data",
+        )
+        == ""
+    )
+
+
+async def test_worktrees_follow_configured_data_directory(repository: Path) -> None:
+    workspace = repository / ".voc"
+    workspace.mkdir()
+    (workspace / "config.toml").write_text('data_directory = "runtime/state"\n')
+    project = await RunnerProject.open(repository, workspace_directory=".voc")
+    record = await project.worktrees.create(
+        m.Create(name="Custom data"), key="custom-data"
+    )
+    assert Path(record.path) == project.data_path / "worktrees" / str(record.id)
+    assert project.data_path == workspace / "runtime/state"
+    assert not (workspace / "worktrees").exists()
+    assert not (workspace / "data").exists()
+    async with project.worktrees.use(record.id, None) as target:
+        assert target.root == record.path
+    assert (
+        await project.worktrees.delete(m.Delete(worktree_id=record.id))
+    ).status == "deleted"
 
 
 async def test_crud_and_idempotency(manager: Manager, repository: Path) -> None:
     request = m.Create(name="Fix the parser")
     record = await manager.create(request, key="first")
     assert record.status == "ready"
-    assert record.path == str(manager.workspace / "worktrees" / str(record.id))
+    assert record.path == str(manager.data_path / "worktrees" / str(record.id))
     assert not Path(record.path).is_relative_to(repository)
     assert record.branch == f"runner/worktree/{record.id}"
     assert (Path(record.path) / "file").read_text() == "committed\n"
@@ -52,7 +101,7 @@ async def test_crud_and_idempotency(manager: Manager, repository: Path) -> None:
 async def test_limit_is_atomic_and_shared_between_managers(manager: Manager) -> None:
     settings = m.Settings(max_worktrees=1)
     owners = [
-        Manager(manager.workspace, manager.target, manager.store.database, settings)
+        Manager(manager.data_path, manager.target, manager.store.database, settings)
         for _ in range(2)
     ]
     results = await asyncio.gather(
@@ -74,7 +123,7 @@ async def test_limit_is_atomic_and_shared_between_managers(manager: Manager) -> 
 
 async def test_concurrent_idempotent_creation(manager: Manager) -> None:
     other = Manager(
-        manager.workspace, manager.target, manager.store.database, manager.settings
+        manager.data_path, manager.target, manager.store.database, manager.settings
     )
     request = m.Create(name="Same feature", branch="feature/concurrent")
     records = await asyncio.gather(
@@ -140,13 +189,13 @@ async def test_named_branch_and_dirty_source(
 async def test_non_repository_and_unavailable_git(
     manager: Manager, tmp_path: Path
 ) -> None:
-    invalid = Manager(manager.workspace, tmp_path, manager.store.database, m.Settings())
+    invalid = Manager(manager.data_path, tmp_path, manager.store.database, m.Settings())
     with pytest.raises(m.WorktreeError):
         await invalid.listing(m.Query())
     with pytest.raises(m.WorktreeError):
         await invalid.create(m.Create(name="no repository"), key="bad")
     unavailable = Manager(
-        manager.workspace,
+        manager.data_path,
         manager.target,
         manager.store.database,
         m.Settings(git_executable="/nonexistent/git"),
@@ -194,7 +243,7 @@ async def test_custom_backend_without_git(manager: Manager) -> None:
             await asyncio.to_thread(Path(record.path).rmdir)
 
     custom = Manager(
-        manager.workspace,
+        manager.data_path,
         manager.target,
         manager.store.database,
         m.Settings(git_executable="/does/not/exist"),

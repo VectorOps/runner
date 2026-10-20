@@ -48,7 +48,7 @@ its `.voc/` subdirectory:
 | --- | --- |
 | `.voc/config.toml` | Optional project configuration |
 | `.voc/workflows/` | Local Python workflow files |
-| `.voc/data/` | Saved executions and logs |
+| `.voc/data/` | Git-ignored runtime data: saved executions, logs, and managed worktrees |
 
 Place global options before the command:
 

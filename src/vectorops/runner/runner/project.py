@@ -311,7 +311,7 @@ class RunnerProject:
     def worktrees(self) -> WorktreeManager:
         assert self.config.environment is not None
         return WorktreeManager(
-            self.workspace_path,
+            self.data_path,
             Path(self.config.environment.base_project_path),
             self.database,
             self.config.worktrees,

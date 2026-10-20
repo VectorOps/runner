@@ -8,8 +8,10 @@ manager; provenance differs, but permissions and retention rules do not.
 
 The configured `environment.base_project_path` must point into a Git repository
 with a commit. Worktree APIs fail if it does not. Worktrees are stored inside the
-runner workspace, normally `<project>/.voc/worktrees/<uuid>/`, even when the
-configured repository is elsewhere.
+runner's data directory, normally `<project>/.voc/data/worktrees/<uuid>/`, even
+when the configured repository is elsewhere. A custom `data_directory` also
+controls worktree storage. Keep the entire data directory Git-ignored: checkouts,
+locks, logs, and execution state are runtime data, not project source files.
 
 With a connected `RunnerClient`:
 

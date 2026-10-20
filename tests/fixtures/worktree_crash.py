@@ -23,11 +23,11 @@ class CrashAfterGit(GitBackend):
 
 
 async def main() -> None:
-    mode, workspace, repository = sys.argv[1:4]
+    mode, data_path, repository = sys.argv[1:4]
     manager = Manager(
-        Path(workspace),
+        Path(data_path),
         Path(repository),
-        WorkspaceDatabase(Path(workspace) / "data"),
+        WorkspaceDatabase(Path(data_path)),
         m.Settings(),
         backend=CrashAfterGit(),
     )

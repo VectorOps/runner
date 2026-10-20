@@ -47,11 +47,9 @@ async def repository(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def manager(tmp_path: Path, repository: Path) -> Manager:
-    workspace = tmp_path / "workspace" / ".voc"
-    workspace.mkdir(parents=True)
-    return Manager(
-        workspace, repository, WorkspaceDatabase(workspace / "data"), m.Settings()
-    )
+    data_path = tmp_path / "workspace" / ".voc" / "data"
+    data_path.mkdir(parents=True)
+    return Manager(data_path, repository, WorkspaceDatabase(data_path), m.Settings())
 
 
 @pytest.fixture

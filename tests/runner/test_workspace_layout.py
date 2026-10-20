@@ -30,6 +30,7 @@ async def test_default_layout_keeps_project_files_untouched(tmp_path: Path) -> N
     assert project.config_path == tmp_path / ".voc/config.toml"
     assert project.workflows_path == tmp_path / ".voc/workflows"
     assert project.data_path == tmp_path / ".voc/data"
+    assert project.worktrees.directory == tmp_path / ".voc/data/worktrees"
     assert project.workflows_path.is_dir()
     assert project.data_path.is_dir()
     await project.configuration.set("test.value", 1, permanent=True)
@@ -53,6 +54,7 @@ async def test_configuration_and_execution_paths(
     project = await runner.project()
     assert project.workflows_path == workspace / "flows"
     assert project.data_path == workspace / "state"
+    assert project.worktrees.directory == workspace / "state/worktrees"
     (project.workflows_path / "sample.py").write_text(sources.read("answer.py"))
     assert await runner.run("sample:main", new_execution_id="test") == 42
     assert (workspace / "state/executions/test/history.sqlite3").is_file()

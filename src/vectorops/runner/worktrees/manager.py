@@ -23,15 +23,15 @@ from .workflows import WorkflowControl
 class Manager:
     def __init__(
         self,
-        workspace: Path,
+        data_path: Path,
         target: Path,
         database: WorkspaceDatabase,
         settings: m.Settings,
         backend: Optional[WorktreeBackend] = None,
     ) -> None:
-        self.workspace = workspace
+        self.data_path = data_path
         self.target = target
-        self.directory = workspace / "worktrees"
+        self.directory = data_path / "worktrees"
         self.settings = settings
         self.backend = (
             backend
@@ -44,10 +44,10 @@ class Manager:
         def prepare() -> None:
             if (
                 self.directory.resolve() != self.directory
-                or not self.directory.is_relative_to(self.workspace)
+                or not self.directory.is_relative_to(self.data_path)
             ):
                 raise m.WorktreeError(
-                    "worktree storage must remain inside the workspace without symlinks"
+                    "worktree storage must remain inside the data directory without symlinks"
                 )
             self.directory.mkdir(parents=True, exist_ok=True)
             locks = self.directory / ".locks"

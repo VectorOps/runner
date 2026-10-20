@@ -15,7 +15,7 @@ async def crash(manager: Manager, mode: str, *arguments: str) -> UUID:
         "-m",
         "tests.fixtures.worktree_crash",
         mode,
-        str(manager.workspace),
+        str(manager.data_path),
         str(manager.target),
         *arguments,
         stdout=asyncio.subprocess.PIPE,
