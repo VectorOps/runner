@@ -71,6 +71,24 @@ async def test_execution_history_events_and_reconnect(
                 )
                 assert len(page.items) == 1
                 assert page.items[0].step.outcome == models.StepCompleted(result=11)
+                history = await connection.history(
+                    h.HistoryQuery(execution_id=accepted.execution_id)
+                )
+                older = await connection.history(
+                    h.HistoryQuery(
+                        execution_id=accepted.execution_id,
+                        before_step_id=page.items[0].step.id,
+                    )
+                )
+                assert older.items == history.items[:-1]
+                with pytest.raises(p.RemoteError) as missing_anchor:
+                    await connection.history(
+                        h.HistoryQuery(
+                            execution_id=accepted.execution_id,
+                            before_step_id="missing",
+                        )
+                    )
+                assert missing_anchor.value.code == "not_found"
                 assert await connection.start(params) == accepted
                 with pytest.raises(p.RemoteError, match="different arguments"):
                     await connection.start(

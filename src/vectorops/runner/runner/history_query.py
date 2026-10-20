@@ -18,10 +18,14 @@ class HistoryQuery(pydantic.BaseModel):
     include_children: bool = True
     step_ids: typing.Optional[list[str]] = pydantic.Field(default=None, max_length=500)
     head_step_id: typing.Optional[str] = None
+    before_step_id: typing.Optional[str] = None
     cursor: typing.Optional[str] = pydantic.Field(default=None, max_length=4096)
 
     def scope(self) -> str:
-        return self.model_dump_json(exclude={"cursor", "limit"})
+        excluded = {"cursor", "limit"}
+        if self.before_step_id is None:
+            excluded.add("before_step_id")
+        return self.model_dump_json(exclude=excluded)
 
 
 class HistoryItem(pydantic.BaseModel):

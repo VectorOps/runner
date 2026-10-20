@@ -288,11 +288,22 @@ event journal. Changes made by external database writers are not observed.
 | `workflow_id` | null | Exact workflow filter |
 | `step_ids` | null | Up to 500 exact IDs; empty list selects nothing |
 | `head_step_id` | null | Restrict to this step and its predecessor branch |
+| `before_step_id` | null | Restrict to records inserted strictly before this step; excludes the anchor |
 | `cursor` | null | Opaque continuation for the same query |
 
 Responses contain `execution_id`, `items` (`position`, `step`), and nullable `next_cursor`. Items are always ascending by position. Tail continuation loads older records; head continuation loads newer records. Iterate until the cursor is null to download the complete selection.
 
 Cursors freeze the insertion boundary of a selection, not mutable record values. New inserts do not shift pages; newer revisions may appear on subsequent reads. All filters except `limit` must remain unchanged when continuing. SQLite applies filtering and limits before records are decoded, so a last-100 query does not load all steps into Python. A response exceeding the frame limit fails with `frame_too_large`; reduce the page size. A single oversized step requires a future chunked-content extension.
+
+For a frontend retaining a moving window, use its oldest retained step ID as an exclusive anchor:
+
+```json
+{"execution_id":"exec-1","selection":"tail","before_step_id":"12345","limit":200}
+```
+
+This returns up to 200 matching records immediately before step `12345`, oldest-to-newest, without including that step. Ordering uses insertion position, not the step ID's value. Unlike `head_step_id`, this does not restrict records to the anchor's predecessor branch. Other filters still apply; the anchor must exist in the execution but need not match those filters. An unknown anchor returns `not_found`.
+
+To load another older page, either use `next_cursor` with the same anchor and filters, or start a new query without a cursor using the new oldest retained step as `before_step_id`. Do not reuse a cursor after changing the anchor. With `selection="head"`, the anchor still bounds the selection, but pages start with the earliest matching records rather than those nearest the anchor.
 
 ## Workflow-scoped tool approval
 

@@ -896,6 +896,11 @@ class SQLiteHistory:
                     .select(STEPS.rowid, STEPS.payload)
                     .where(STEPS.rowid <= boundary)
                 )
+                if query.before_step_id is not None:
+                    statement = statement.where(
+                        STEPS.rowid
+                        < self._step_position(connection, query.before_step_id)
+                    )
                 if cursor:
                     statement = statement.where(
                         STEPS.rowid < cursor.position
@@ -961,17 +966,20 @@ class SQLiteHistory:
         return await self._run(lambda connection: self._step(connection, step_id))
 
     async def get_step_position(self, step_id: str) -> int:
-        def read(connection: sqlite3.Connection) -> int:
-            row = sql.execute(
-                connection,
-                sql.Query.from_(STEPS).select(STEPS.rowid).where(STEPS.id == step_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(step_id)
-            position: int = row[0]
-            return position
+        return await self._run(
+            lambda connection: self._step_position(connection, step_id)
+        )
 
-        return await self._run(read)
+    @staticmethod
+    def _step_position(connection: sqlite3.Connection, step_id: str) -> int:
+        row = sql.execute(
+            connection,
+            sql.Query.from_(STEPS).select(STEPS.rowid).where(STEPS.id == step_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(step_id)
+        position: int = row[0]
+        return position
 
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         def record(connection: sqlite3.Connection) -> models.WorkflowStep:
