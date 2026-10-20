@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from tests.fixtures import sources
 from vectorops.runner.api import composition
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.resolver import WorkflowResolver
+from vectorops.runner.workflows import registry
 
 SOURCE = sources.read("resolver.py")
 
@@ -196,6 +198,42 @@ async def test_builtin_catalog_merged_before_pagination(tmp_path: Path) -> None:
     assert [item.reference for item in last.workflows] == ["builtin:helper"]
     assert last.next_after is None
     assert not (await resolver.discover(after="builtin:helper")).workflows
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+async def test_catalog_visibility_and_refresh(tmp_path: Path, hidden: bool) -> None:
+    path = tmp_path / "math.py"
+    path.write_text(SOURCE.replace("@workflow(", f"@workflow(hidden={hidden}, "))
+    resolver = WorkflowResolver(tmp_path)
+    entry = await resolver.resolve("math:double")
+    assert isinstance(entry, composition.WorkflowDefinition)
+    assert entry.hidden is hidden
+    assert (await resolver.describe("math:double")).name == "Double"
+    first = await resolver.discover(limit=1)
+    assert first.errors == []
+    assert first.workflows[0].reference == (
+        "builtin:agent" if hidden else "math:double"
+    )
+    matches = await resolver.discover(query="math:double", limit=1)
+    assert [item.reference for item in matches.workflows] == (
+        [] if hidden else ["math:double"]
+    )
+    assert matches.next_after is None
+    path.write_text(SOURCE)
+    refreshed = await resolver.resolve("math:double")
+    assert isinstance(refreshed, composition.WorkflowDefinition)
+    assert refreshed.hidden is False
+    assert (await resolver.discover(limit=1)).workflows[0].reference == "math:double"
+
+
+async def test_hidden_builtin_remains_resolvable(tmp_path: Path) -> None:
+    hidden = replace(registry.resolve("agent"), hidden=True)
+    resolver = WorkflowResolver(tmp_path)
+    with patch.object(registry, "WORKFLOWS", {"agent": hidden}):
+        assert not (await resolver.discover()).workflows
+        assert not (await resolver.discover(query="agent")).workflows
+        assert await resolver.resolve("builtin:agent") is hidden
+        assert (await resolver.describe("builtin:agent")).name == hidden.name
 
 
 @pytest.mark.parametrize(

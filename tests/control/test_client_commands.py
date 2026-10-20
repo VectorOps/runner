@@ -122,6 +122,39 @@ async def test_workflow_search_pagination(tmp_path: Path) -> None:
             await connection.request("workflows.search", {"query": 42})
 
 
+@pytest.mark.parametrize("reference", ["flow:main", "flow:child"])
+async def test_hidden_workflows_remain_executable(
+    tmp_path: Path, reference: str
+) -> None:
+    prepare(tmp_path)
+    (tmp_path / "workflows/flow.py").write_text(
+        SOURCE.replace("@workflow(", "@workflow(hidden=True, ")
+    )
+    async with client.embedded(tmp_path) as connection:
+        page = await connection.workflows(p.ExecutionList(limit=1))
+        assert page.workflows[0].descriptor.reference == "builtin:agent"
+        assert not page.errors
+        assert not (
+            await connection.search_workflows(p.WorkflowSearch(query="flow:"))
+        ).workflows
+        assert (await connection.describe_workflow(reference)).reference == reference
+        accepted = await connection.start(
+            p.Start(reference=reference, idempotency_key="hidden")
+        )
+        request = await pending(connection, accepted.execution_id)
+        await connection.answer_input(
+            mailbox.Answer(
+                execution_id=accepted.execution_id,
+                request_id=request.request_id,
+                response="hello",
+                idempotency_key="reply",
+            )
+        )
+        await settled(connection, accepted.execution_id)
+        summary = await connection.execution_summary(accepted.execution_id)
+        assert summary.status == "completed"
+
+
 async def test_execution_summary_counts_child_input_and_auth(tmp_path: Path) -> None:
     prepare(tmp_path)
     token = secrets.token_urlsafe(32)

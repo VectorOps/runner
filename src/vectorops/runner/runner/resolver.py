@@ -66,7 +66,7 @@ class WorkflowResolver:
     async def discover(
         self, *, query: str = "", after: typing.Optional[str] = None, limit: int = 100
     ) -> catalog.WorkflowCatalog:
-        """Page newest-modified local definitions, then built-ins, with reference ties.
+        """Page visible local definitions newest-first, then built-ins, with reference ties.
 
         Every space-separated query word must match a case-insensitive substring
         of the reference, name, or description before pagination.
@@ -81,7 +81,9 @@ class WorkflowResolver:
             result = catalog.WorkflowCatalog()
             order: dict[str, tuple[bool, int, str]] = {}
             with self._lock:
-                for name in registry.WORKFLOWS:
+                for name, entry in registry.WORKFLOWS.items():
+                    if entry.hidden:
+                        continue
                     target = f"builtin:{name}"
                     result.workflows.append(
                         self._describe(WorkflowReference.parse(target))
@@ -109,6 +111,7 @@ class WorkflowResolver:
                         if (
                             not isinstance(entry, composition.WorkflowDefinition)
                             or entry.func.__module__ != module.__name__
+                            or entry.hidden
                         ):
                             continue
                         target = f"{source}:{name}"

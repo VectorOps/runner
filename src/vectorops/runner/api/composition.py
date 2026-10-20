@@ -381,6 +381,7 @@ class WorkflowDefinition(typing.Generic[P, T]):
     kind: str = "workflow"
     version: int = 1
     description: typing.Optional[str] = None
+    hidden: bool = False
 
     def describe(self, reference: str) -> definitions.WorkflowDescriptor:
         return definitions.WorkflowDescriptor(
@@ -429,6 +430,7 @@ def workflow(
     kind: typing.Optional[str] = None,
     namespace: typing.Optional[str] = None,
     version: int = 1,
+    hidden: bool = False,
 ) -> Callable[
     [Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]],
     WorkflowDefinition[P, T],
@@ -472,6 +474,7 @@ def workflow(
             contract.kind,
             contract.version,
             description,
+            hidden,
         )
 
     return decorate

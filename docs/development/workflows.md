@@ -56,6 +56,11 @@ a `WorkflowDescriptor` with `reference`, display `name`, optional `description`,
 contract `kind` and `version`, and `input_schema`. Inputs exclude the injected
 context parameter. Undecorated async entry points are discoverable too.
 
+Set `@workflow(hidden=True)` to hide a workflow from the UI dropdown and workflow
+catalog listings and searches. The default is `hidden=False`. Hidden workflows
+remain describable and runnable by explicit reference and callable as child
+workflows; this flag controls visibility, not authorization.
+
 Discovery resolves references on demand, without a registration step or directory
 scan. Newly generated files are available immediately. A runner shares a resolver
 across executions. Each source file is imported once until its filesystem
