@@ -263,9 +263,7 @@ class Settings(Model):
     roots: list[Root] = pydantic.Field(
         default_factory=list, exclude_if=lambda value: not value
     )
-    mode: Literal["static", "dynamic"] = pydantic.Field(
-        default="dynamic", exclude_if=lambda value: value == "dynamic"
-    )
+    mode: Literal["static", "dynamic"] = "static"
     max_active: int = pydantic.Field(
         default=32, ge=1, le=256, strict=True, exclude_if=lambda value: value == 32
     )

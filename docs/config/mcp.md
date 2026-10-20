@@ -63,7 +63,7 @@ enabled = false
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `mcp.mode` | `"dynamic"` | `dynamic` exposes search first; `static` exposes every selected tool schema immediately |
+| `mcp.mode` | `"static"` | `static` exposes every selected tool schema immediately; `dynamic` exposes search first |
 | `mcp.max_active` | `32` | Dynamic active-tool cap, 1-256, excluding the search tool |
 | Server `enabled` | `true` | Include this server in tool discovery; `false` skips it without connecting |
 | Server `tools` | `["*"]` | Exact remote tool names or `"*"`; `[]` exposes none |
@@ -71,7 +71,7 @@ enabled = false
 
 Server filters bound explicit workflow/collection tool selections too. They do not disable administrative connect operations or prompt/resource APIs. Exposure settings do not change transport identity or namespaced tool names.
 
-To expose all selected schemas immediately, set `mode = "static"` under `[mcp]`. Dynamic mode still connects and records catalogs up front; it limits model context, not server startup. If no tools remain after selection, the configured collection exposes no MCP search tool either.
+All selected schemas are exposed immediately by default. To opt into search-first exposure, set `mode = "dynamic"` under `[mcp]`, as in the example above. Dynamic mode still connects and records catalogs up front; it limits model context, not server startup. If no tools remain after selection, the configured collection exposes no MCP search tool either.
 
 The built-in agent loads its collection once per execution. Start a new execution to apply changes. Dynamic activation starts search-only on each user turn; the catalog remains the recorded snapshot. Existing version-2 agent executions keep their original static collection behavior when resumed. Explicit collection `tools` lists still replace defaults: include `"mcp"` if you customize the agent's list.
 
@@ -321,7 +321,7 @@ Input schemas use JSON Schema 2020-12, require `type="object"`, and are validate
 
 ## Dynamic discovery
 
-The default agent uses dynamic discovery automatically. In a custom workflow, use `mcp.dynamic` for explicit selections when exposing every tool schema would make the initial LLM request too large:
+The default agent uses static exposure unless `mcp.mode = "dynamic"` is configured. In a custom workflow, use `mcp.dynamic` for explicit selections when exposing every tool schema would make the initial LLM request too large:
 
 ```python
 from vectorops.runner.api import llm, mcp

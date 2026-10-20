@@ -47,17 +47,18 @@ class MCPProvider(FakeProvider):
             yield item
 
 
-def mcp_config(mode: str = "dynamic", extra: str = "") -> str:
+def mcp_config(mode: str = "", extra: str = "") -> str:
     connection = server()
     return (
-        f'[mcp]\nmode = "{mode}"\nmax_active = 1\n'
-        '[mcp.servers.test]\nkind = "stdio"\n'
+        "[mcp]\nmax_active = 1\n"
+        + (f'mode = "{mode}"\n' if mode else "")
+        + '[mcp.servers.test]\nkind = "stdio"\n'
         f"command = {json.dumps(connection.command)}\nargs = {json.dumps(connection.args)}\n"
         + extra
     )
 
 
-@pytest.mark.parametrize("mode", ["dynamic", "static"])
+@pytest.mark.parametrize("mode", ["", "dynamic", "static"])
 async def test_default_agent_mcp_modes_and_offline_replay(
     tmp_path: Path, mode: str
 ) -> None:
@@ -79,7 +80,7 @@ async def test_default_agent_mcp_modes_and_offline_replay(
                 mode == "dynamic"
             )
             assert any(name.startswith("mcp_test_echo_") for name in first) == (
-                mode == "static"
+                mode != "dynamic"
             )
             assert len(backend.requests) == (3 if mode == "dynamic" else 2)
             assert "configured MCP" in str(backend.requests[-1].messages)
@@ -168,7 +169,7 @@ async def test_agent_v2_resume_keeps_legacy_collection(tmp_path: Path) -> None:
 
 
 async def test_default_agent_requires_concrete_mcp_approval(tmp_path: Path) -> None:
-    configure(tmp_path, tmp_path, mcp_config(), approve=False)
+    configure(tmp_path, tmp_path, mcp_config("dynamic"), approve=False)
     backend = MCPProvider([])
     with (
         patch.object(provider, "ConnectProvider", return_value=backend),

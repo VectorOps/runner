@@ -168,9 +168,20 @@ def test_exposure_policy_is_separate_from_transport_identity() -> None:
     assert models.Settings.model_validate(settings.model_dump(mode="json")) == settings
     assert settings.mode == "static"
     assert settings.max_active == 3
-    assert models.Settings().mode == "dynamic"
+    assert models.Settings().mode == "static"
     assert models.Settings().selections() == []
-    assert models.Settings().model_dump(mode="json") == {"servers": {}}
+    assert models.Settings().model_dump(mode="json") == {
+        "servers": {},
+        "mode": "static",
+    }
+
+
+@pytest.mark.parametrize("mode", ["static", "dynamic"])
+def test_exposure_mode_is_explicit_in_snapshots(mode: str) -> None:
+    settings = models.Settings.model_validate({"mode": mode})
+    snapshot = settings.model_dump(mode="json")
+    assert snapshot["mode"] == mode
+    assert models.Settings.model_validate(snapshot) == settings
 
 
 @pytest.mark.parametrize(

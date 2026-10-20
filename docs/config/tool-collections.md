@@ -5,8 +5,9 @@ Use `load_tool_set` with `LLM.run(tool_set=...)` for static and dynamic tools, o
 `load_collection` with `LLM.run(tools=...)` for static bindings only.
 
 The default agent already includes MCP. Configure servers under root
-`[mcp.servers.<name>]`; no collection edits are needed. MCP defaults to dynamic
-discovery, and an empty server configuration adds no tools. See [MCP configuration](mcp.md).
+`[mcp.servers.<name>]`; no collection edits are needed. MCP defaults to static
+exposure of all selected schemas; set `mcp.mode = "dynamic"` for search-first discovery.
+An empty server configuration adds no tools. See [MCP configuration](mcp.md).
 
 New agent executions also include `web_fetch` for ordinary HTTP retrieval and prefer
 it over shelling out to `curl`. Requests originate on the runner host, not the target.
