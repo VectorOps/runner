@@ -91,7 +91,7 @@ class HelperSettings(PromptSettings):
 
     thinking_level: Optional[ThinkingLevel] = None
     temperature: Optional[float] = pydantic.Field(default=None, ge=0, le=2)
-    max_rounds: int = pydantic.Field(default=30, gt=0, strict=True)
+    max_rounds: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
     tool_collection: str = pydantic.Field(
         default="helper", pattern=r"^[A-Za-z_][A-Za-z0-9_-]*$"
     )

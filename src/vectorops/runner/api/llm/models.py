@@ -129,7 +129,7 @@ class RetryPolicy(pydantic.BaseModel):
 
 class Configuration(Settings):
     compaction: Optional[Compaction] = None
-    max_rounds: int = pydantic.Field(default=100, gt=0, strict=True)
+    max_rounds: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
     retry: RetryPolicy = pydantic.Field(default_factory=RetryPolicy)
 
     def generation_settings(self) -> Settings:

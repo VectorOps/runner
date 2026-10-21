@@ -195,6 +195,38 @@ async def test_workspace_compaction_and_explicit_disable(
     assert len(backend.requests[-1].messages) == 3
 
 
+async def test_default_round_limit_is_unlimited(
+    history: MemoryHistory, tmp_path: Path
+) -> None:
+    (tmp_path / "config.toml").write_text('[components.llm]\nmodel = "test"\n')
+    backend = FakeProvider(
+        [
+            connect.AssistantMessage(
+                content=[
+                    connect.ToolCallBlock(
+                        id=f"call-{index}", name="unknown", arguments={}
+                    )
+                ],
+                finish_reason="tool_call",
+            )
+            for index in range(101)
+        ]
+        + [answer("done")]
+    )
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("unlimited", backend=backend)
+        agent.add_user_message("hello")
+        return (await agent.run()).model_dump(mode="json")
+
+    first = await replay.run(history, workflow, workspace=tmp_path)
+    assert first.outcome.kind == "completed"
+    assert first.outcome.result == answer("done").model_dump(mode="json")
+    assert len(backend.requests) == 102
+    assert await replay.run(history, workflow, first.id, workspace=tmp_path) == first
+    assert len(backend.requests) == 102
+
+
 async def test_round_limit_from_configuration(
     history: MemoryHistory, tmp_path: Path
 ) -> None:

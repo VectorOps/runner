@@ -250,8 +250,22 @@ async def test_helper_exec_requires_normal_approval(tmp_path: Path) -> None:
             )
 
 
-async def test_helper_round_limit(tmp_path: Path) -> None:
-    configure(tmp_path, tmp_path, "[components.workflows.helper]\nmax_rounds = 1\n")
+async def test_helper_default_round_limit_is_unlimited(tmp_path: Path) -> None:
+    configure(tmp_path, tmp_path)
+    backend = FakeProvider([call("unknown", {}) for _ in range(31)] + [answer("done")])
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        assert (
+            await WorkflowRunner(tmp_path).run(
+                "builtin:helper", input={"task": "Inspect."}
+            )
+            == "done"
+        )
+    assert len(backend.requests) == 32
+
+
+@pytest.mark.parametrize("section", ["workflows.helper", "llm"])
+async def test_helper_round_limit(tmp_path: Path, section: str) -> None:
+    configure(tmp_path, tmp_path, f"[components.{section}]\nmax_rounds = 1\n")
     backend = FakeProvider([call("list_files", {"path": "."})])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         with pytest.raises(ActivityError, match="round"):

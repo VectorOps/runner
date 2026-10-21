@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from itertools import count
 import asyncio
 import hashlib
 import json
@@ -426,7 +427,9 @@ class LLM:
         with self._mutation(), self._choice_scope(completion):
             resolved = await self._configure()
             limit = resolved.max_rounds if max_rounds is None else max_rounds
-            for index in range(limit):
+            for index in count():
+                if limit is not None and index >= limit:
+                    break
                 if index:
                     await self._configure()
                 await self._steer()
@@ -439,7 +442,7 @@ class LLM:
                     block for block in response.content if block.type == "tool_call"
                 ]
                 if not calls:
-                    if index + 1 < limit and await self._steer():
+                    if (limit is None or index + 1 < limit) and await self._steer():
                         continue
                     if completion is not None:
                         try:

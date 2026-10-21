@@ -327,11 +327,15 @@ not work inside an activity; resolve before entering its recorded callback.
 | `reasoning.summary` | None | `auto`, `concise`, `detailed` |
 | `reasoning.enabled` | None | Optional boolean |
 | `reasoning.max_tokens` | None | Optional provider reasoning token budget |
-| `max_rounds` | 100 | Positive integer; `run(max_rounds=...)` overrides it |
+| `max_rounds` | None (unlimited) | Optional positive integer; `run(max_rounds=...)` overrides it |
 | `compaction` | None | Optional compaction policy below |
 
 Unknown LLM and reasoning fields are rejected during resolution. No model,
 temperature, or reasoning capability is inferred from a model name.
+
+Omit `max_rounds` for unlimited rounds by default. The built-in helper also has no
+round cap of its own: it inherits the LLM configuration unless
+`components.workflows.helper.max_rounds` sets an explicit positive limit.
 
 ```toml
 [components.llm.compaction]
