@@ -336,6 +336,11 @@ class RunnerClient:
             await self.request("executions.get", {"execution_id": execution_id})
         )
 
+    async def delete_execution(self, execution_id: str) -> p.Deleted:
+        return p.Deleted.model_validate(
+            await self.request("executions.delete", {"execution_id": execution_id})
+        )
+
     async def stop(self, execution_id: str) -> p.Active:
         return p.Active.model_validate(
             await self.request("executions.stop", {"execution_id": execution_id})

@@ -190,6 +190,19 @@ class Store:
     async def uses(self, identifier: UUID) -> list[UUID]:
         return [usage.id for usage in await self.usages(identifier)]
 
+    async def execution_uses(self, execution_id: str) -> list[UUID]:
+        return await self.database.run(
+            lambda connection: [
+                UUID(row[0])
+                for row in sql.execute(
+                    connection,
+                    sql.Query.from_(USES)
+                    .select(USES.id)
+                    .where(USES.execution_id == execution_id),
+                )
+            ]
+        )
+
     async def usages(self, identifier: UUID) -> list[Usage]:
         return await self.database.run(
             lambda connection: [

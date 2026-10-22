@@ -2,7 +2,8 @@
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Union
 
 import pydantic
@@ -32,9 +33,10 @@ class SnapshotPublisher:
             OrderedDict()
         )
         self._closed = False
+        self._suppressed: set[str] = set()
 
     def changed(self, execution_id: str, workflow_ids: tuple[str, ...] = ()) -> None:
-        if self._closed:
+        if self._closed or execution_id in self._suppressed:
             return
         self._pending.setdefault(execution_id, set()).update(workflow_ids)
         if execution_id not in self._tasks:
@@ -102,3 +104,20 @@ class SnapshotPublisher:
         self._closed = True
         await asyncio.gather(*self._tasks.values())
         self._snapshots.clear()
+
+    @asynccontextmanager
+    async def suppress(self, execution_id: str) -> AsyncIterator[None]:
+        """Drain snapshot readers and drop cached state while history is being removed."""
+        self._suppressed.add(execution_id)
+        try:
+            self._pending.pop(execution_id, None)
+            task = self._tasks.get(execution_id)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            for key in tuple(self._snapshots):
+                if key[0] == execution_id:
+                    del self._snapshots[key]
+            yield
+        finally:
+            self._suppressed.discard(execution_id)

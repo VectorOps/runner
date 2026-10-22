@@ -81,6 +81,7 @@ class WorkflowRunner:
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
         self._suspending: set[str] = set()
         self._stop_requests: set[str] = set()
+        self._deleting: set[str] = set()
         self.last_execution_id: typing.Optional[str] = None
         self._executions: set[asyncio.Task[pydantic.JsonValue]] = set()
         self._execution_tasks: dict[str, asyncio.Task[pydantic.JsonValue]] = {}
@@ -200,6 +201,8 @@ class WorkflowRunner:
     ) -> AsyncIterator[RunnerStateStore]:
         async with self._writer(project) as store:
             async with store.reserve(execution_id):
+                if execution_id in self._deleting:
+                    raise ValueError("execution deletion is in progress")
                 task = asyncio.current_task()
                 assert task is not None
                 self._execution_tasks[execution_id] = task
@@ -298,6 +301,8 @@ class WorkflowRunner:
         ).dispatch(method, params)
 
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
+        if answer.execution_id in self._deleting:
+            raise mailbox.MailboxConflict("execution deletion is in progress")
         owner = self._mailboxes.get(answer.execution_id)
         if owner is not None:
             request = await owner.answer(answer)
@@ -315,7 +320,9 @@ class WorkflowRunner:
     async def _schedule_naming(self, execution_id: str, workflow_id: str) -> None:
         project = await self.project()
         database = await self._database(project, execution_id)
-        (await self._workflow_naming()).schedule(database, workflow_id)
+        naming = await self._workflow_naming()
+        if execution_id not in self._deleting:
+            naming.schedule(database, workflow_id, execution_id=execution_id)
 
     async def _workflow_naming(self) -> WorkflowNaming:
         if self._naming is None:
@@ -1099,20 +1106,67 @@ class WorkflowRunner:
             on_started=on_started,
         )
 
-    async def remove_execution(self, execution_id: str) -> None:
+    async def remove_execution(self, execution_id: str) -> bool:
+        """Drain paused work and hard-delete its history and workspace-owned records."""
+        return await finish_cleanup(
+            asyncio.create_task(self._remove_execution(execution_id))
+        )
+
+    async def _remove_execution(self, execution_id: str) -> bool:
+        state.RunnerState(last_execution_id=execution_id)
+        if execution_id in self._deleting:
+            raise ValueError("execution deletion is in progress")
+        self._deleting.add(execution_id)
+        try:
+            return await self._delete_execution(execution_id)
+        finally:
+            self._deleting.discard(execution_id)
+
+    async def _delete_execution(self, execution_id: str) -> bool:
+        """Hold writer ownership through removal; retries also clean missing histories."""
         project = await self.project()
         await self.initialize_usage()
-        async with RunnerStateStore(project.data_path, project.database) as store:
+        directory = project.data_path / "executions" / execution_id
+        if await asyncio.to_thread(directory.resolve) != directory:
+            raise ValueError("execution storage must not contain symlinks")
+        database: typing.Optional[SQLiteHistory]
+        task = self._execution_tasks.get(execution_id)
+        if task is not None:
             database = await self._database(project, execution_id)
-            record = await database.get_execution()
-            if record.status in ("running", "paused"):
-                raise ValueError("active execution history cannot be removed")
-            async with project.usage.lock:
-                revision, total = await database.usage_snapshot()
-                await project.usage.record(execution_id, revision, total)
-            pointer = await store.load()
-            if pointer.last_execution_id == execution_id:
-                await store.save(pointer.model_copy(update={"last_execution_id": None}))
-            await store.deactivate(execution_id)
-            await asyncio.to_thread(shutil.rmtree, database.path.parent)
-            await project.summaries.remove([execution_id])
+            if (await database.get_execution()).status == "running":
+                raise ValueError("active execution is running; stop it before deletion")
+            await self.stop_execution(
+                execution_id, require_paused=True, allow_terminal=True
+            )
+            await asyncio.gather(asyncio.shield(task), return_exceptions=True)
+        async with self._writer(project) as store:
+            async with store.reserve(execution_id):
+                try:
+                    database = await self._database(project, execution_id)
+                except FileNotFoundError:
+                    database = None
+                if database is not None:
+                    record = await database.get_execution()
+                    if record.status == "running":
+                        raise ValueError(
+                            "active execution is running; stop it before deletion"
+                        )
+                    if record.status == "paused":
+                        await database.stop_execution(require_paused=True)
+                    async with project.usage.lock:
+                        revision, total = await database.usage_snapshot()
+                        await project.usage.record(execution_id, revision, total)
+                if self._naming is not None:
+                    await self._naming.cancel_execution(execution_id)
+                await project.worktrees.release_execution(execution_id)
+                existed = await asyncio.to_thread(directory.exists)
+                if existed:
+                    await asyncio.to_thread(shutil.rmtree, directory)
+                await project.summaries.remove([execution_id])
+                async with project.usage.lock:
+                    await project.usage.remove(execution_id)
+                await project.database.remove_execution_receipts(execution_id)
+                await store.forget(execution_id)
+                if self.last_execution_id == execution_id:
+                    self.last_execution_id = None
+                return existed

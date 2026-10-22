@@ -248,6 +248,23 @@ class Manager:
         finally:
             await asyncio.to_thread(lease.release)
 
+    async def release_execution(self, execution_id: str) -> None:
+        """Remove abandoned leases only after execution cleanup has released live locks."""
+        tokens = await self.store.execution_uses(execution_id)
+        if not tokens:
+            return
+        await self._prepare()
+        for token in tokens:
+            if await self._live(token):
+                raise m.WorktreeError(
+                    "execution still owns a live worktree lease; wait for process cleanup"
+                )
+        for token in tokens:
+            await self.store.release(token)
+            await asyncio.to_thread(
+                (self.directory / ".locks" / f"use-{token}").unlink, missing_ok=True
+            )
+
     async def _delete(
         self,
         request: m.Delete,

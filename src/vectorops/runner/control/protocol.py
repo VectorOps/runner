@@ -188,6 +188,10 @@ class Accepted(Model):
     status: typing.Literal["starting"] = "starting"
 
 
+class Deleted(Execution):
+    deleted: bool
+
+
 class Active(Model):
     execution_id: str
     status: typing.Literal["starting", "running", "paused", "stopping"] = "starting"

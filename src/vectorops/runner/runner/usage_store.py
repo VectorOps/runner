@@ -93,6 +93,21 @@ class UsageStore:
 
         await self.database.run(write)
 
+    async def remove(self, execution_id: str) -> None:
+        """Forget a drained execution's snapshot without resetting historical totals."""
+
+        def write(connection: sqlite3.Connection) -> None:
+            with connection:
+                self._initialize(connection)
+                sql.execute(
+                    connection,
+                    sql.Query.from_(EXECUTIONS)
+                    .delete()
+                    .where(EXECUTIONS.execution_id == execution_id),
+                )
+
+        await self.database.run(write)
+
     async def read(self, *, reset: bool = False) -> usage.RunnerUsage:
         def write(connection: sqlite3.Connection) -> usage.RunnerUsage:
             with connection:

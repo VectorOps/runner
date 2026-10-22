@@ -87,13 +87,20 @@ def parser() -> Parser:
             action_parser.add_argument("profile_name")
     for family, actions in (
         ("workflow", ("list", "show")),
-        ("execution", ("list", "show", "start", "stop", "resume", "watch")),
+        ("execution", ("list", "show", "start", "stop", "resume", "delete", "watch")),
         ("input", ("list", "show", "send")),
     ):
         group = families.add_parser(family)
         commands = group.add_subparsers(dest="action")
         for action in actions:
-            command = commands.add_parser(action)
+            command = commands.add_parser(
+                action,
+                help=(
+                    "permanently delete a non-running execution, including paused work"
+                    if action == "delete"
+                    else None
+                ),
+            )
             command.add_argument(
                 "--json", action="store_true", default=argparse.SUPPRESS
             )
@@ -329,6 +336,19 @@ async def execute(connection: client.RunnerClient, args: Arguments) -> None:
                 active,
                 args,
                 [f"Stop requested: {active.execution_id} ({active.status})."],
+            )
+        elif action == "delete":
+            deleted = await connection.delete_execution(args.execution_id)
+            _emit(
+                deleted,
+                args,
+                [
+                    (
+                        f"Permanently deleted execution '{deleted.execution_id}'."
+                        if deleted.deleted
+                        else f"Execution '{deleted.execution_id}' is already missing; workspace records cleaned."
+                    )
+                ],
             )
         elif action == "watch":
             subscription = await connection.subscribe(

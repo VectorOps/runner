@@ -220,7 +220,8 @@ class RunnerService:
             isinstance(execution_id, str)
             and isinstance(kind, str)
             and kind.startswith("execution.")
-            and kind not in ("execution.updated", "execution.state_updated")
+            and kind
+            not in ("execution.updated", "execution.state_updated", "execution.deleted")
         ):
             self._changed(execution_id, ())
 
@@ -395,6 +396,32 @@ class RunnerService:
                     self._switch_branch(operation, previous)
                 )
             return operation.accepted()
+
+    async def _delete_execution(self, execution_id: str) -> p.Deleted:
+        """Serialize deletion with launches, branch switches, and mailbox answers."""
+        async with self._lock:
+            if self.shutdown_requested.is_set():
+                raise p.RemoteError("runner_stopping", "runner is shutting down")
+            active = self._active.get(execution_id)
+            if execution_id in self._branches or (
+                active is not None and active.status in ("starting", "stopping")
+            ):
+                raise p.RemoteError(
+                    "execution_conflict", "execution is active; stop it before deletion"
+                )
+            task = self._tasks.get(execution_id)
+            assert self._updates is not None
+            try:
+                async with self._updates.suppress(execution_id):
+                    deleted = await self.runner.remove_execution(execution_id)
+                    if task is not None:
+                        await finish_cleanup(task)
+            except (ValueError, worktree_models.WorktreeError) as exc:
+                self._changed(execution_id, ())
+                raise p.RemoteError("execution_conflict", str(exc)) from exc
+            result = p.Deleted(execution_id=execution_id, deleted=deleted)
+            self._emit({"kind": "execution.deleted", **result.model_dump(mode="json")})
+            return result
 
     async def _switch_branch(
         self,
@@ -768,6 +795,13 @@ class RunnerService:
             return p.json_value(await self._launch(p.Resume.model_validate(params)))
         if method == "executions.branch":
             return p.json_value(await self._branch(p.Branch.model_validate(params)))
+        if method == "executions.delete":
+            selected = p.Execution.model_validate(params)
+            return p.json_value(
+                await finish_cleanup(
+                    asyncio.create_task(self._delete_execution(selected.execution_id))
+                )
+            )
         if method == "executions.stop":
             selected = p.Execution.model_validate(params)
             async with self._lock:

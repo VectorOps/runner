@@ -32,15 +32,27 @@ class WorkflowNaming:
     def __init__(self, llm: RunnerLLM) -> None:
         self.llm = llm
         self._lock = asyncio.Lock()
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: dict[asyncio.Task[None], Optional[str]] = {}
         self._closed = False
 
-    def schedule(self, store: NamingStore, workflow_id: str) -> None:
+    def schedule(
+        self,
+        store: NamingStore,
+        workflow_id: str,
+        *,
+        execution_id: Optional[str] = None,
+    ) -> None:
         if self._closed:
             return
         task = asyncio.create_task(self.ensure_name(store, workflow_id))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._tasks[task] = execution_id
+        task.add_done_callback(lambda completed: self._tasks.pop(completed, None))
+
+    async def cancel_execution(self, execution_id: str) -> None:
+        tasks = [task for task, owner in self._tasks.items() if owner == execution_id]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self) -> None:
         self._closed = True

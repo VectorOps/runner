@@ -81,6 +81,23 @@ class RunnerStateStore:
             )
         )
 
+    async def forget(self, execution_id: str) -> None:
+        async with self.coordination:
+            await self._update(
+                lambda current: state.RunnerState(
+                    last_execution_id=(
+                        None
+                        if current.last_execution_id == execution_id
+                        else current.last_execution_id
+                    ),
+                    active_execution_ids=[
+                        identifier
+                        for identifier in current.active_execution_ids
+                        if identifier != execution_id
+                    ],
+                )
+            )
+
     async def save(self, manifest: state.RunnerState) -> None:
         if self._descriptor is None:
             raise RuntimeError("project writer ownership is required")

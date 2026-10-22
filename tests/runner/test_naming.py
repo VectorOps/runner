@@ -267,7 +267,10 @@ async def test_resume_does_not_wait_for_name_and_name_survives_execution_exit(
         await runner.aclose()
 
 
-async def test_service_shutdown_cancels_background_naming(workspace: Path) -> None:
+@pytest.mark.parametrize("delete", [False, True])
+async def test_shutdown_and_deletion_cancel_background_naming(
+    workspace: Path, delete: bool
+) -> None:
     (workspace / "workflows/chat.py").write_text(
         "from vectorops.runner.api import llm\n"
         "async def main(ctx):\n"
@@ -294,6 +297,19 @@ async def test_service_shutdown_cancels_background_naming(workspace: Path) -> No
             await asyncio.wait_for(reply(connection, request, "Hello"), 1)
             await asyncio.wait_for(started.wait(), 1)
             await pending(connection, accepted.execution_id)
+            if delete:
+                async with asyncio.timeout(5):
+                    while (
+                        await connection.execution(accepted.execution_id)
+                    ).status != "paused":
+                        await asyncio.sleep(0.01)
+                assert (
+                    await connection.delete_execution(accepted.execution_id)
+                ).deleted
+                assert cancelled.is_set()
+                assert not (
+                    workspace / "data/executions" / accepted.execution_id
+                ).exists()
         assert cancelled.is_set()
 
 

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vectorops.runner import models
+from vectorops.runner import models, usage
 from vectorops.runner.runner.execution_state import ExecutionRecord
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -89,6 +89,29 @@ async def test_removal_updates_projection_without_invalidating_index(
         await runner.remove_execution("execution")
         assert await runner.execution_ids() == []
     assert await WorkflowRunner(tmp_path).execution_ids() == []
+
+
+async def test_removal_failure_is_retryable_and_preserves_usage_totals(
+    tmp_path: Path,
+) -> None:
+    runner = WorkflowRunner(tmp_path)
+    project = await runner.project()
+    history = await seed(project.data_path, "execution", 1)
+    await runner.initialize_usage()
+    totals = usage.Totals(input_tokens=10, output_tokens=5, calls=1)
+    await project.usage.record("execution", 100, totals)
+    with patch(
+        "vectorops.runner.runner.workflow.shutil.rmtree",
+        side_effect=PermissionError("denied"),
+    ):
+        with pytest.raises(PermissionError):
+            await runner.remove_execution("execution")
+    assert history.path.exists()
+    assert await runner.execution_ids() == ["execution"]
+    assert await runner.remove_execution("execution")
+    assert (await runner.runner_usage()).totals == totals
+    assert (await WorkflowRunner(tmp_path).runner_usage()).totals == totals
+    assert not await runner.remove_execution("execution")
 
 
 async def test_recovery_bypasses_fresh_index(tmp_path: Path) -> None:

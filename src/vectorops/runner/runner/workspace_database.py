@@ -253,6 +253,21 @@ class WorkspaceDatabase:
 
         return await self.run(read)
 
+    async def remove_execution_receipts(self, execution_id: str) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            with connection:
+                sql.execute(
+                    connection,
+                    sql.Query.from_(REQUESTS)
+                    .delete()
+                    .where(
+                        sql.json_extract(REQUESTS.result, "$.execution_id")
+                        == execution_id
+                    ),
+                )
+
+        await self.run(write)
+
     async def invalidate_index(self) -> None:
         def write(connection: sqlite3.Connection) -> None:
             with connection:
