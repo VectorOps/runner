@@ -69,7 +69,12 @@ def plan(
     get_step: Callable[[str], models.WorkflowStep],
     get_input: Callable[[str], mailbox.StoredInputRequest],
 ) -> Plan:
-    """Select a closed root prefix, retaining only reachable completed children."""
+    """Select an exclusive root prefix and retain reachable child histories.
+
+    A next_completed restart reruns selection over terminal candidates, retaining
+    the recorded winner's exact completion and unselected candidates' terminal
+    checkpoint heads. Unfinished candidates require restarting at their spawn.
+    """
     request = operation.request
     if request.execution_id != execution.id:
         raise BranchConflict("execution identity mismatch")
@@ -135,6 +140,49 @@ def plan(
             for spawn_id in unjoined:
                 child_id = spawns[spawn_id]
                 retain(child_id, execution.checkpoint.heads.get(child_id), resume=True)
+            unjoined = set()
+        if (
+            unjoined
+            and join_target is not None
+            and join_target.operation.kind == "workflow.next_completed"
+        ):
+            selection = typing.cast(
+                models.WorkflowNextCompletedOperation, join_target.operation
+            )
+            if not set(selection.spawn_step_ids).issubset(spawns):
+                raise BranchConflict("selection references a spawn outside the prefix")
+            if not unjoined.issubset(selection.spawn_step_ids):
+                raise BranchConflict("restart at the outstanding child's spawn")
+            recorded = (
+                {
+                    item.spawn_step_id: item.completion_step_id
+                    for item in join_target.outcome.child_completions
+                }
+                if join_target.outcome.kind == "joined"
+                else {}
+            )
+            for spawn_id in selection.spawn_step_ids:
+                if spawn_id not in unjoined:
+                    continue
+                child_id = spawns[spawn_id]
+                completion_id = recorded.get(
+                    spawn_id
+                ) or execution.checkpoint.heads.get(child_id)
+                if completion_id is None:
+                    raise BranchConflict("restart the unfinished child at its spawn")
+                completion = get_step(completion_id)
+                if (
+                    completion.workflow_id != child_id
+                    or completion.operation.kind != "workflow.complete"
+                    or completion.outcome.kind
+                    not in ("completed", "failed", "cancelled")
+                ):
+                    raise BranchConflict("restart the unfinished child at its spawn")
+                retain(
+                    child_id,
+                    completion_id,
+                    resume=completion.outcome.kind in ("failed", "cancelled"),
+                )
             unjoined = set()
         if unjoined:
             if join_target is None or join_target.operation.kind != "workflow.join":
