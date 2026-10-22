@@ -7,6 +7,8 @@ import typing
 import pydantic
 from jsonschema import Draft202012Validator
 
+from vectorops.runner import presentation as presentation_models
+
 
 class WorkflowDescriptor(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
@@ -17,6 +19,9 @@ class WorkflowDescriptor(pydantic.BaseModel):
     kind: str = "workflow"
     version: int = pydantic.Field(default=1, ge=1)
     input_schema: dict[str, pydantic.JsonValue]
+    presentation: presentation_models.WorkflowPresentation = pydantic.Field(
+        default_factory=presentation_models.WorkflowPresentation
+    )
 
     def preflight_input(self, arguments: dict[str, pydantic.JsonValue]) -> None:
         """Check the published schema, not Python validators or input normalization."""

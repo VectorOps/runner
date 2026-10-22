@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 import inspect
 from pathlib import Path
@@ -13,7 +13,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import models
+from vectorops.runner import models, presentation as presentation_models
 from vectorops.runner.api import definitions
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.context import (
@@ -382,6 +382,9 @@ class WorkflowDefinition(typing.Generic[P, T]):
     version: int = 1
     description: typing.Optional[str] = None
     hidden: bool = False
+    presentation: presentation_models.WorkflowPresentation = field(
+        default_factory=presentation_models.WorkflowPresentation
+    )
 
     def describe(self, reference: str) -> definitions.WorkflowDescriptor:
         return definitions.WorkflowDescriptor(
@@ -391,6 +394,7 @@ class WorkflowDefinition(typing.Generic[P, T]):
             kind=self.kind,
             version=self.version,
             input_schema=definitions.input_model(self.func).model_json_schema(),
+            presentation=self.presentation.model_copy(deep=True),
         )
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
@@ -431,6 +435,7 @@ def workflow(
     namespace: typing.Optional[str] = None,
     version: int = 1,
     hidden: bool = False,
+    presentation: typing.Optional[presentation_models.WorkflowPresentation] = None,
 ) -> Callable[
     [Callable[typing.Concatenate[WorkflowExecutionContext, P], Awaitable[T]]],
     WorkflowDefinition[P, T],
@@ -475,6 +480,11 @@ def workflow(
             contract.version,
             description,
             hidden,
+            (
+                presentation.model_copy(deep=True)
+                if presentation is not None
+                else presentation_models.WorkflowPresentation()
+            ),
         )
 
     return decorate

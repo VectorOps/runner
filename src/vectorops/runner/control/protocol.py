@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pydantic
 
+from vectorops.runner import presentation as presentation_models
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.environment.target import ProjectPath
 from vectorops.runner.api.definitions import WorkflowDescriptor
@@ -107,6 +108,9 @@ class Start(Model):
     idempotency_key: str = pydantic.Field(min_length=1, max_length=256)
     base_project_path: typing.Optional[ProjectPath] = None
     worktree_id: typing.Optional[UUID] = None
+    presentation: typing.Optional[presentation_models.WorkflowPresentationOverride] = (
+        None
+    )
 
     @pydantic.model_validator(mode="after")
     def target_selection(self) -> typing.Self:

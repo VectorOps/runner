@@ -283,6 +283,7 @@ class RunnerService:
                     input=start.input,
                     base_project_path=start.base_project_path,
                     worktree_id=start.worktree_id,
+                    presentation=start.presentation,
                     new_execution_id=accepted.execution_id,
                     on_started=started,
                 )

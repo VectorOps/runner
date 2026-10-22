@@ -282,6 +282,13 @@ class SpawnHandler:
                 version=1 if request.version is None else request.version,
             )
             child = await self.runtime.prepare_workflow(child, request.worktree_id)
+            child = child.model_copy(
+                update={
+                    "presentation": child.presentation.with_overrides(
+                        request.presentation
+                    )
+                }
+            )
             await self.runtime.history.save_workflow(child)
             step = await self.runtime.append(
                 models.WorkflowSpawnOperation(

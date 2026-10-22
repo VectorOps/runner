@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pydantic
 
-from vectorops.runner import models
+from vectorops.runner import models, presentation as presentation_models
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.errors import ActivityError
@@ -62,6 +62,9 @@ class SpawnRequest:
     version: typing.Optional[int] = None
     description: typing.Optional[str] = None
     worktree_id: typing.Optional[UUID] = None
+    presentation: typing.Optional[presentation_models.WorkflowPresentationOverride] = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,9 @@ class WorkflowExecutionContext:
         version: typing.Optional[int] = None,
         description: typing.Optional[str] = None,
         worktree_id: typing.Optional[UUID] = None,
+        presentation: typing.Optional[
+            presentation_models.WorkflowPresentationOverride
+        ] = None,
     ) -> ChildWorkflowHandle:
         response = await self.submitter.submit(
             SpawnRequest(
@@ -159,6 +165,7 @@ class WorkflowExecutionContext:
                 version,
                 description,
                 worktree_id,
+                presentation,
             )
         )
         if response.kind != "spawn":

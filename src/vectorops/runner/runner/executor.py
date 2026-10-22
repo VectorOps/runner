@@ -84,6 +84,7 @@ class WorkflowExecutor:
                 **configuration.model_dump(),
                 "kind": entry.kind,
                 "version": entry.version,
+                "presentation": entry.presentation.model_copy(deep=True),
             }
         )
 

@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 import pydantic
 
-from vectorops.runner import models, usage
+from vectorops.runner import models, usage, presentation as presentation_models
 from vectorops.runner import diagnostics
 from vectorops.runner import tool_authorization, tool_authorization_store, tool_policy
 from vectorops.runner import tool_rule_api
@@ -123,6 +123,9 @@ class WorkflowRunner:
         on_started: typing.Optional[Callable[[], None]] = None,
         base_project_path: typing.Optional[str] = None,
         worktree_id: typing.Optional[UUID] = None,
+        presentation: typing.Optional[
+            presentation_models.WorkflowPresentationOverride
+        ] = None,
     ) -> pydantic.JsonValue:
         """Replay through a selected step, then append new execution history."""
         task = asyncio.create_task(
@@ -137,6 +140,7 @@ class WorkflowRunner:
                 on_started=on_started,
                 base_project_path=base_project_path,
                 worktree_id=worktree_id,
+                presentation=presentation,
             )
         )
         self._executions.add(task)
@@ -509,6 +513,7 @@ class WorkflowRunner:
         on_started: typing.Optional[Callable[[], None]],
         base_project_path: typing.Optional[str],
         worktree_id: typing.Optional[UUID],
+        presentation: typing.Optional[presentation_models.WorkflowPresentationOverride],
     ) -> pydantic.JsonValue:
         project = await self.project()
         environment_config = project.config.environment
@@ -566,6 +571,13 @@ class WorkflowRunner:
                             / "history.sqlite3"
                         ),
                     ).configure(configuration)
+                    configuration = configuration.model_copy(
+                        update={
+                            "presentation": configuration.presentation.with_overrides(
+                                presentation
+                            )
+                        }
+                    )
                 else:
                     database = await self._database(project, execution_id)
                     branch = await database.apply_branch()
@@ -807,6 +819,7 @@ class WorkflowRunner:
             workflow_id=workflow_id,
             continue_from_step_id=continue_from_step_id,
             child_heads=child_heads,
+            presentation=presentation,
         )
 
     async def _run(
@@ -824,6 +837,9 @@ class WorkflowRunner:
         execution_id: typing.Optional[str] = None,
         mailbox_owner: typing.Optional[mailbox.Mailbox] = None,
         tool_grants: typing.Optional[tool_authorization_store.WorkflowGrants] = None,
+        presentation: typing.Optional[
+            presentation_models.WorkflowPresentationOverride
+        ] = None,
     ) -> pydantic.JsonValue:
         if continue_from_step_id is not None:
             if not continue_from_step_id:
@@ -865,6 +881,7 @@ class WorkflowRunner:
                 reporter=reporter,
                 execution_id=execution_id,
                 mailbox_owner=mailbox_owner,
+                presentation=presentation,
             )
 
     async def _run_configured(
@@ -879,6 +896,7 @@ class WorkflowRunner:
         reporter: typing.Optional[ExecutionCheckpointer],
         execution_id: typing.Optional[str],
         mailbox_owner: typing.Optional[mailbox.Mailbox],
+        presentation: typing.Optional[presentation_models.WorkflowPresentationOverride],
     ) -> pydantic.JsonValue:
         async with ExecutionResources() as resources:
             mcp = MCPRuntime(self.authentication, execution_id, pool=self.mcp_pool)
@@ -921,6 +939,13 @@ class WorkflowRunner:
             )
             if continue_from_step_id is None and execution_id is None:
                 configuration = await executor.configure(configuration)
+                configuration = configuration.model_copy(
+                    update={
+                        "presentation": configuration.presentation.with_overrides(
+                            presentation
+                        )
+                    }
+                )
             completion = await executor.execute(
                 configuration,
                 continue_from_step_id=continue_from_step_id,

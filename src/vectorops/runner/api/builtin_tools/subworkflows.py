@@ -9,6 +9,7 @@ import connect
 import pydantic
 from jsonschema.exceptions import ValidationError
 
+from vectorops.runner import presentation as presentation_models
 from vectorops.runner.api import composition as c, definitions
 from vectorops.runner.api.tool_registry import ToolConfig, register_tool
 from vectorops.runner.api import tool_contracts as tools
@@ -23,6 +24,9 @@ class SubworkflowArguments(pydantic.BaseModel):
     reference: str
     input: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
     worktree_id: typing.Optional[UUID] = None
+    presentation: typing.Optional[presentation_models.WorkflowPresentationOverride] = (
+        None
+    )
     description: typing.Optional[str] = pydantic.Field(
         default=None, description="Brief description of this workflow task for the UI."
     )
@@ -98,6 +102,7 @@ class SubworkflowTool(tools.WorkflowToolBinding):
             version=descriptor.version,
             description=parsed.description,
             worktree_id=parsed.worktree_id,
+            presentation=parsed.presentation,
         )
         outcomes = await context.join_workflows([handle], failure_policy="collect")
         outcome = outcomes[0]

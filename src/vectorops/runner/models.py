@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pydantic
 
+from vectorops.runner import presentation as presentation_models
 from vectorops.runner import usage as usage_models
 from vectorops.runner.environment.target import LocalExecutionTarget
 
@@ -42,12 +43,15 @@ class Workflow(_JsonModel):
     )
     usage: typing.Optional[usage_models.WorkflowUsage] = None
     target: typing.Optional[LocalExecutionTarget] = None
+    presentation: presentation_models.WorkflowPresentation = pydantic.Field(
+        default_factory=presentation_models.WorkflowPresentation
+    )
 
     def same_configuration(self, other: Workflow) -> bool:
         """Compare execution configuration without mutable presentation metadata."""
-        return self.model_dump(exclude={"name", "usage"}) == other.model_dump(
-            exclude={"name", "usage"}
-        )
+        return self.model_dump(
+            exclude={"name", "usage", "presentation"}
+        ) == other.model_dump(exclude={"name", "usage", "presentation"})
 
 
 class StepOperation(_JsonModel):
