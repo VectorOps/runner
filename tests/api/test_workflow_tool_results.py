@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 import connect
 import pydantic
@@ -287,9 +288,16 @@ async def test_tool_result_protocol_parity(
     assert lifecycle[-1].kind == (
         "step.failed" if strict and mode == "exception" else "step.completed"
     )
-    assert all(
-        event.step.operation.kind != "llm.tool.authorization" for event in events
-    )
+    gates = [
+        step
+        for step in history.path(first.id)
+        if step.operation.kind == "llm.tool.authorization"
+    ]
+    assert len(gates) == int(workflow_tool)
+    if gates:
+        assert isinstance(gates[0].operation, models.StepOperation)
+        assert gates[0].operation.input == {"invocation_id": step.id}
+        assert gates[0].authorized is None
     before = dict(history.steps)
     second = await replay.run(
         history, workflow, first.id, tool_policy_version=1, workspace=tmp_path
@@ -422,6 +430,69 @@ async def test_legacy_workflow_gate_replays_without_new_steps(
         )
     ) == first
     assert history.steps == before
+
+
+@pytest.mark.parametrize("mode", ["success", "exception", "invalid"])
+async def test_legacy_outer_workflow_tool_replays_without_gate(
+    history: MemoryHistory, tmp_path: Path, mode: str
+) -> None:
+    (tmp_path / "config.toml").write_text(
+        "[components.tools.approval]\napprove_all = true\n"
+    )
+    binding = WorkflowTool()
+    request = connect.ToolCallBlock(
+        id="call", name="test", arguments={"mode": 42 if mode == "invalid" else mode}
+    )
+
+    async def invoke(
+        ctx: ActivityExecutionContext, step: models.WorkflowStep
+    ) -> pydantic.JsonValue:
+        denial = await tool_execution._authorize_call(
+            ctx, binding, request, None, False
+        )
+        result = (
+            denial
+            if denial is not None
+            else await tool_execution._execute_binding(binding, ctx, request, False)
+        )
+        return result.model_dump(mode="json")
+
+    async def legacy() -> pydantic.JsonValue:
+        return await c.run_recorded_invocation(
+            models.StepOperation(
+                kind="llm.tool",
+                name="invoke_tool",
+                version=3,
+                input={"tool_name": "test"},
+            ),
+            invoke,
+        )
+
+    first = await replay.run(history, legacy, tool_policy_version=1, workspace=tmp_path)
+    assert first.outcome.kind == "completed"
+    before = dict(history.steps)
+    assert not any(
+        step.operation.kind == "llm.tool.authorization" for step in before.values()
+    )
+
+    async def current() -> pydantic.JsonValue:
+        return (await tool_execution.invoke_tool(binding, request)).model_dump(
+            mode="json"
+        )
+
+    with patch.object(
+        tool_execution,
+        "_authorize_call",
+        side_effect=AssertionError("authorization during legacy replay"),
+    ):
+        assert (
+            await replay.run(
+                history, current, first.id, tool_policy_version=1, workspace=tmp_path
+            )
+            == first
+        )
+    assert history.steps == before
+    assert binding.rebuilt == (0 if mode == "invalid" else 2)
 
 
 async def test_workflow_tool_cancellation_has_no_final_result(

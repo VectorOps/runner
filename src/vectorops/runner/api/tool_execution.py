@@ -34,6 +34,8 @@ ToolApprovalResponse = tool_contracts.ToolApprovalResponse
 ToolExecutionError = tool_contracts.ToolExecutionError
 ToolResponse = tool_contracts.ToolResponse
 
+_WORKFLOW_TOOL_FORMAT: typing.Final = "authorization.activity.v1"
+
 
 def _result(
     request: connect.ToolCallBlock, response: ToolResponse
@@ -85,7 +87,8 @@ async def invoke_tool(
     Approval responses carry a decision, scope, and optional property mask.
     Workflow and workspace scopes create rules; call scope affects only this call.
     The helper runs in workflow context; validation, the runtime policy gate,
-    and implementation run in one activity for new workflows. Legacy histories
+    and implementation run in one activity for activity tools. Workflow tools
+    record authorization separately inside their invocation. Legacy histories
     retain binding-local approval. Tool exceptions return their unchanged text by default. Cancellation,
     replay mismatches, storage failures, and approval transport errors propagate.
     """
@@ -297,6 +300,27 @@ async def _execute_binding(
         return _failure(request, exc)
 
 
+@c.activity_wrapper(name="authorize_tool", kind="llm.tool.authorization")
+async def _workflow_authorization(
+    call: c.ActivityCall,
+    outer: ActivityExecutionContext,
+    binding: WorkflowToolBinding,
+    request: connect.ToolCallBlock,
+    instance: typing.Optional[str],
+    raise_errors: bool,
+) -> typing.Optional[connect.ToolResultMessage]:
+    """Record gate delivery while retaining the outer invocation's identity."""
+
+    async def invoke(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        denial = await _authorize_call(outer, binding, request, instance, raise_errors)
+        return denial.model_dump(mode="json") if denial is not None else None
+
+    result = await call.run(input={"invocation_id": outer.step_id}, invoke=invoke)
+    return (
+        connect.ToolResultMessage.model_validate(result) if result is not None else None
+    )
+
+
 async def _workflow_tool(
     binding: WorkflowToolBinding,
     request: connect.ToolCallBlock,
@@ -304,10 +328,19 @@ async def _workflow_tool(
     raise_errors: bool,
 ) -> connect.ToolResultMessage:
     """Record one tool invocation while replaying its workflow implementation."""
-    context = c.workflow_context()
     definition = binding.definition
     digest = _digest(definition.model_dump(mode="json"))
     legacy = False
+
+    def has_recorded_gate(step: models.WorkflowStep) -> bool:
+        if not isinstance(step.operation, models.StepOperation):
+            return False
+        format = step.operation.input.get("workflow_tool_format")
+        if format is None:
+            return False
+        if format != _WORKFLOW_TOOL_FORMAT:
+            raise runtime_errors.ReplayMismatchError("unknown workflow tool format")
+        return True
 
     def replay_when(step: models.WorkflowStep) -> bool:
         nonlocal legacy
@@ -315,13 +348,45 @@ async def _workflow_tool(
             isinstance(step.operation, models.StepOperation)
             and step.operation.input.get("gate_only") is True
         )
-        return not legacy and (
-            step.outcome.kind == "pending" or step.authorized is True
+        return (
+            has_recorded_gate(step)
+            or not legacy
+            and (step.outcome.kind == "pending" or step.authorized is True)
         )
 
     async def invoke(
         ctx: ActivityExecutionContext, step: models.WorkflowStep
     ) -> pydantic.JsonValue:
+        if has_recorded_gate(step):
+            try:
+                denial = await _workflow_authorization(
+                    ctx, binding, request, instance, raise_errors
+                )
+                result = (
+                    denial
+                    if denial is not None
+                    else await _execute_binding(binding, ctx, request, raise_errors)
+                )
+                if step.outcome.kind == "pending":
+                    return result.model_dump(mode="json")
+            except (
+                AuthenticationError,
+                CredentialStorageError,
+                global_config.ConfigurationError,
+                runtime_errors.AuthorizationPersistenceError,
+                runtime_errors.ReplayMismatchError,
+            ):
+                raise
+            except Exception:
+                if step.outcome.kind != "failed":
+                    raise
+            if step.outcome.kind == "failed":
+                raise runtime_errors.ActivityError(step.outcome.error)
+            if step.outcome.kind != "completed":
+                raise runtime_errors.ReplayMismatchError(
+                    "invalid recorded tool outcome"
+                )
+            return step.outcome.result
         if (
             isinstance(step.operation, models.StepOperation)
             and step.operation.input.get("gate_only") is True
@@ -373,6 +438,7 @@ async def _workflow_tool(
                 "call_digest": _digest(request.model_dump(mode="json")),
                 "tool_digest": digest,
                 "tool_version": binding.version,
+                "workflow_tool_format": _WORKFLOW_TOOL_FORMAT,
                 **({"raise_errors": True} if raise_errors else {}),
             },
         ),
