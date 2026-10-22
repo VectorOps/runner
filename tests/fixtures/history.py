@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Optional
 
 from vectorops.runner import models
@@ -41,6 +41,25 @@ class MemoryHistory:
         if step_id not in self.steps:
             raise KeyError(step_id)
         return list(self.steps).index(step_id) + 1
+
+    async def first_completion(
+        self, workflow_ids: Sequence[str]
+    ) -> Optional[models.WorkflowStep]:
+        selected = {
+            self.heads[identifier]
+            for identifier in workflow_ids
+            if identifier in self.heads
+        }
+        return next(
+            (
+                step
+                for step in self.steps.values()
+                if step.id in selected
+                and step.operation.kind == "workflow.complete"
+                and step.outcome.kind in ("completed", "failed", "cancelled")
+            ),
+            None,
+        )
 
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         if self.fail_update:

@@ -981,6 +981,37 @@ class SQLiteHistory:
         position: int = row[0]
         return position
 
+    async def first_completion(
+        self, workflow_ids: Sequence[str]
+    ) -> typing.Optional[models.WorkflowStep]:
+        def read(
+            connection: sqlite3.Connection,
+        ) -> typing.Optional[models.WorkflowStep]:
+            row = sql.execute(
+                connection,
+                sql.Query.from_(STEPS)
+                .join(HEADS)
+                .on(STEPS.id == HEADS.step_id)
+                .select(STEPS.payload)
+                .where(HEADS.workflow_id.isin(sql.json_values(list(workflow_ids))))
+                .where(
+                    sql.json_extract(STEPS.payload, "$.operation.kind")
+                    == "workflow.complete"
+                )
+                .where(
+                    sql.json_extract(STEPS.payload, "$.outcome.kind").isin(
+                        ["completed", "failed", "cancelled"]
+                    )
+                )
+                .orderby(STEPS.rowid)
+                .limit(1),
+            ).fetchone()
+            return (
+                None if row is None else models.WorkflowStep.model_validate_json(row[0])
+            )
+
+        return await self._run(read)
+
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         def record(connection: sqlite3.Connection) -> models.WorkflowStep:
             with connection:

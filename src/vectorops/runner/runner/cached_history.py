@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 import math
 import typing
@@ -109,6 +109,13 @@ class CachedHistory:
             if len(self._positions) > self.cache_size:
                 self._positions.popitem(last=False)
             return position
+
+    async def first_completion(
+        self, workflow_ids: Sequence[str]
+    ) -> typing.Optional[models.WorkflowStep]:
+        async with self._lock:
+            self._check()
+            return await self.backend.first_completion(workflow_ids)
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         async with self._lock:

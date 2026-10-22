@@ -15,6 +15,7 @@ _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
     "workflow.spawn",
     "workflow.join",
     "workflow.cancel",
+    "workflow.next_completed",
     "workflow.complete",
     "workflow.resume",
 )
@@ -129,6 +130,12 @@ class WorkflowCancelOperation(_ChildSelection):
         return self
 
 
+class WorkflowNextCompletedOperation(_ChildSelection):
+    """Select one candidate by committed child completion order."""
+
+    kind: typing.Literal["workflow.next_completed"] = "workflow.next_completed"
+
+
 class WorkflowCompleteOperation(_JsonModel):
     """Record the workflow's final result or error, even without prior activities."""
 
@@ -159,6 +166,9 @@ WorkflowOperation: typing.TypeAlias = typing.Annotated[
         typing.Annotated[WorkflowSpawnOperation, pydantic.Tag("workflow.spawn")],
         typing.Annotated[WorkflowJoinOperation, pydantic.Tag("workflow.join")],
         typing.Annotated[WorkflowCancelOperation, pydantic.Tag("workflow.cancel")],
+        typing.Annotated[
+            WorkflowNextCompletedOperation, pydantic.Tag("workflow.next_completed")
+        ],
         typing.Annotated[WorkflowCompleteOperation, pydantic.Tag("workflow.complete")],
         typing.Annotated[WorkflowResumeOperation, pydantic.Tag("workflow.resume")],
     ],
@@ -379,6 +389,7 @@ class WorkflowStep(_JsonModel):
         if self.outcome.kind == "waiting" and self.operation.kind not in (
             "workflow.join",
             "workflow.cancel",
+            "workflow.next_completed",
         ):
             raise ValueError("waiting state requires a workflow join operation")
         if (
@@ -394,9 +405,17 @@ class WorkflowStep(_JsonModel):
             spawn = typing.cast(WorkflowSpawnOperation, self.operation)
             if spawn.child_workflow_id == self.workflow_id:
                 raise ValueError("a child invocation must have a distinct workflow ID")
-        if self.operation.kind in ("workflow.join", "workflow.cancel"):
+        if self.operation.kind in (
+            "workflow.join",
+            "workflow.cancel",
+            "workflow.next_completed",
+        ):
             selection = typing.cast(
-                typing.Union[WorkflowJoinOperation, WorkflowCancelOperation],
+                typing.Union[
+                    WorkflowJoinOperation,
+                    WorkflowCancelOperation,
+                    WorkflowNextCompletedOperation,
+                ],
                 self.operation,
             )
             if self.id in selection.spawn_step_ids:
@@ -405,7 +424,15 @@ class WorkflowStep(_JsonModel):
                 spawn_ids = [
                     item.spawn_step_id for item in self.outcome.child_completions
                 ]
-                if spawn_ids != selection.spawn_step_ids:
+                if selection.kind == "workflow.next_completed":
+                    if (
+                        len(spawn_ids) != 1
+                        or spawn_ids[0] not in selection.spawn_step_ids
+                    ):
+                        raise ValueError(
+                            "next_completed requires exactly one candidate completion"
+                        )
+                elif spawn_ids != selection.spawn_step_ids:
                     raise ValueError(
                         "joined completions must match spawn steps in order"
                     )

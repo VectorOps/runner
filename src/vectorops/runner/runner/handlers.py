@@ -353,6 +353,19 @@ class _ChildCompletionHandler:
                 self.runtime.prepare_cancellation(child, operation)
         return response
 
+    async def completion_outcome(
+        self, reference: models.ChildWorkflowCompletion
+    ) -> models.ChildOutcome:
+        child = await self.child_for_spawn(reference.spawn_step_id)
+        completion = await self.runtime.history.get_step(reference.completion_step_id)
+        if completion.workflow_id != child.id:
+            raise ReplayMismatchError("join references another child's completion")
+        if completion.operation.kind != "workflow.complete":
+            raise ReplayMismatchError("expected a workflow completion")
+        if completion.outcome.kind not in ("completed", "failed", "cancelled"):
+            raise ReplayMismatchError("join references an invalid child completion")
+        return completion.outcome
+
     async def _resolve(
         self,
         operation: typing.Union[
@@ -397,17 +410,7 @@ class _ChildCompletionHandler:
             raise ReplayMismatchError("join has an invalid outcome")
         outcomes: list[models.ChildOutcome] = []
         for reference in step.outcome.child_completions:
-            child = await self.child_for_spawn(reference.spawn_step_id)
-            completion = await self.runtime.history.get_step(
-                reference.completion_step_id
-            )
-            if completion.workflow_id != child.id:
-                raise ReplayMismatchError("join references another child's completion")
-            if completion.operation.kind != "workflow.complete":
-                raise ReplayMismatchError("expected a workflow completion")
-            if completion.outcome.kind not in ("completed", "failed", "cancelled"):
-                raise ReplayMismatchError("join references an invalid child completion")
-            outcomes.append(completion.outcome)
+            outcomes.append(await self.completion_outcome(reference))
         if (
             operation.kind == "workflow.join"
             and operation.failure_policy == "propagate"
@@ -421,6 +424,82 @@ class _ChildCompletionHandler:
 class JoinHandler(_ChildCompletionHandler):
     async def execute(self, request: context.JoinRequest) -> DeferredResponse:
         return await self.prepare(request.operation)
+
+
+class NextCompletedHandler(_ChildCompletionHandler):
+    async def execute(self, request: context.NextCompletedRequest) -> DeferredResponse:
+        for handle in request.handles:
+            child = await self.child_for_spawn(handle.spawn_step_id)
+            if (
+                handle.parent_workflow_id != self.runtime.workflow.id
+                or handle.workflow_id != child.id
+            ):
+                raise ValueError("child handle identity differs from its spawn")
+        return await prepare_response(
+            self.runtime,
+            request.operation,
+            models.StepWaiting(),
+            partial(self._next, request),
+        )
+
+    async def _next(
+        self, request: context.NextCompletedRequest, step: models.WorkflowStep
+    ) -> context.NextCompletedResponse:
+        """Use committed order, never task callback order, and retain the exact selection."""
+        handles = {handle.workflow_id: handle for handle in request.handles}
+        if step.outcome.kind == "waiting":
+            tasks = {
+                identifier: self.runtime.start_child(
+                    await self.runtime.history.get_workflow(identifier)
+                )
+                for identifier in handles
+            }
+            while True:
+                completion = await self.runtime.history.first_completion(tuple(handles))
+                if completion is not None:
+                    settled = await asyncio.shield(tasks[completion.workflow_id])
+                    if settled.id != completion.id:
+                        raise ReplayMismatchError(
+                            "child terminal head changed during selection"
+                        )
+                    reference = models.ChildWorkflowCompletion(
+                        spawn_step_id=handles[completion.workflow_id].spawn_step_id,
+                        completion_step_id=completion.id,
+                    )
+                    step = step.model_copy(
+                        update={
+                            "outcome": models.StepJoined(child_completions=[reference])
+                        }
+                    )
+                    await self.runtime.update(step)
+                    break
+                for task in tasks.values():
+                    if task.done():
+                        task.result()
+                pending = [task for task in tasks.values() if not task.done()]
+                if not pending:
+                    if (
+                        await self.runtime.history.first_completion(tuple(handles))
+                        is not None
+                    ):
+                        continue
+                    raise ReplayMismatchError(
+                        "child finished without a committed terminal head"
+                    )
+                await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        if step.outcome.kind != "joined":
+            raise ReplayMismatchError("next_completed has an invalid outcome")
+        reference = step.outcome.child_completions[0]
+        handle = next(
+            handle
+            for handle in request.handles
+            if handle.spawn_step_id == reference.spawn_step_id
+        )
+        return context.NextCompletedResponse(
+            context.ChildCompletion(
+                handle=handle, outcome=await self.completion_outcome(reference)
+            )
+        )
 
 
 class CancelHandler(_ChildCompletionHandler):

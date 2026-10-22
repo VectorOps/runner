@@ -162,3 +162,34 @@ async def test_handle_is_accepted_by_asyncio_helpers(tmp_path: Path) -> None:
     assert await asyncio.gather(handle) == [outcome]
     assert await asyncio.ensure_future(handle) == outcome
     assert [await item for item in asyncio.as_completed([handle])] == [outcome]
+
+
+@pytest.mark.parametrize(
+    "handles",
+    [
+        [],
+        [context.ChildWorkflowHandle("parent", "child", "spawn")] * 2,
+        [context.ChildWorkflowHandle("other", "child", "spawn")],
+    ],
+)
+async def test_next_completed_rejects_invalid_candidates(
+    tmp_path: Path, handles: list[context.ChildWorkflowHandle]
+) -> None:
+    submitter = StubSubmitter(context.JoinResponse([]))
+    ctx = context.WorkflowExecutionContext(
+        RunnerProject(tmp_path, RunnerConfig()),
+        models.Workflow(id="parent", definition_ref="file:workflow"),
+        submitter,
+    )
+    with pytest.raises(ValueError):
+        await ctx.next_completed(handles)
+    assert submitter.requests == []
+
+
+async def test_next_completed_response(tmp_path: Path) -> None:
+    handle = context.ChildWorkflowHandle("parent", "child", "spawn")
+    completion = context.ChildCompletion(handle, models.StepCancelled(reason="stale"))
+    ctx = make_context(tmp_path, context.NextCompletedResponse(completion))
+    assert await ctx.next_completed([handle]) is completion
+    with pytest.raises(RuntimeError, match="invalid next_completed"):
+        await make_context(tmp_path, context.JoinResponse([])).next_completed([handle])

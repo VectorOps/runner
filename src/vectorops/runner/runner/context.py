@@ -81,6 +81,13 @@ class CancelRequest:
 
 
 @dataclass(frozen=True)
+class NextCompletedRequest:
+    kind: typing.ClassVar[typing.Literal["next_completed"]] = "next_completed"
+    operation: models.WorkflowNextCompletedOperation
+    handles: tuple[ChildWorkflowHandle, ...]
+
+
+@dataclass(frozen=True)
 class InvokeChildRequest:
     kind: typing.ClassVar[typing.Literal["invoke_child"]] = "invoke_child"
     spawn: SpawnRequest
@@ -111,6 +118,7 @@ OperationRequest: typing.TypeAlias = typing.Union[
     SpawnRequest,
     JoinRequest,
     CancelRequest,
+    NextCompletedRequest,
     InvokeChildRequest,
 ]
 
@@ -134,8 +142,22 @@ class JoinResponse:
     error: typing.Optional[models.StepError] = None
 
 
+@dataclass(frozen=True)
+class ChildCompletion:
+    """One observed child, retaining the caller's awaitable handle."""
+
+    handle: ChildWorkflowHandle
+    outcome: models.ChildOutcome
+
+
+@dataclass(frozen=True)
+class NextCompletedResponse:
+    kind: typing.ClassVar[typing.Literal["next_completed"]] = "next_completed"
+    completion: ChildCompletion
+
+
 OperationResponse: typing.TypeAlias = typing.Union[
-    ActivityResponse, SpawnResponse, JoinResponse
+    ActivityResponse, SpawnResponse, JoinResponse, NextCompletedResponse
 ]
 
 
@@ -243,6 +265,27 @@ class WorkflowExecutionContext:
         if response.error is not None:
             raise ActivityError(response.error)
         return response.outcomes
+
+    async def next_completed(
+        self, handles: list[ChildWorkflowHandle]
+    ) -> ChildCompletion:
+        """Record the earliest committed completion; waiting never cancels children.
+
+        Remove the returned handle before calling again to consume another child.
+        Failures and cancellations are returned as outcomes, not raised.
+        """
+        candidates = tuple(handles)
+        if any(handle.parent_workflow_id != self.workflow.id for handle in candidates):
+            raise ValueError("child handles must belong to this workflow")
+        operation = models.WorkflowNextCompletedOperation(
+            spawn_step_ids=[handle.spawn_step_id for handle in candidates]
+        )
+        response = await self.submitter.submit(
+            NextCompletedRequest(operation, candidates)
+        )
+        if response.kind != "next_completed":
+            raise RuntimeError("executor returned an invalid next_completed response")
+        return response.completion
 
     async def cancel_workflows(
         self,

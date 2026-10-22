@@ -1,7 +1,7 @@
 """Storage-independent access to workflow configuration and replay paths."""
 
 from collections.abc import AsyncGenerator, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 from vectorops.runner import models
 
@@ -21,6 +21,12 @@ class WorkflowHistory(Protocol):
     async def get_workflow(self, workflow_id: str) -> models.Workflow: ...
 
     async def get_step(self, step_id: str) -> models.WorkflowStep: ...
+
+    async def first_completion(
+        self, workflow_ids: Sequence[str]
+    ) -> Optional[models.WorkflowStep]:
+        """Read the earliest committed terminal head among the selected workflows."""
+        ...
 
     async def get_step_position(self, step_id: str) -> int:
         """Return the stable insertion position shared by snapshots of this step."""

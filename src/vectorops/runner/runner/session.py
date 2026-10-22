@@ -61,7 +61,7 @@ class _Invocation:
         if (
             response.cancelled()
             and self.task is not None
-            and self.request.kind not in ("join", "cancel")
+            and self.request.kind not in ("join", "cancel", "next_completed")
         ):
             self.task.cancel()
 
@@ -160,6 +160,9 @@ class ExecutionSession:
         self.handlers.register(context.SpawnRequest, handlers.SpawnHandler(self))
         self.handlers.register(context.JoinRequest, handlers.JoinHandler(self))
         self.handlers.register(context.CancelRequest, handlers.CancelHandler(self))
+        self.handlers.register(
+            context.NextCompletedRequest, handlers.NextCompletedHandler(self)
+        )
 
     async def submit(
         self, request: context.OperationRequest
@@ -187,7 +190,7 @@ class ExecutionSession:
         self.queue.put_nowait(pending)
         if self.pause is not None:
             await self.pause.running()
-        if request.kind in ("join", "cancel"):
+        if request.kind in ("join", "cancel", "next_completed"):
             return await asyncio.shield(pending.response)
         return await pending.response
 
@@ -310,7 +313,7 @@ class ExecutionSession:
             elif invocation.parent_step_id in self.pause.requests:
                 assert invocation.parent_step_id is not None
                 requests.add(invocation.parent_step_id)
-            elif invocation.request.kind == "join":
+            elif invocation.request.kind in ("join", "next_completed"):
                 if not self._children or any(
                     child.task is not None
                     and not child.task.done()

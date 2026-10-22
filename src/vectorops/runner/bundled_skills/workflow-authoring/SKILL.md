@@ -55,6 +55,7 @@ Discovery imports trusted Python code and derives an input schema; it is not a s
 | `composition.activity_wrapper(...)` | Advanced adapter: its body runs on replay. Injected `ActivityCall.run(input=..., invoke=...)` or `.stream(...)` records at most one operation. Keep all effects inside `invoke`. |
 | `ctx.spawn_workflow(reference, input=...)`, `ctx.join_workflows(handles)` | Explicit composition when references are dynamic. Join handles belong to the creating parent; `failure_policy="collect"` returns failed outcomes instead of propagating them. |
 | `await handle` | Observe one handle returned by `ctx.spawn_workflow`. Returns a completed, failed, or cancelled `ChildOutcome`; cancelling the waiter does not cancel the child. |
+| `ctx.next_completed(handles)` | Record and return one `ChildCompletion` with `handle` and `outcome`, ordered by committed child completion position. Other children keep running. |
 | `ctx.cancel_workflows(handles, reason=None)` | Persist cancellation intent for owned children and await subtree cleanup. Returns completed, failed, or cancelled outcomes in handle order. Cancelling a raw join waiter does not cancel its children. |
 | `api.configuration.get_config(ctx, name, default, model=...)` | Record a component configuration lookup and optionally validate/normalize with its owner model. Do not read live configuration in orchestration or use this API for secrets. |
 | `api.llm.LLM` | Conversation with recorded generations and tool execution. Use `add_user_message`, `run`, or `run_with_choice`; call in workflow context, not inside an ordinary activity. |
@@ -117,7 +118,7 @@ async def main(ctx: WorkflowExecutionContext, questions: list[str]) -> list[str]
 
 Here `worker` is decorated; removing its decorator would put all conversations in the parent's history. Recorded result-delivery order alone does not guarantee that concurrent ordinary coroutines submit their next operations in the same order on replay.
 
-Consume child results in invocation order. Do not use an ordinary shared queue, `asyncio.as_completed`, or a first-completed race to decide subsequent recorded operations. Decisions based on completion order require a durable runner coordination API; an asyncio primitive alone does not record that decision. Do not share mutable orchestration state between workers; pass JSON-compatible inputs and return results.
+Consume child results in invocation order, or use `ctx.next_completed(handles)` for a recorded completion-order decision. Do not use an ordinary shared queue, `asyncio.as_completed`, or an unrecorded first-completed race to decide subsequent recorded operations. Do not share mutable orchestration state between workers; pass JSON-compatible inputs and return results.
 
 Moving existing inline workers into child workflows changes the recorded operation structure. Version-gate the new path for new executions and preserve the old path for existing histories; this change does not repair an already failing replay.
 
@@ -135,6 +136,23 @@ if outcome.kind == "completed":
 This delegates to a recorded single-child join with `failure_policy="collect"`. Child failures and cancellation are returned as outcomes, unlike decorated calls that return the result or raise. Each direct await records a join; it is not a cached future. Use `ctx.join_workflows` for explicit batch joins or failure propagation. Manually reconstructed handles are unbound and require an explicit context join.
 
 Handles are accepted by `asyncio.gather`, `asyncio.as_completed`, and `asyncio.ensure_future`. `asyncio.create_task` and `TaskGroup.create_task` require coroutine objects, not general awaitables; use decorated child calls with those APIs. Awaitable handles do not add a durable first-completed selection operation or change the completion-order restrictions above. Cancelling a handle waiter only stops observation; use `ctx.cancel_workflows` to cancel children.
+
+### Process the next completed child
+
+Use `ctx.next_completed` for a pool that processes available results and replenishes workers without waiting for the oldest invocation:
+
+```python
+while outstanding:
+    completion = await ctx.next_completed(outstanding)
+    outstanding.remove(completion.handle)
+    outcome = completion.outcome
+    if outcome.kind == "completed":
+        result = outcome.result
+```
+
+The method selects the earliest committed terminal completion among the supplied children, waits for that child's managed task cleanup, and persists its spawn/completion-step reference before returning. FIFO means history insertion order, not timestamps or callback order; recovery reconstructs the same order without a separate queue journal. Replay returns the recorded selection without restarting terminal children or repeating completed effects.
+
+Failed and cancelled children are returned as outcomes. Empty selections, duplicate spawn IDs, foreign parents, and handles inconsistent with their recorded spawn are rejected. Remove the returned handle yourself; repeated calls retaining it can return the same child. Multiple observers may select the same child. Cancelling the waiter does not cancel children or revoke an already accepted selection operation. Inputs and returned business results must remain JSON-compatible; the completion's live handle is orchestration-only.
 
 ### Cancel stale workers
 
