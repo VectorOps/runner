@@ -8,6 +8,7 @@ import pytest
 
 from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
+from tests.control.test_paused import status
 from tests.fixtures import sources
 from tests.fixtures.user_input import reply
 from vectorops.runner.api import chat_input, llm
@@ -130,6 +131,7 @@ async def test_host_management_and_live_steering(tmp_path: Path) -> None:
                         payload=payload("wrong"),
                     )
                 )
+            await status(host, identifier, "paused")
 
         async with client.embedded(tmp_path) as host:
             await host.resume(
@@ -251,6 +253,7 @@ async def test_legacy_agent_history_retains_original_activity_order(
                 assert (
                     await host.list_mailboxes(accepted.execution_id)
                 ).mailboxes == ()
+                await status(host, accepted.execution_id, "paused")
 
         async with client.embedded(tmp_path) as host:
             await host.resume(
