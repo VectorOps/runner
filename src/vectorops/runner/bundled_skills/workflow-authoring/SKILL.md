@@ -87,6 +87,38 @@ Only offer bindings the task needs. Await async factories; pass bindings, not ra
 
 For constrained routing, `run_with_choice(choices={"ready": "Ready", "blocked": "Needs input"})` returns validated `answer` and `choice`. It uses the existing conversation/history, not a new child workflow.
 
+## Use child workflows for parallel workers
+
+Each independently progressing parallel worker must be a module-level `@composition.workflow` entry point. Each child then owns its history and replay cursor. Ordinary async helpers, including helpers that create LLM conversations, stay in their caller's history; scheduling them as tasks does not create child workflows.
+
+Use `asyncio.gather` or `TaskGroup` to await decorated child workflow calls, or use `ctx.spawn_workflow` and `ctx.join_workflows` for explicit child handles. Start children in a deterministic input order. Do not fan out ordinary helper coroutines, activity calls, or LLM loops as parallel workers within one workflow. Keep each worker's orchestration sequential; use further child workflows for nested parallel workers. Activity implementations can use concurrent I/O internally because completed replay skips their implementation.
+
+```python
+import asyncio
+
+from vectorops.runner.api import composition, llm
+from vectorops.runner.runner.context import WorkflowExecutionContext
+
+
+@composition.workflow(kind="example.parallel.worker", version=1)
+async def worker(ctx: WorkflowExecutionContext, question: str) -> str:
+    conversation = llm.LLM("research")
+    conversation.add_user_message(question)
+    response = await conversation.run(max_rounds=10)
+    return "\n".join(block.text for block in response.content if block.type == "text")
+
+
+@composition.workflow(kind="example.parallel", version=1)
+async def main(ctx: WorkflowExecutionContext, questions: list[str]) -> list[str]:
+    return await asyncio.gather(*(worker(question) for question in questions))
+```
+
+Here `worker` is decorated; removing its decorator would put all conversations in the parent's history. Recorded result-delivery order alone does not guarantee that concurrent ordinary coroutines submit their next operations in the same order on replay.
+
+Consume child results in invocation order. Do not use an ordinary shared queue, `asyncio.as_completed`, or a first-completed race to decide subsequent recorded operations. Decisions based on completion order require a durable runner coordination API; an asyncio primitive alone does not record that decision. Do not share mutable orchestration state between workers; pass JSON-compatible inputs and return results.
+
+Moving existing inline workers into child workflows changes the recorded operation structure. Version-gate the new path for new executions and preserve the old path for existing histories; this change does not repair an already failing replay.
+
 ## Preserve deterministic replay
 
 Replay means reconstructing orchestration from recorded outcomes, not obtaining the same answer from a fresh model or network call.
@@ -95,7 +127,7 @@ Replay means reconstructing orchestration from recorded outcomes, not obtaining 
 - Keep filesystem/network/process access, environment-variable reads, randomness, UUID generation, and current time inside activities. Use async I/O or `asyncio.to_thread` for blocking operations inside activities.
 - Preserve the order and identity of recorded operations. Ordinary activity replay matches `kind`, `name`, and `input`; versions are informational. Operations whose kinds start with `llm.` ignore input during matching. This exception is not a guarantee that arbitrary prompt or code changes are safe.
 - Do not wrap an entire LLM/tool loop or child workflow orchestration in an ordinary activity. Activity implementations have no active workflow composition context.
-- `asyncio.gather`, `TaskGroup`, and tasks can coordinate engine-managed activity and child awaitables. Recorded resume operations preserve their result-delivery order. Raw timers, network events, and background tasks do not acquire durability merely by being awaited. Use the durable sleep API for waits.
+- Require child workflows for parallel workers as described above; a fixed task creation order does not make concurrent ordinary helpers replay-safe. Raw timers, network events, and background tasks do not acquire durability merely by being awaited. Use the durable sleep API for waits.
 - Await owned work before returning. Propagate cancellation; do not suppress replay or persistence failures or treat them as ordinary business failures. Recorded activity failures surface as `ActivityError` and can be handled deliberately.
 - Assume interrupted activities can run again with the same `ctx.step_id`. Use it as an external idempotency key, or implement reconciliation. The runner does not guarantee exactly-once external effects, and a fork can create new identities.
 - Treat history as persisted data: do not record secrets in activity arguments, results, progress, configuration snapshots, or diagnostic messages.
@@ -129,5 +161,5 @@ Here `legacy_transform` and `modern_transform` are separately defined activities
 2. Test a fresh execution and completed replay using the project's test setup. Assert the same result, no repeated completed side effects/provider calls, and no appended history for a completed replay.
 3. Interrupt an activity before terminal persistence, then resume. Assert stable step identity and idempotent effects. Test failures and cancellation.
 4. For an upgrade, run old code first, retain its persisted workspace, then load new code. Test old root and child histories, including incomplete executions. Also test that new executions follow the new `ctx.version` branch.
-5. Test concurrency, tool allowlists/approval, input requests, and offline replay when used. Replace external providers with fakes; do not require real credentials for unit tests.
+5. For parallel workers, verify that each worker has a distinct child workflow ID and history. Test different child completion orders and partial-child resume without repeating completed effects. Test tool allowlists/approval, input requests, and offline replay when used. Replace external providers with fakes; do not require real credentials for unit tests.
 6. Follow the project's test and formatting conventions.
