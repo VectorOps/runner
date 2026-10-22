@@ -78,17 +78,20 @@ async def explicit(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
 
 
 @c.workflow()
-async def observer(ctx: WorkflowExecutionContext) -> str:
+async def observer(ctx: WorkflowExecutionContext, await_handle: bool = False) -> str:
     handle = await ctx.spawn_workflow(
         "python:tests.fixtures.cancellation_workflows:child"
     )
-    waiter = asyncio.create_task(ctx.join_workflows([handle]))
+    waiter = asyncio.ensure_future(
+        handle if await_handle else ctx.join_workflows([handle])
+    )
     await ready()
     waiter.cancel()
     await asyncio.gather(waiter, return_exceptions=True)
     await unblock()
-    outcomes = await ctx.join_workflows([handle])
-    return outcomes[0].kind
+    if await_handle:
+        return (await handle).kind
+    return (await ctx.join_workflows([handle]))[0].kind
 
 
 @c.workflow()

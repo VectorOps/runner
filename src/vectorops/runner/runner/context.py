@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import typing
 from uuid import UUID
@@ -87,9 +88,21 @@ class InvokeChildRequest:
 
 @dataclass(frozen=True)
 class ChildWorkflowHandle:
+    """Child identity with a wait-only capability bound by its spawning context."""
+
     parent_workflow_id: str
     workflow_id: str
     spawn_step_id: str
+    _wait: typing.Optional[Callable[[], Awaitable[models.ChildOutcome]]] = field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
+
+    def __await__(self) -> Generator[object, None, models.ChildOutcome]:
+        if self._wait is None:
+            raise RuntimeError(
+                "awaiting a child handle requires a spawning context; use ctx.join_workflows for unbound handles"
+            )
+        return self._wait().__await__()
 
 
 OperationRequest: typing.TypeAlias = typing.Union[
@@ -184,7 +197,12 @@ class WorkflowExecutionContext:
         )
         if response.kind != "spawn":
             raise RuntimeError("executor returned an invalid spawn response")
-        return response.handle
+        handle = response.handle
+
+        async def wait() -> models.ChildOutcome:
+            return (await self.join_workflows([handle], failure_policy="collect"))[0]
+
+        return replace(handle, _wait=wait)
 
     async def run_streaming_activity(
         self,

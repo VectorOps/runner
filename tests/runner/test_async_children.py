@@ -148,3 +148,87 @@ async def test_many_child_calls_do_not_drop_requests(
     )
     assert history.appended == before
     assert sorted(execution_probe.calls) == list(range(20))
+
+
+@pytest.mark.parametrize(
+    "mode,cancel_remaining",
+    [
+        (mode, cancel)
+        for mode in ("decorated", "handles", "plain")
+        for cancel in (False, True)
+    ]
+    + [("awaitable", False)],
+)
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_as_completed_preserves_observed_order_on_replay(
+    workspace: Path,
+    history: MemoryHistory,
+    execution_probe: ExecutionProbe,
+    mode: str,
+    cancel_remaining: bool,
+    persistent: bool,
+) -> None:
+    reference = (
+        "composed:awaitable_handles"
+        if mode == "awaitable"
+        else "composed:completion_order"
+    )
+    arguments: dict[str, pydantic.JsonValue] = (
+        {}
+        if mode == "awaitable"
+        else {"mode": mode, "cancel_remaining": cancel_remaining}
+    )
+    execution_probe.gates = {1: asyncio.Event(), 2: asyncio.Event()}
+    runner = WorkflowRunner(workspace, None if persistent else history)
+    task = asyncio.create_task(
+        runner.run(
+            reference,
+            workflow_id="root",
+            input=arguments,
+        )
+    )
+    try:
+        assert {
+            await asyncio.wait_for(execution_probe.started.get(), 5),
+            await asyncio.wait_for(execution_probe.started.get(), 5),
+        } == {1, 2}
+        execution_probe.gates[2].set()
+        assert await asyncio.wait_for(execution_probe.finished.get(), 5) == 2
+        assert await asyncio.wait_for(execution_probe.finished.get(), 5) == 14
+        if not cancel_remaining:
+            execution_probe.gates[1].set()
+        expected = [28] if cancel_remaining else [28, 24]
+        assert await asyncio.wait_for(task, 5) == expected
+        assert execution_probe.active == 0
+        calls = list(execution_probe.calls)
+        if persistent:
+            identifier = runner.last_execution_id
+            assert identifier is not None
+            database = SQLiteHistory(
+                workspace / "data/executions" / identifier / "history.sqlite3"
+            )
+            before = (await database.inspect_execution()).stats.steps
+            assert (
+                await asyncio.wait_for(WorkflowRunner(workspace).resume(identifier), 5)
+                == expected
+            )
+            assert (await database.inspect_execution()).stats.steps == before
+        else:
+            before_steps = list(history.appended)
+            assert (
+                await asyncio.wait_for(
+                    runner.run(
+                        reference,
+                        continue_from_step_id=history.heads["root"],
+                    ),
+                    5,
+                )
+                == expected
+            )
+            assert history.appended == before_steps
+        assert execution_probe.calls == calls
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await runner.aclose()

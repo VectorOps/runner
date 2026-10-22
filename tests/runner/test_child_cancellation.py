@@ -91,6 +91,32 @@ async def test_owned_cancellation_cascades(workspace: Path) -> None:
     assert flows.calls == ["grandchild"]
 
 
+async def test_cancel_awaitable_handle_waiter_leaves_child_running(
+    workspace: Path,
+) -> None:
+    runner = WorkflowRunner(workspace)
+    assert (
+        await asyncio.wait_for(
+            runner.run(
+                "python:tests.fixtures.cancellation_workflows:observer",
+                input={"await_handle": True},
+            ),
+            5,
+        )
+        == "completed"
+    )
+    assert flows.calls == ["child"]
+    assert flows.cleaned == ["child"]
+    assert await asyncio.wait_for(WorkflowRunner(workspace).resume(), 5) == "completed"
+    assert flows.calls == ["child"]
+    identifier = runner.last_execution_id
+    assert identifier is not None
+    page = await runner.query_history(
+        history_query.HistoryQuery(execution_id=identifier, include_children=True)
+    )
+    assert not any(item.step.operation.kind == "workflow.cancel" for item in page.items)
+
+
 @pytest.mark.parametrize("name", ["cancel_completed", "cancel_suppressed"])
 async def test_cancellation_preserves_success(workspace: Path, name: str) -> None:
     runner = WorkflowRunner(workspace)

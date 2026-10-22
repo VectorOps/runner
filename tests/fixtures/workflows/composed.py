@@ -5,7 +5,10 @@ from tests.fixtures import probe
 from tests.fixtures.library_workflows import child as library_child
 from vectorops.runner.api import composition as c
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.context import WorkflowExecutionContext
+from vectorops.runner.runner.context import (
+    ChildWorkflowHandle,
+    WorkflowExecutionContext,
+)
 from vectorops.runner.runner.errors import ActivityError
 
 
@@ -176,3 +179,71 @@ async def group_failure(ctx: WorkflowExecutionContext) -> None:
     async with asyncio.TaskGroup() as group:
         group.create_task(child(-1))
         group.create_task(child(2, block=True))
+
+
+async def plain_child(ctx: WorkflowExecutionContext, value: int) -> int:
+    return await calculate(value, block=True)
+
+
+async def awaitable_handles(ctx: WorkflowExecutionContext) -> list[int]:
+    handles = [
+        await ctx.spawn_workflow("composed:plain_child", input={"value": value})
+        for value in (1, 2)
+    ]
+    results = []
+    for completed in asyncio.as_completed(handles):
+        outcome = await completed
+        assert outcome.kind == "completed" and isinstance(outcome.result, int)
+        results.append(await calculate(outcome.result + 10))
+    return results
+
+
+async def completion_order(
+    ctx: WorkflowExecutionContext,
+    mode: str = "decorated",
+    cancel_remaining: bool = False,
+) -> list[int]:
+    handles: list[ChildWorkflowHandle] = []
+    if mode == "decorated":
+        tasks = [asyncio.create_task(child(value, block=True)) for value in (1, 2)]
+    else:
+        reference = "composed:plain_child" if mode == "plain" else "composed:child"
+        handles = [
+            await ctx.spawn_workflow(
+                reference,
+                input=(
+                    {"value": value}
+                    if mode == "plain"
+                    else {"value": value, "block": True}
+                ),
+            )
+            for value in (1, 2)
+        ]
+
+        async def observe(handle: ChildWorkflowHandle) -> int:
+            outcome = (await ctx.join_workflows([handle]))[0]
+            if outcome.kind == "failed":
+                raise ActivityError(outcome.error)
+            if outcome.kind == "cancelled":
+                raise asyncio.CancelledError
+            assert isinstance(outcome.result, int)
+            return outcome.result
+
+        tasks = [asyncio.create_task(observe(handle)) for handle in handles]
+    results = []
+    try:
+        for completed in asyncio.as_completed(tasks):
+            value = await completed
+            results.append(await calculate(value + 10))
+            if cancel_remaining:
+                if handles:
+                    await ctx.cancel_workflows(
+                        handles, reason="First result is sufficient"
+                    )
+                break
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return results

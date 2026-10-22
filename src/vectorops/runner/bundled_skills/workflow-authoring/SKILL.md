@@ -54,6 +54,7 @@ Discovery imports trusted Python code and derives an input schema; it is not a s
 | `composition.streamable_activity(...)` | Async generator yielding `composition.delta(state)` and `composition.final(result)`. Each delta replaces the full progress state, not a patch or append. Workflows await only the final result. |
 | `composition.activity_wrapper(...)` | Advanced adapter: its body runs on replay. Injected `ActivityCall.run(input=..., invoke=...)` or `.stream(...)` records at most one operation. Keep all effects inside `invoke`. |
 | `ctx.spawn_workflow(reference, input=...)`, `ctx.join_workflows(handles)` | Explicit composition when references are dynamic. Join handles belong to the creating parent; `failure_policy="collect"` returns failed outcomes instead of propagating them. |
+| `await handle` | Observe one handle returned by `ctx.spawn_workflow`. Returns a completed, failed, or cancelled `ChildOutcome`; cancelling the waiter does not cancel the child. |
 | `ctx.cancel_workflows(handles, reason=None)` | Persist cancellation intent for owned children and await subtree cleanup. Returns completed, failed, or cancelled outcomes in handle order. Cancelling a raw join waiter does not cancel its children. |
 | `api.configuration.get_config(ctx, name, default, model=...)` | Record a component configuration lookup and optionally validate/normalize with its owner model. Do not read live configuration in orchestration or use this API for secrets. |
 | `api.llm.LLM` | Conversation with recorded generations and tool execution. Use `add_user_message`, `run`, or `run_with_choice`; call in workflow context, not inside an ordinary activity. |
@@ -119,6 +120,21 @@ Here `worker` is decorated; removing its decorator would put all conversations i
 Consume child results in invocation order. Do not use an ordinary shared queue, `asyncio.as_completed`, or a first-completed race to decide subsequent recorded operations. Decisions based on completion order require a durable runner coordination API; an asyncio primitive alone does not record that decision. Do not share mutable orchestration state between workers; pass JSON-compatible inputs and return results.
 
 Moving existing inline workers into child workflows changes the recorded operation structure. Version-gate the new path for new executions and preserve the old path for existing histories; this change does not repair an already failing replay.
+
+### Await one spawned child
+
+Handles returned by `ctx.spawn_workflow` are awaitable within the spawning workflow's lifetime:
+
+```python
+handle = await ctx.spawn_workflow("analysis:run", input={"question": question})
+outcome = await handle
+if outcome.kind == "completed":
+    result = outcome.result
+```
+
+This delegates to a recorded single-child join with `failure_policy="collect"`. Child failures and cancellation are returned as outcomes, unlike decorated calls that return the result or raise. Each direct await records a join; it is not a cached future. Use `ctx.join_workflows` for explicit batch joins or failure propagation. Manually reconstructed handles are unbound and require an explicit context join.
+
+Handles are accepted by `asyncio.gather`, `asyncio.as_completed`, and `asyncio.ensure_future`. `asyncio.create_task` and `TaskGroup.create_task` require coroutine objects, not general awaitables; use decorated child calls with those APIs. Awaitable handles do not add a durable first-completed selection operation or change the completion-order restrictions above. Cancelling a handle waiter only stops observation; use `ctx.cancel_workflows` to cancel children.
 
 ### Cancel stale workers
 

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -65,9 +66,7 @@ async def test_spawn_response(tmp_path: Path) -> None:
 
 async def test_join_response_and_error(tmp_path: Path) -> None:
     handle = context.ChildWorkflowHandle("parent", "child", "spawn")
-    outcomes: list[models.StepCompleted | models.StepFailed] = [
-        models.StepCompleted(result=1)
-    ]
+    outcomes: list[models.ChildOutcome] = [models.StepCompleted(result=1)]
     ctx = make_context(tmp_path, context.JoinResponse(outcomes))
     assert await ctx.join_workflows([handle]) == outcomes
     ctx = make_context(
@@ -109,3 +108,57 @@ async def test_wrong_response_variant(tmp_path: Path, operation: str) -> None:
             await ctx.join_workflows(
                 [context.ChildWorkflowHandle("parent", "child", "spawn")]
             )
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        models.StepCompleted(result=7),
+        models.StepFailed(error=models.StepError(type="Error", message="failed")),
+        models.StepCancelled(reason="stale"),
+    ],
+)
+async def test_await_handle_collects_outcome(
+    tmp_path: Path, outcome: models.ChildOutcome
+) -> None:
+    identity = context.ChildWorkflowHandle("parent", "child", "spawn")
+    submitter = StubSubmitter(context.SpawnResponse(identity))
+    ctx = context.WorkflowExecutionContext(
+        RunnerProject(tmp_path, RunnerConfig()),
+        models.Workflow(id="parent", definition_ref="file:workflow"),
+        submitter,
+    )
+    handle = await ctx.spawn_workflow("file:child")
+    assert handle == identity
+    assert hash(handle) == hash(identity)
+    assert repr(handle) == repr(identity)
+    submitter.response = context.JoinResponse([outcome])
+    assert await handle == outcome
+    assert await handle == outcome
+    joins = submitter.requests[1:]
+    assert len(joins) == 2
+    for request in joins:
+        assert request.kind == "join"
+        assert request.operation.spawn_step_ids == ["spawn"]
+        assert request.operation.failure_policy == "collect"
+
+
+async def test_unbound_handle_cannot_be_awaited() -> None:
+    with pytest.raises(RuntimeError, match="spawning context"):
+        await context.ChildWorkflowHandle("parent", "child", "spawn")
+
+
+async def test_handle_is_accepted_by_asyncio_helpers(tmp_path: Path) -> None:
+    identity = context.ChildWorkflowHandle("parent", "child", "spawn")
+    submitter = StubSubmitter(context.SpawnResponse(identity))
+    ctx = context.WorkflowExecutionContext(
+        RunnerProject(tmp_path, RunnerConfig()),
+        models.Workflow(id="parent", definition_ref="file:workflow"),
+        submitter,
+    )
+    handle = await ctx.spawn_workflow("file:child")
+    outcome = models.StepCompleted(result=7)
+    submitter.response = context.JoinResponse([outcome])
+    assert await asyncio.gather(handle) == [outcome]
+    assert await asyncio.ensure_future(handle) == outcome
+    assert [await item for item in asyncio.as_completed([handle])] == [outcome]
