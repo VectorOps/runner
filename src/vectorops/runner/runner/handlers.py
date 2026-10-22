@@ -47,6 +47,14 @@ class HandlerRuntime(typing.Protocol):
         self, workflow: models.Workflow
     ) -> asyncio.Task[models.WorkflowStep]: ...
 
+    async def cancel_child(
+        self, workflow: models.Workflow, reason: typing.Optional[str]
+    ) -> models.WorkflowStep: ...
+
+    def prepare_cancellation(
+        self, workflow: models.Workflow, operation: models.WorkflowCancelOperation
+    ) -> None: ...
+
     def failure(self, exc: Exception) -> models.StepFailed: ...
 
     def activity_context(
@@ -305,19 +313,15 @@ class SpawnHandler:
 
 
 def require_spawn(step: models.WorkflowStep) -> models.WorkflowSpawnOperation:
-    """Validate a referenced spawn using its type owner's schema."""
-    try:
-        operation = models.WorkflowSpawnOperation.model_validate(
-            step.operation.model_dump(mode="json")
-        )
-    except pydantic.ValidationError as exc:
-        raise ReplayMismatchError("expected a workflow spawn operation") from exc
+    """Require a validated spawn record before reading child identity."""
+    if step.operation.kind != "workflow.spawn":
+        raise ReplayMismatchError("expected a workflow spawn operation")
     if step.outcome.kind != "completed":
         raise ReplayMismatchError("expected a successful workflow spawn")
-    return operation
+    return typing.cast(models.WorkflowSpawnOperation, step.operation)
 
 
-class JoinHandler:
+class _ChildCompletionHandler:
     def __init__(self, runtime: HandlerRuntime) -> None:
         self.runtime = runtime
 
@@ -328,25 +332,53 @@ class JoinHandler:
         operation = require_spawn(spawn)
         return await self.runtime.history.get_workflow(operation.child_workflow_id)
 
-    async def execute(self, request: context.JoinRequest) -> DeferredResponse:
-        return await prepare_response(
+    async def prepare(
+        self,
+        operation: typing.Union[
+            models.WorkflowJoinOperation, models.WorkflowCancelOperation
+        ],
+    ) -> DeferredResponse:
+        children = [
+            await self.child_for_spawn(spawn_id)
+            for spawn_id in operation.spawn_step_ids
+        ]
+        response = await prepare_response(
             self.runtime,
-            request.operation,
+            operation,
             models.StepWaiting(),
-            partial(self._resolve, request.operation),
+            partial(self._resolve, operation),
         )
+        if operation.kind == "workflow.cancel":
+            for child in children:
+                self.runtime.prepare_cancellation(child, operation)
+        return response
 
     async def _resolve(
-        self, operation: models.WorkflowJoinOperation, step: models.WorkflowStep
+        self,
+        operation: typing.Union[
+            models.WorkflowJoinOperation, models.WorkflowCancelOperation
+        ],
+        step: models.WorkflowStep,
     ) -> context.JoinResponse:
         if step.outcome.kind == "waiting":
             children = [
                 await self.child_for_spawn(spawn_id)
                 for spawn_id in operation.spawn_step_ids
             ]
-            completions = await asyncio.gather(
-                *(asyncio.shield(self.runtime.start_child(child)) for child in children)
-            )
+            if operation.kind == "workflow.cancel":
+                completions = await asyncio.gather(
+                    *(
+                        self.runtime.cancel_child(child, operation.reason)
+                        for child in children
+                    )
+                )
+            else:
+                completions = await asyncio.gather(
+                    *(
+                        asyncio.shield(self.runtime.start_child(child))
+                        for child in children
+                    )
+                )
             references = [
                 models.ChildWorkflowCompletion(
                     spawn_step_id=spawn_id, completion_step_id=completion.id
@@ -363,7 +395,7 @@ class JoinHandler:
             return context.JoinResponse([], error=step.outcome.error)
         if step.outcome.kind != "joined":
             raise ReplayMismatchError("join has an invalid outcome")
-        outcomes: list[models.StepCompleted | models.StepFailed] = []
+        outcomes: list[models.ChildOutcome] = []
         for reference in step.outcome.child_completions:
             child = await self.child_for_spawn(reference.spawn_step_id)
             completion = await self.runtime.history.get_step(
@@ -371,17 +403,26 @@ class JoinHandler:
             )
             if completion.workflow_id != child.id:
                 raise ReplayMismatchError("join references another child's completion")
-            try:
-                models.WorkflowCompleteOperation.model_validate(
-                    completion.operation.model_dump(mode="json")
-                )
-            except pydantic.ValidationError as exc:
-                raise ReplayMismatchError("expected a workflow completion") from exc
-            if completion.outcome.kind not in ("completed", "failed"):
+            if completion.operation.kind != "workflow.complete":
+                raise ReplayMismatchError("expected a workflow completion")
+            if completion.outcome.kind not in ("completed", "failed", "cancelled"):
                 raise ReplayMismatchError("join references an invalid child completion")
             outcomes.append(completion.outcome)
-        if operation.failure_policy == "propagate":
+        if (
+            operation.kind == "workflow.join"
+            and operation.failure_policy == "propagate"
+        ):
             for outcome in outcomes:
                 if outcome.kind == "failed":
                     return context.JoinResponse(outcomes, error=outcome.error)
         return context.JoinResponse(outcomes)
+
+
+class JoinHandler(_ChildCompletionHandler):
+    async def execute(self, request: context.JoinRequest) -> DeferredResponse:
+        return await self.prepare(request.operation)
+
+
+class CancelHandler(_ChildCompletionHandler):
+    async def execute(self, request: context.CancelRequest) -> DeferredResponse:
+        return await self.prepare(request.operation)

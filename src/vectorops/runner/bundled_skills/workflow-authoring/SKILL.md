@@ -54,6 +54,7 @@ Discovery imports trusted Python code and derives an input schema; it is not a s
 | `composition.streamable_activity(...)` | Async generator yielding `composition.delta(state)` and `composition.final(result)`. Each delta replaces the full progress state, not a patch or append. Workflows await only the final result. |
 | `composition.activity_wrapper(...)` | Advanced adapter: its body runs on replay. Injected `ActivityCall.run(input=..., invoke=...)` or `.stream(...)` records at most one operation. Keep all effects inside `invoke`. |
 | `ctx.spawn_workflow(reference, input=...)`, `ctx.join_workflows(handles)` | Explicit composition when references are dynamic. Join handles belong to the creating parent; `failure_policy="collect"` returns failed outcomes instead of propagating them. |
+| `ctx.cancel_workflows(handles, reason=None)` | Persist cancellation intent for owned children and await subtree cleanup. Returns completed, failed, or cancelled outcomes in handle order. Cancelling a raw join waiter does not cancel its children. |
 | `api.configuration.get_config(ctx, name, default, model=...)` | Record a component configuration lookup and optionally validate/normalize with its owner model. Do not read live configuration in orchestration or use this API for secrets. |
 | `api.llm.LLM` | Conversation with recorded generations and tool execution. Use `add_user_message`, `run`, or `run_with_choice`; call in workflow context, not inside an ordinary activity. |
 | `api.tools` | Explicit tool bindings: `Tool`, `ToolBinding`, `WorkflowToolBinding`, `ToolResponse`, `ToolExecutionError`, `invoke_tool`, `load_collection`, and tool factories. Importing the facade does not grant permissions. |
@@ -118,6 +119,16 @@ Here `worker` is decorated; removing its decorator would put all conversations i
 Consume child results in invocation order. Do not use an ordinary shared queue, `asyncio.as_completed`, or a first-completed race to decide subsequent recorded operations. Decisions based on completion order require a durable runner coordination API; an asyncio primitive alone does not record that decision. Do not share mutable orchestration state between workers; pass JSON-compatible inputs and return results.
 
 Moving existing inline workers into child workflows changes the recorded operation structure. Version-gate the new path for new executions and preserve the old path for existing histories; this change does not repair an already failing replay.
+
+### Cancel stale workers
+
+A task awaiting a decorated child owns that invocation. Calling `task.cancel()` requests durable cancellation of its child and descendants; awaiting the task settles cleanup before raising `asyncio.CancelledError`. `TaskGroup` awaits this cleanup when cancelling siblings after a failure. A child's already persisted completion is not overwritten, even when its owning invocation is cancelled.
+
+New workflow instances store `child_cancellation_version=1`. Existing instances without that marker retain their original wait-only decorated-call cancellation behavior, so upgrading Runner does not insert cancellation operations into old histories. The explicit cancellation API is available for new cancellation boundaries.
+
+For explicitly spawned children, use `await ctx.cancel_workflows(handles, reason="Analysis is stale")`. Cancelling a task awaiting `ctx.join_workflows(handles)` only stops that observer; other observers and the children continue. Repeated cancellation requests retain terminal outcomes. Cancellation is cooperative and does not roll back completed effects; a child that suppresses cancellation may complete normally or delay settlement. Runner shutdown suspension preserves resumable work instead of recording child cancellation.
+
+Await cancellation before editing state that workers can access. Keep external cleanup and idempotency in activity implementations or their registered resource cleanup. Replay consumes persisted cancellation and does not repeat completed child effects. Cancellation does not make unrecorded completion-order scheduling decisions deterministic.
 
 ## Preserve deterministic replay
 

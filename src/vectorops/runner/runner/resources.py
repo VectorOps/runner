@@ -6,6 +6,7 @@ from types import TracebackType
 from typing import Optional, Protocol, Self
 
 from vectorops.runner import diagnostics
+from vectorops.runner.runner import child_lifecycle
 
 
 class CleanupRegistry(Protocol):
@@ -35,6 +36,22 @@ class ExecutionResources:
     def register(self, name: str, cleanup: Callable[[], Awaitable[None]]) -> None:
         if self._closing is not None:
             raise RuntimeError("root execution resources are closing")
+        scope = child_lifecycle.current.get()
+        if scope is not None:
+            original = cleanup
+            pending: Optional[asyncio.Task[None]] = None
+
+            async def invoke() -> None:
+                await original()
+
+            async def once() -> None:
+                nonlocal pending
+                if pending is None:
+                    pending = asyncio.create_task(invoke())
+                await finish_cleanup(pending)
+
+            cleanup = once
+            scope.cleanups.append(cleanup)
         self._callbacks.append((name, cleanup))
 
     async def __aenter__(self) -> Self:

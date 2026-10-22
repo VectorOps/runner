@@ -74,6 +74,18 @@ class JoinRequest:
 
 
 @dataclass(frozen=True)
+class CancelRequest:
+    kind: typing.ClassVar[typing.Literal["cancel"]] = "cancel"
+    operation: models.WorkflowCancelOperation
+
+
+@dataclass(frozen=True)
+class InvokeChildRequest:
+    kind: typing.ClassVar[typing.Literal["invoke_child"]] = "invoke_child"
+    spawn: SpawnRequest
+
+
+@dataclass(frozen=True)
 class ChildWorkflowHandle:
     parent_workflow_id: str
     workflow_id: str
@@ -85,6 +97,8 @@ OperationRequest: typing.TypeAlias = typing.Union[
     StreamingActivityRequest,
     SpawnRequest,
     JoinRequest,
+    CancelRequest,
+    InvokeChildRequest,
 ]
 
 
@@ -103,7 +117,7 @@ class SpawnResponse:
 @dataclass(frozen=True)
 class JoinResponse:
     kind: typing.ClassVar[typing.Literal["join"]] = "join"
-    outcomes: list[models.StepCompleted | models.StepFailed]
+    outcomes: list[models.ChildOutcome]
     error: typing.Optional[models.StepError] = None
 
 
@@ -195,7 +209,7 @@ class WorkflowExecutionContext:
         handles: list[ChildWorkflowHandle],
         *,
         failure_policy: typing.Literal["propagate", "collect"] = "propagate",
-    ) -> list[models.StepCompleted | models.StepFailed]:
+    ) -> list[models.ChildOutcome]:
         if any(handle.parent_workflow_id != self.workflow.id for handle in handles):
             raise ValueError("child handles must belong to this workflow")
         response = await self.submitter.submit(
@@ -208,6 +222,29 @@ class WorkflowExecutionContext:
         )
         if response.kind != "join":
             raise RuntimeError("executor returned an invalid join response")
+        if response.error is not None:
+            raise ActivityError(response.error)
+        return response.outcomes
+
+    async def cancel_workflows(
+        self,
+        handles: list[ChildWorkflowHandle],
+        *,
+        reason: typing.Optional[str] = None,
+    ) -> list[models.ChildOutcome]:
+        """Persist cancellation intent and wait for selected child subtrees to settle."""
+        if any(handle.parent_workflow_id != self.workflow.id for handle in handles):
+            raise ValueError("child handles must belong to this workflow")
+        response = await self.submitter.submit(
+            CancelRequest(
+                models.WorkflowCancelOperation(
+                    spawn_step_ids=[handle.spawn_step_id for handle in handles],
+                    reason=reason,
+                )
+            )
+        )
+        if response.kind != "join":
+            raise RuntimeError("executor returned an invalid cancellation response")
         if response.error is not None:
             raise ActivityError(response.error)
         return response.outcomes

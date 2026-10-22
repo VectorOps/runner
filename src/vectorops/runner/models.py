@@ -14,6 +14,7 @@ from vectorops.runner.environment.target import LocalExecutionTarget
 _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
     "workflow.spawn",
     "workflow.join",
+    "workflow.cancel",
     "workflow.complete",
     "workflow.resume",
 )
@@ -37,6 +38,7 @@ class Workflow(_JsonModel):
     version: int = pydantic.Field(default=1, ge=1, strict=True)
     tool_policy_version: typing.Optional[typing.Literal[1]] = None
     inbox_version: typing.Optional[typing.Literal[1]] = None
+    child_cancellation_version: typing.Optional[typing.Literal[1]] = None
     created_at: typing.Optional[str] = None
     name: typing.Optional[str] = pydantic.Field(
         default=None, min_length=1, max_length=120
@@ -91,12 +93,8 @@ class WorkflowSpawnOperation(_JsonModel):
     worktree_id: typing.Optional[UUID] = None
 
 
-class WorkflowJoinOperation(_JsonModel):
-    """Wait for children in invocation order, propagating or collecting failures."""
-
-    kind: typing.Literal["workflow.join"] = "workflow.join"
+class _ChildSelection(_JsonModel):
     spawn_step_ids: list[str] = pydantic.Field(min_length=1)
-    failure_policy: typing.Literal["propagate", "collect"] = "propagate"
 
     @pydantic.field_validator("spawn_step_ids", mode="after")
     @classmethod
@@ -106,6 +104,29 @@ class WorkflowJoinOperation(_JsonModel):
         if len(set(step_ids)) != len(step_ids):
             raise ValueError("spawn step IDs must be unique")
         return step_ids
+
+
+class WorkflowJoinOperation(_ChildSelection):
+    """Wait for children in invocation order, propagating or collecting failures."""
+
+    kind: typing.Literal["workflow.join"] = "workflow.join"
+    failure_policy: typing.Literal["propagate", "collect"] = "propagate"
+
+
+class WorkflowCancelOperation(_ChildSelection):
+    """Durable cancellation intent, optionally cancelling an owning invocation."""
+
+    kind: typing.Literal["workflow.cancel"] = "workflow.cancel"
+    reason: typing.Optional[str] = None
+    owner_spawn_step_id: typing.Optional[str] = None
+
+    @pydantic.model_validator(mode="after")
+    def validate_owner(self) -> typing.Self:
+        if self.owner_spawn_step_id is not None and self.spawn_step_ids != [
+            self.owner_spawn_step_id
+        ]:
+            raise ValueError("owned cancellation must select its own spawn")
+        return self
 
 
 class WorkflowCompleteOperation(_JsonModel):
@@ -123,16 +144,8 @@ class WorkflowResumeOperation(_JsonModel):
 
 def _operation_tag(operation: object) -> str:
     """Dispatch typed workflow operations while preserving arbitrary activity kinds."""
-    if isinstance(
-        operation,
-        (
-            WorkflowSpawnOperation,
-            WorkflowJoinOperation,
-            WorkflowCompleteOperation,
-            WorkflowResumeOperation,
-        ),
-    ):
-        return operation.kind
+    if isinstance(operation, _JsonModel):
+        return _operation_tag(operation.model_dump(include={"kind"}))
     if isinstance(operation, dict):
         kind = operation.get("kind")
         if isinstance(kind, str) and kind in _WORKFLOW_OPERATION_KINDS:
@@ -145,11 +158,19 @@ WorkflowOperation: typing.TypeAlias = typing.Annotated[
         typing.Annotated[StepOperation, pydantic.Tag("operation")],
         typing.Annotated[WorkflowSpawnOperation, pydantic.Tag("workflow.spawn")],
         typing.Annotated[WorkflowJoinOperation, pydantic.Tag("workflow.join")],
+        typing.Annotated[WorkflowCancelOperation, pydantic.Tag("workflow.cancel")],
         typing.Annotated[WorkflowCompleteOperation, pydantic.Tag("workflow.complete")],
         typing.Annotated[WorkflowResumeOperation, pydantic.Tag("workflow.resume")],
     ],
     pydantic.Discriminator(_operation_tag),
 ]
+
+
+def is_activity_operation(
+    operation: WorkflowOperation,
+) -> typing.TypeGuard[StepOperation]:
+    """Narrow arbitrary activity kinds without duplicating the reserved-kind contract."""
+    return operation.kind not in _WORKFLOW_OPERATION_KINDS
 
 
 class StepError(_JsonModel):
@@ -178,6 +199,16 @@ class StepStreaming(_JsonModel):
 
     kind: typing.Literal["streaming"] = "streaming"
     state: pydantic.JsonValue = None
+
+
+class StepCancelled(_JsonModel):
+    """A workflow that cooperatively terminated after cancellation."""
+
+    kind: typing.Literal["cancelled"] = "cancelled"
+    reason: typing.Optional[str] = None
+
+
+ChildOutcome: typing.TypeAlias = typing.Union[StepCompleted, StepFailed, StepCancelled]
 
 
 class StepPending(_JsonModel):
@@ -219,7 +250,13 @@ class StepJoined(_JsonModel):
 
 StepOutcome: typing.TypeAlias = typing.Annotated[
     typing.Union[
-        StepCompleted, StepFailed, StepJoined, StepStreaming, StepPending, StepWaiting
+        StepCompleted,
+        StepFailed,
+        StepJoined,
+        StepStreaming,
+        StepPending,
+        StepWaiting,
+        StepCancelled,
     ],
     pydantic.Field(discriminator="kind"),
 ]
@@ -297,7 +334,7 @@ class WorkflowStep(_JsonModel):
             or target.outcome.kind in ("pending", "streaming", "waiting")
         ):
             raise ValueError("delivery requires a terminal invocation in this workflow")
-        if isinstance(self.operation, WorkflowCompleteOperation):
+        if self.operation.kind == "workflow.complete":
             raise ValueError("cannot deliver after workflow completion")
         if target.id in self.deliveries:
             raise ValueError("invocation was already delivered at this position")
@@ -320,41 +357,55 @@ class WorkflowStep(_JsonModel):
         ):
             raise ValueError("authorization rule requires a tool decision")
         if self.resume_step_id is not None and (
-            not isinstance(self.operation, WorkflowCompleteOperation)
+            self.operation.kind != "workflow.complete"
             or self.outcome.kind != "failed"
             or self.resume_step_id != self.previous_step_id
         ):
             raise ValueError(
                 "a failure resume boundary must be its completion predecessor"
             )
-        if self.deferred_delivery and not isinstance(
-            self.operation, (StepOperation, WorkflowJoinOperation)
+        if self.deferred_delivery and self.operation.kind in (
+            "workflow.spawn",
+            "workflow.complete",
+            "workflow.resume",
         ):
             raise ValueError("deferred delivery requires an activity or join")
-        if isinstance(self.operation, WorkflowResumeOperation):
-            if self.operation.step_id == self.id:
+        if self.operation.kind == "workflow.resume":
+            resume = typing.cast(WorkflowResumeOperation, self.operation)
+            if resume.step_id == self.id:
                 raise ValueError("a resume cannot reference itself")
             if self.outcome != StepCompleted():
                 raise ValueError("a resume requires an empty completed outcome")
-        if self.outcome.kind == "waiting" and not isinstance(
-            self.operation, WorkflowJoinOperation
+        if self.outcome.kind == "waiting" and self.operation.kind not in (
+            "workflow.join",
+            "workflow.cancel",
         ):
             raise ValueError("waiting state requires a workflow join operation")
-        if self.outcome.kind in ("streaming", "pending") and not isinstance(
-            self.operation, StepOperation
+        if (
+            self.outcome.kind == "cancelled"
+            and self.operation.kind != "workflow.complete"
+        ):
+            raise ValueError("cancelled outcome requires workflow completion")
+        if self.outcome.kind in ("streaming", "pending") and not is_activity_operation(
+            self.operation
         ):
             raise ValueError("unfinished state requires an activity operation")
-        if isinstance(self.operation, WorkflowSpawnOperation):
-            if self.operation.child_workflow_id == self.workflow_id:
+        if self.operation.kind == "workflow.spawn":
+            spawn = typing.cast(WorkflowSpawnOperation, self.operation)
+            if spawn.child_workflow_id == self.workflow_id:
                 raise ValueError("a child invocation must have a distinct workflow ID")
-        if isinstance(self.operation, WorkflowJoinOperation):
-            if self.id in self.operation.spawn_step_ids:
+        if self.operation.kind in ("workflow.join", "workflow.cancel"):
+            selection = typing.cast(
+                typing.Union[WorkflowJoinOperation, WorkflowCancelOperation],
+                self.operation,
+            )
+            if self.id in selection.spawn_step_ids:
                 raise ValueError("a join cannot reference itself as a spawn")
-            if isinstance(self.outcome, StepJoined):
+            if self.outcome.kind == "joined":
                 spawn_ids = [
                     item.spawn_step_id for item in self.outcome.child_completions
                 ]
-                if spawn_ids != self.operation.spawn_step_ids:
+                if spawn_ids != selection.spawn_step_ids:
                     raise ValueError(
                         "joined completions must match spawn steps in order"
                     )
@@ -365,6 +416,6 @@ class WorkflowStep(_JsonModel):
                     raise ValueError("a join cannot reference itself as a completion")
             elif self.outcome.kind not in ("failed", "waiting"):
                 raise ValueError("a join requires a joined, waiting, or failed outcome")
-        elif isinstance(self.outcome, StepJoined):
+        elif self.outcome.kind == "joined":
             raise ValueError("a joined outcome requires a workflow join operation")
         return self

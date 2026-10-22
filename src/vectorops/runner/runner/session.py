@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from collections.abc import Mapping
 from contextlib import aclosing
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 import typing
 import logging
@@ -23,6 +23,7 @@ from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.runner import context
 from vectorops.runner.runner import handlers
+from vectorops.runner.runner import child_lifecycle
 from vectorops.runner.runner.mailbox import Mailbox
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.environment.target import LocalExecutionTarget
@@ -57,12 +58,33 @@ class _Invocation:
     reconstruct: bool = False
 
     def cancel_wait(self, response: asyncio.Future[context.OperationResponse]) -> None:
-        if response.cancelled() and self.task is not None:
+        if (
+            response.cancelled()
+            and self.task is not None
+            and self.request.kind not in ("join", "cancel")
+        ):
             self.task.cancel()
 
     def deliver(self, response: context.OperationResponse) -> None:
         if not self.response.done():
             self.response.set_result(response)
+
+
+@dataclass
+class _Child:
+    signal: child_lifecycle.Cancellation = field(
+        default_factory=child_lifecycle.Cancellation
+    )
+    task: typing.Optional[asyncio.Task[models.WorkflowStep]] = None
+    cancellation: typing.Optional[asyncio.Task[models.WorkflowStep]] = None
+    intent: typing.Optional[models.WorkflowCancelOperation] = None
+
+
+@dataclass
+class _OwnedCall:
+    task: typing.Optional[asyncio.Task[context.OperationResponse]] = None
+    cancellation: typing.Optional[asyncio.Future[context.OperationResponse]] = None
+    recorded_cancellation: bool = False
 
 
 class ExecutionSession:
@@ -106,7 +128,11 @@ class ExecutionSession:
         if continue_from_step_id is None:
             self.live.set()
         self.closed = False
-        self.children: dict[str, asyncio.Task[models.WorkflowStep]] = {}
+        self._children: dict[str, _Child] = {}
+        self._owned_calls: dict[str, _OwnedCall] = {}
+        self._owners_indexed = False
+        self._owners_lock = asyncio.Lock()
+        self._cancellation = child_lifecycle.current.get()
         self.replay: typing.Optional[AsyncGenerator[models.WorkflowStep, None]] = None
         self.replaying = continue_from_step_id is not None
         self.reporter = reporter
@@ -133,12 +159,25 @@ class ExecutionSession:
         )
         self.handlers.register(context.SpawnRequest, handlers.SpawnHandler(self))
         self.handlers.register(context.JoinRequest, handlers.JoinHandler(self))
+        self.handlers.register(context.CancelRequest, handlers.CancelHandler(self))
 
     async def submit(
         self, request: context.OperationRequest
     ) -> context.OperationResponse:
         if self.closed:
             raise RuntimeError("workflow session is closed")
+        if request.kind == "invoke_child":
+            if self.workflow.child_cancellation_version is None:
+                spawned = await self.submit(request.spawn)
+                assert spawned.kind == "spawn"
+                return await self.submit(
+                    context.JoinRequest(
+                        models.WorkflowJoinOperation(
+                            spawn_step_ids=[spawned.handle.spawn_step_id]
+                        )
+                    )
+                )
+            return await self._invoke_child(request.spawn)
         pending = _Invocation(
             request,
             asyncio.get_running_loop().create_future(),
@@ -148,7 +187,93 @@ class ExecutionSession:
         self.queue.put_nowait(pending)
         if self.pause is not None:
             await self.pause.running()
+        if request.kind in ("join", "cancel"):
+            return await asyncio.shield(pending.response)
         return await pending.response
+
+    async def _invoke_child(
+        self, request: context.SpawnRequest
+    ) -> context.OperationResponse:
+        """Own spawn acceptance and join delivery across caller cancellation."""
+        spawned: asyncio.Future[context.ChildWorkflowHandle] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        async def invoke() -> context.OperationResponse:
+            try:
+                response = await self.submit(request)
+                assert response.kind == "spawn"
+                handle = response.handle
+                owner = self._owned_calls.setdefault(handle.spawn_step_id, _OwnedCall())
+                owner.task = task
+                spawned.set_result(handle)
+                await self._index_owned_cancellations()
+                result = await self.submit(
+                    context.JoinRequest(
+                        models.WorkflowJoinOperation(
+                            spawn_step_ids=[handle.spawn_step_id]
+                        )
+                    )
+                )
+                if owner.recorded_cancellation:
+                    await asyncio.Future[None]()
+                return result
+            finally:
+                if not spawned.done():
+                    spawned.cancel()
+
+        task = asyncio.create_task(invoke())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if self.closed or task.cancelled():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+
+            async def cancel() -> None:
+                handle = await spawned
+                cancellation = self._owned_calls[handle.spawn_step_id].cancellation
+                if cancellation is not None:
+                    await asyncio.shield(cancellation)
+                else:
+                    await self.submit(
+                        context.CancelRequest(
+                            models.WorkflowCancelOperation(
+                                spawn_step_ids=[handle.spawn_step_id],
+                                owner_spawn_step_id=handle.spawn_step_id,
+                            )
+                        )
+                    )
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+            await finish_cleanup(asyncio.create_task(cancel()))
+            raise
+        finally:
+            if spawned.done() and not spawned.cancelled():
+                self._owned_calls[spawned.result().spawn_step_id].task = None
+
+    async def _index_owned_cancellations(self) -> None:
+        """Retain cancellation of an invocation even when its child won completion."""
+        async with self._owners_lock:
+            if self._owners_indexed:
+                return
+            if self.replay_head is not None:
+                async with aclosing(
+                    self.history.replay_path(self.workflow.id, self.replay_head)
+                ) as path:
+                    async for step in path:
+                        if step.operation.kind == "workflow.cancel":
+                            operation = typing.cast(
+                                models.WorkflowCancelOperation, step.operation
+                            )
+                            owner = operation.owner_spawn_step_id
+                            if owner is not None:
+                                self._owned_calls.setdefault(
+                                    owner, _OwnedCall()
+                                ).recorded_cancellation = True
+            self._owners_indexed = True
 
     def blocked_inputs(self) -> typing.Optional[set[str]]:
         """Report mailbox dependencies only after replay and deliveries settle."""
@@ -185,17 +310,21 @@ class ExecutionSession:
             elif invocation.parent_step_id in self.pause.requests:
                 assert invocation.parent_step_id is not None
                 requests.add(invocation.parent_step_id)
-            elif isinstance(invocation.request, context.JoinRequest):
-                if not self.children or any(
-                    not task.done() and child not in self.pause.sessions
-                    for child, task in self.children.items()
+            elif invocation.request.kind == "join":
+                if not self._children or any(
+                    child.task is not None
+                    and not child.task.done()
+                    and identifier not in self.pause.sessions
+                    for identifier, child in self._children.items()
                 ):
                     return None
             else:
                 return None
         if any(
-            not task.done() and child not in self.pause.sessions
-            for child, task in self.children.items()
+            child.task is not None
+            and not child.task.done()
+            and identifier not in self.pause.sessions
+            for identifier, child in self._children.items()
         ):
             return None
         return requests
@@ -224,6 +353,10 @@ class ExecutionSession:
             return await invoke()
 
         task = asyncio.create_task(run_workflow())
+        if self._cancellation is not None:
+            self._cancellation.workflow_task = task
+            if self._cancellation.requested:
+                task.cancel()
         fatal: asyncio.Future[BaseException] = (
             asyncio.get_running_loop().create_future()
         )
@@ -240,6 +373,8 @@ class ExecutionSession:
                 async def teardown() -> None:
                     await self._stop_operations(dispatcher)
                     await asyncio.gather(task, return_exceptions=True)
+                    if self._cancellation is not None and self._cancellation.requested:
+                        await self._cancellation.close()
 
                 await finish_cleanup(asyncio.create_task(teardown()))
             if fatal.done():
@@ -265,12 +400,31 @@ class ExecutionSession:
                 if self.ordered_replay:
                     step = await self._peek()
                     self._start_live()
-                    if step is not None and isinstance(
-                        step.operation, models.WorkflowResumeOperation
-                    ):
+                    if step is not None and step.operation.kind == "workflow.resume":
+                        resume = typing.cast(
+                            models.WorkflowResumeOperation, step.operation
+                        )
                         await self.recorded(step.operation)
-                        await self._replay_delivery(step.operation.step_id)
+                        await self._replay_delivery(resume.step_id)
                         continue
+                    if step is not None and step.operation.kind == "workflow.cancel":
+                        cancellation = typing.cast(
+                            models.WorkflowCancelOperation, step.operation
+                        )
+                        owner = self._owned_calls.get(
+                            cancellation.owner_spawn_step_id or ""
+                        )
+                        if owner is not None and owner.task is not None:
+                            request = context.CancelRequest(cancellation)
+                            pending = _Invocation(
+                                request, asyncio.get_running_loop().create_future()
+                            )
+                            response = await self.handlers.dispatch(request)
+                            assert isinstance(response, handlers.DeferredResponse)
+                            self._schedule_response(pending, response, fatal)
+                            self._start_live()
+                            pending = None
+                            continue
                 self._dispatching = False
                 if self.pause is not None:
                     await self.pause.refresh()
@@ -288,19 +442,23 @@ class ExecutionSession:
                 if pending.response.cancelled():
                     pending = None
                     continue
+                if pending.request.kind == "cancel":
+                    requested_owner = pending.request.operation.owner_spawn_step_id
+                    owner = self._owned_calls.get(requested_owner or "")
+                    existing = owner.cancellation if owner is not None else None
+                    if existing is not None:
+                        existing.add_done_callback(
+                            partial(self._forward_response, pending)
+                        )
+                        pending = None
+                        continue
                 response = await self.handlers.dispatch(pending.request)
                 self._start_live()
                 if pending.response.cancelled():
                     pending = None
                     continue
                 if isinstance(response, handlers.DeferredResponse):
-                    pending.step = response.step
-                    pending.reconstruct = response.reconstruct
-                    self.invocations[response.step.id] = pending
-                    pending.task = asyncio.create_task(self._resolve(response))
-                    pending.task.add_done_callback(
-                        partial(self._resolved, pending, fatal)
-                    )
+                    self._schedule_response(pending, response, fatal)
                     if not response.step.deferred_delivery:
                         await self._deliver(pending, replay=True)
                 else:
@@ -312,6 +470,39 @@ class ExecutionSession:
         finally:
             if pending is not None:
                 pending.response.cancel()
+
+    def _schedule_response(
+        self,
+        pending: _Invocation,
+        response: handlers.DeferredResponse,
+        fatal: asyncio.Future[BaseException],
+    ) -> None:
+        pending.step = response.step
+        if response.step.operation.kind == "workflow.cancel":
+            operation = typing.cast(
+                models.WorkflowCancelOperation, response.step.operation
+            )
+            owner = operation.owner_spawn_step_id
+            if owner is not None:
+                self._owned_calls.setdefault(owner, _OwnedCall()).cancellation = (
+                    pending.response
+                )
+        pending.reconstruct = response.reconstruct
+        self.invocations[response.step.id] = pending
+        pending.task = asyncio.create_task(self._resolve(response))
+        pending.task.add_done_callback(partial(self._resolved, pending, fatal))
+
+    @staticmethod
+    def _forward_response(
+        waiter: _Invocation, future: asyncio.Future[context.OperationResponse]
+    ) -> None:
+        if future.cancelled():
+            waiter.response.cancel()
+        elif (error := future.exception()) is not None:
+            if not waiter.response.done():
+                waiter.response.set_exception(error)
+        else:
+            waiter.deliver(future.result())
 
     async def _resolve(
         self, deferred: handlers.DeferredResponse
@@ -398,6 +589,11 @@ class ExecutionSession:
                 if self.reporter is not None:
                     self.reporter.record(self.workflow.id, self.head)
         invocation.deliver(response)
+        if step.operation.kind == "workflow.cancel":
+            operation = typing.cast(models.WorkflowCancelOperation, step.operation)
+            owner = self._owned_calls.get(operation.owner_spawn_step_id or "")
+            if owner is not None and owner.task is not None:
+                owner.task.cancel()
         self.invocations.pop(step.id)
         await asyncio.sleep(0)
 
@@ -409,8 +605,27 @@ class ExecutionSession:
             for invocation in self.invocations.values()
             if invocation.task is not None
         ]
-        tasks = [*operations, *self.children.values()]
-        for task in tasks:
+        for task in operations:
+            task.cancel()
+        child_tasks = []
+        cancellation_tasks = []
+        for child in self._children.values():
+            if child.cancellation is not None:
+                cancellation_tasks.append(child.cancellation)
+            if child.task is None:
+                continue
+            child_tasks.append(child.task)
+            if self._cancellation is not None and self._cancellation.requested:
+                child.signal.request(self._cancellation.reason)
+            else:
+                child.task.cancel()
+        owned_tasks = [
+            owner.task for owner in self._owned_calls.values() if owner.task is not None
+        ]
+        tasks = [*operations, *child_tasks, *owned_tasks, *cancellation_tasks]
+        for cancellation in cancellation_tasks:
+            cancellation.cancel()
+        for task in owned_tasks:
             task.cancel()
         for invocation in self.invocations.values():
             invocation.response.cancel()
@@ -428,7 +643,9 @@ class ExecutionSession:
         try:
             outcome: models.StepOutcome = models.StepCompleted(result=task.result())
         except asyncio.CancelledError:
-            raise
+            if self._cancellation is None or not self._cancellation.requested:
+                raise
+            outcome = models.StepCancelled(reason=self._cancellation.reason)
         except Exception as exc:
             outcome = self.failure(exc)
         recorded = await self.recorded(models.WorkflowCompleteOperation())
@@ -481,8 +698,8 @@ class ExecutionSession:
         if operation is not None:
             matches = (
                 operation.matches_replay(step.operation)
-                if isinstance(operation, models.StepOperation)
-                and isinstance(step.operation, models.StepOperation)
+                if models.is_activity_operation(operation)
+                and models.is_activity_operation(step.operation)
                 else operation == step.operation
             )
             if not matches:
@@ -535,15 +752,16 @@ class ExecutionSession:
             resume_step_id=resume_step_id,
             created_at=(
                 self.workflow.created_at
-                if isinstance(operation, models.WorkflowCompleteOperation)
+                if operation.kind == "workflow.complete"
                 else now
             ),
             completed_at=(
-                now if outcome.kind in ("completed", "failed", "joined") else None
+                now
+                if outcome.kind in ("completed", "failed", "joined", "cancelled")
+                else None
             ),
-            deferred_delivery=isinstance(
-                operation, (models.StepOperation, models.WorkflowJoinOperation)
-            ),
+            deferred_delivery=operation.kind
+            not in ("workflow.spawn", "workflow.complete", "workflow.resume"),
         )
         await self.history.append_step(step)
         self.head = step.id
@@ -573,17 +791,96 @@ class ExecutionSession:
     def start_child(
         self, workflow: models.Workflow
     ) -> asyncio.Task[models.WorkflowStep]:
-        task = self.children.get(workflow.id)
-        if task is None:
-            task = asyncio.create_task(
-                self.execute_child(
-                    workflow,
-                    continue_from_step_id=self.child_heads.get(workflow.id),
-                    child_heads=self.child_heads,
-                )
+        child = self._children.setdefault(workflow.id, _Child())
+        if child.intent is not None:
+            return self._cancellation_task(workflow, child.intent.reason)
+        if child.task is None:
+
+            async def execute() -> models.WorkflowStep:
+                token = child_lifecycle.current.set(child.signal)
+                try:
+                    head = self.child_heads.get(workflow.id)
+                    if head is not None:
+                        terminal = await self.history.get_step(head)
+                        if terminal.operation.kind == "workflow.complete":
+                            return terminal
+                    return await self.execute_child(
+                        workflow,
+                        continue_from_step_id=self.child_heads.get(workflow.id),
+                        child_heads=self.child_heads,
+                    )
+                finally:
+                    child_lifecycle.current.reset(token)
+
+            child.task = asyncio.create_task(execute())
+        return child.task
+
+    def prepare_cancellation(
+        self, workflow: models.Workflow, operation: models.WorkflowCancelOperation
+    ) -> None:
+        child = self._children.setdefault(workflow.id, _Child())
+        if child.intent is None:
+            child.intent = operation
+
+    async def cancel_child(
+        self, workflow: models.Workflow, reason: typing.Optional[str]
+    ) -> models.WorkflowStep:
+        """Settle live children or cancel a retained subtree without restarting effects."""
+        return await asyncio.shield(self._cancellation_task(workflow, reason))
+
+    def _cancellation_task(
+        self, workflow: models.Workflow, reason: typing.Optional[str]
+    ) -> asyncio.Task[models.WorkflowStep]:
+        child = self._children.setdefault(workflow.id, _Child())
+        if child.cancellation is None:
+            child.cancellation = asyncio.create_task(
+                self._cancel_child(workflow, reason)
             )
-            self.children[workflow.id] = task
-        return task
+        return child.cancellation
+
+    async def _cancel_child(
+        self, workflow: models.Workflow, reason: typing.Optional[str]
+    ) -> models.WorkflowStep:
+        child_state = self._children[workflow.id]
+        running = child_state.task
+        if running is not None:
+            signal = child_state.signal
+            signal.request(reason)
+            completion = await asyncio.shield(running)
+            await signal.close()
+            return completion
+        head = self.child_heads.get(workflow.id)
+        if head is not None:
+            terminal = await self.history.get_step(head)
+            if terminal.operation.kind == "workflow.complete":
+                return terminal
+            async with aclosing(self.history.replay_path(workflow.id, head)) as path:
+                async for step in path:
+                    if step.operation.kind == "workflow.spawn":
+                        spawn = typing.cast(
+                            models.WorkflowSpawnOperation, step.operation
+                        )
+                        child = await self.history.get_workflow(spawn.child_workflow_id)
+                        await self.cancel_child(child, reason)
+                    if self.mailbox is not None and step.outcome.kind in (
+                        "pending",
+                        "streaming",
+                    ):
+                        await self.mailbox.store.cancel_inputs(step.id)
+        completion = models.WorkflowStep(
+            id=uuid4().hex,
+            workflow_id=workflow.id,
+            previous_step_id=head,
+            operation=models.WorkflowCompleteOperation(),
+            outcome=models.StepCancelled(reason=reason),
+            created_at=workflow.created_at,
+            completed_at=timestamp(),
+        )
+        await self.history.append_step(completion)
+        if self.reporter is not None:
+            self.reporter.record(workflow.id, completion.id)
+        await self._emit(completion, created=True)
+        return completion
 
     async def update(self, step: models.WorkflowStep) -> None:
         if step.workflow_id != self.workflow.id:
@@ -611,7 +908,8 @@ class ExecutionSession:
                     "created_at": previous.created_at,
                     "completed_at": (
                         previous.completed_at or timestamp()
-                        if step.outcome.kind in ("completed", "failed", "joined")
+                        if step.outcome.kind
+                        in ("completed", "failed", "joined", "cancelled")
                         else None
                     ),
                 }

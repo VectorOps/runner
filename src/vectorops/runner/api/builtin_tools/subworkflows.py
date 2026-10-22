@@ -110,6 +110,13 @@ class SubworkflowTool(tools.WorkflowToolBinding):
             return tools.ToolResponse(
                 content=[connect.TextBlock(text=outcome.error.message)], is_error=True
             )
+        if outcome.kind == "cancelled":
+            return tools.ToolResponse(
+                content=[
+                    connect.TextBlock(text=outcome.reason or "Child workflow cancelled")
+                ],
+                is_error=True,
+            )
         return tools.ToolResponse(
             content=[
                 connect.TextBlock(text=json.dumps(outcome.result, ensure_ascii=True))

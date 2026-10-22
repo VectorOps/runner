@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
@@ -22,6 +23,7 @@ from vectorops.runner.runner.context import (
 )
 from vectorops.runner.runner.errors import ActivityError
 from vectorops.runner.runner import streaming
+from vectorops.runner.runner import context as context_models
 
 P = typing.ParamSpec("P")
 T = typing.TypeVar("T", bound=pydantic.JsonValue)
@@ -413,17 +415,26 @@ class WorkflowDefinition(typing.Generic[P, T]):
             version=self.version,
         )
         reference = context.project.resolver.reference_for(self.func)
-        handle = await context.spawn_workflow(
-            reference,
-            input=configuration.input,
-            kind=self.kind,
-            version=self.version,
-            description=self.description,
+        response = await context.submitter.submit(
+            context_models.InvokeChildRequest(
+                context_models.SpawnRequest(
+                    reference=reference,
+                    input=configuration.input,
+                    contract_kind=self.kind,
+                    version=self.version,
+                    description=self.description,
+                )
+            )
         )
-        outcomes = await context.join_workflows([handle])
-        outcome = outcomes[0]
+        if response.kind != "join":
+            raise RuntimeError("executor returned an invalid child response")
+        if response.error is not None:
+            raise ActivityError(response.error)
+        outcome = response.outcomes[0]
         if outcome.kind == "failed":
             raise ActivityError(outcome.error)
+        if outcome.kind == "cancelled":
+            raise asyncio.CancelledError(outcome.reason)
         return typing.cast(T, outcome.result)
 
 

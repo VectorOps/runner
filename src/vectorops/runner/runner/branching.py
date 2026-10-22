@@ -76,7 +76,7 @@ def plan(
     target = get_step(request.step_id)
     if target.workflow_id != execution.root_workflow_id:
         raise BranchConflict("branch targets must belong to the root workflow")
-    if isinstance(target.operation, models.WorkflowResumeOperation):
+    if target.operation.kind == "workflow.resume":
         raise BranchConflict("restart the invocation, not its delivery marker")
     retained: set[str] = set()
     heads: dict[str, str] = {}
@@ -119,11 +119,13 @@ def plan(
             if step.deferred_delivery:
                 outstanding.add(step.id)
             outstanding.difference_update(step.deliveries)
-            if isinstance(step.operation, models.WorkflowResumeOperation):
-                outstanding.discard(step.operation.step_id)
-            if isinstance(step.operation, models.WorkflowSpawnOperation):
-                spawns[step.id] = step.operation.child_workflow_id
-            if isinstance(step.outcome, models.StepJoined):
+            if step.operation.kind == "workflow.resume":
+                delivery = typing.cast(models.WorkflowResumeOperation, step.operation)
+                outstanding.discard(delivery.step_id)
+            if step.operation.kind == "workflow.spawn":
+                spawn = typing.cast(models.WorkflowSpawnOperation, step.operation)
+                spawns[step.id] = spawn.child_workflow_id
+            if step.outcome.kind == "joined":
                 for child in step.outcome.child_completions:
                     joined[child.spawn_step_id] = child.completion_step_id
         if outstanding and not resume:
@@ -135,18 +137,17 @@ def plan(
                 retain(child_id, execution.checkpoint.heads.get(child_id), resume=True)
             unjoined = set()
         if unjoined:
-            if (
-                join_target is None
-                or not isinstance(join_target.operation, models.WorkflowJoinOperation)
-                or not unjoined.issubset(join_target.operation.spawn_step_ids)
-            ):
+            if join_target is None or join_target.operation.kind != "workflow.join":
+                raise BranchConflict("restart at the outstanding child's spawn")
+            join = typing.cast(models.WorkflowJoinOperation, join_target.operation)
+            if not unjoined.issubset(join.spawn_step_ids):
                 raise BranchConflict("restart at the outstanding child's spawn")
             recorded = (
                 {
                     item.spawn_step_id: item.completion_step_id
                     for item in join_target.outcome.child_completions
                 }
-                if isinstance(join_target.outcome, models.StepJoined)
+                if join_target.outcome.kind == "joined"
                 else {}
             )
             for spawn_id in unjoined:
@@ -159,9 +160,7 @@ def plan(
                 completion = get_step(completion_id)
                 if (
                     completion.workflow_id != child_id
-                    or not isinstance(
-                        completion.operation, models.WorkflowCompleteOperation
-                    )
+                    or completion.operation.kind != "workflow.complete"
                     or completion.outcome.kind != "completed"
                 ):
                     raise BranchConflict(
@@ -172,23 +171,23 @@ def plan(
             if spawn_id not in spawns:
                 raise BranchConflict("join references a spawn outside the prefix")
             completion = get_step(completion_id)
-            if not isinstance(completion.operation, models.WorkflowCompleteOperation):
+            if completion.operation.kind != "workflow.complete":
                 raise BranchConflict("join does not reference a child completion")
-            retain(spawns[spawn_id], completion_id, resume=resume)
+            retain(
+                spawns[spawn_id],
+                completion_id,
+                resume=resume or completion.outcome.kind == "cancelled",
+            )
 
     retain(
         target.workflow_id,
         target.previous_step_id,
         target,
-        resume=target.resume_step_id is not None
-        and isinstance(request.action, Restart),
+        resume=target.resume_step_id is not None and request.action.kind == "restart",
     )
     result = Plan(heads=heads, retained_step_ids=retained)
-    if isinstance(request.action, InsertInput):
-        if (
-            not isinstance(target.operation, models.StepOperation)
-            or target.operation.kind != mailbox.KIND
-        ):
+    if request.action.kind == "insert_input":
+        if target.operation.kind != mailbox.KIND:
             raise BranchConflict(
                 "input insertion requires a recorded root mailbox.input boundary"
             )
