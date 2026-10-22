@@ -115,7 +115,7 @@ class Session:
             elif isinstance(packet, p.Request):
                 if packet.id in self.requests:
                     raise ValueError("duplicate outstanding request ID")
-                if len(self.requests) >= 32:
+                if len(self.requests) >= 128:
                     await self.connection.send(
                         p.Error(
                             id=packet.id,
