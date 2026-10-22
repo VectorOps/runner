@@ -1,4 +1,4 @@
-"""Best-effort workflow naming from the first durable user-message request."""
+"""Best-effort execution descriptions from the first durable user-message request."""
 
 import asyncio
 import logging
@@ -23,8 +23,8 @@ class NamingStore(Protocol):
         self, workflow_id: str, request_type: str
     ) -> Optional[mailbox.InputRequest]: ...
 
-    async def set_workflow_name(
-        self, workflow_id: str, name: str
+    async def set_workflow_description(
+        self, workflow_id: str, description: str
     ) -> models.Workflow: ...
 
 
@@ -62,11 +62,11 @@ class WorkflowNaming:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def ensure_name(self, store: NamingStore, workflow_id: str) -> None:
-        """Preserve existing names and retry only against the original input."""
+        """Preserve existing descriptions and retry only against the original input."""
         async with self._lock:
             try:
                 workflow = await store.get_workflow(workflow_id)
-                if workflow.name is not None:
+                if workflow.description is not None:
                     return
                 request = await store.first_input(workflow_id, "chat.message.v1")
                 if request is None or request.status != "answered":
@@ -81,11 +81,13 @@ class WorkflowNaming:
                 text = " ".join(
                     block.text for block in response.content if block.type == "text"
                 )
-                name = " ".join(text.strip().strip("\"'`").split())[:120].strip()
-                if not name:
-                    raise ValueError("generated workflow name is empty")
-                await store.set_workflow_name(workflow_id, name)
+                description = " ".join(text.strip().strip("\"'`").split())[:120].strip()
+                if not description:
+                    raise ValueError("generated execution description is empty")
+                await store.set_workflow_description(workflow_id, description)
             except Exception:
                 logging.getLogger(__name__).warning(
-                    "Workflow name generation failed for %s", workflow_id, exc_info=True
+                    "Execution description generation failed for %s",
+                    workflow_id,
+                    exc_info=True,
                 )

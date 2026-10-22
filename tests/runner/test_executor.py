@@ -1,11 +1,13 @@
 from pathlib import Path
 import sys
+from typing import Optional
 
 import pytest
 
 from tests.fixtures import sources
 from tests.fixtures.history import MemoryHistory
 from vectorops.runner import models
+from vectorops.runner.presentation import resolve_display
 from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.project import RunnerProject
 
@@ -84,3 +86,43 @@ async def test_invalid_definition_reference(
     executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
     with pytest.raises(ValueError, match="file and callable"):
         await executor.execute(models.Workflow(id="w", definition_ref="invalid"))
+
+
+@pytest.mark.parametrize(
+    "declared_name", [None, "Customer workflow", "Long name " * 20]
+)
+@pytest.mark.parametrize("execution_name", [None, "Explicit name"])
+async def test_configure_defaults_execution_name_from_definition(
+    workspace: Path,
+    history: MemoryHistory,
+    declared_name: Optional[str],
+    execution_name: Optional[str],
+) -> None:
+    (workspace / "workflows/named.py").write_text(
+        "from vectorops.runner.api import composition\n"
+        f"@composition.workflow(name={declared_name!r})\n"
+        "async def main(ctx):\n"
+        "    return 'done'\n"
+    )
+    project = await RunnerProject.open(workspace)
+    descriptor = await project.resolver.describe("named:main")
+    original = models.Workflow(
+        id="workflow", definition_ref="named:main", name=execution_name
+    )
+    configured = await WorkflowExecutor(project, history).configure(original)
+    expected = execution_name if execution_name is not None else descriptor.name
+    assert configured.name == expected
+    assert original.name == execution_name
+    assert configured.description is None
+    assert resolve_display(configured).label == " ".join(expected.split())[:40]
+
+
+async def test_undecorated_workflow_keeps_name_optional(
+    workspace: Path, history: MemoryHistory
+) -> None:
+    executor = WorkflowExecutor(await RunnerProject.open(workspace), history)
+    configured = await executor.configure(
+        models.Workflow(id="workflow", definition_ref="activities:workflow")
+    )
+    assert configured.name is None
+    assert resolve_display(configured).label == "activities:workflow"

@@ -257,8 +257,24 @@ Connected subscribers receive full replacement snapshots without polling:
 
 | Event kind | Payload fields | Meaning |
 | --- | --- | --- |
-| `workflow.updated` | `execution_id`, `workflow` | Full workflow state, including its generated `name` and usage |
-| `execution.updated` | `execution_id`, `summary` | Full execution summary, including name, status, active flag, pending-input count, and usage |
+| `workflow.updated` | `execution_id`, `workflow` | Full workflow state, including definition-derived `name`, generated `description`, presentation, and usage |
+| `execution.updated` | `execution_id`, `summary` | Full execution summary, including name, description, status, active flag, pending-input count, and usage |
+
+New decorated workflow instances default `name` from the workflow definition unless
+an execution name is already supplied. The optional decorator `name` defaults to the
+module-qualified function name. Display labels prefer `presentation.short_name`,
+then `name`, then `definition_ref`; a presentation override does not replace the
+stored name.
+
+The optional `description` holds the short LLM-generated title derived from the
+first answered user-message request, limited to 120 characters. Generation does
+not change `name`. Execution summaries expose the root workflow's name and
+description separately. For example, `name` can be `"Code review"` while
+`description` is `"Investigate failing authentication tests"`.
+
+Older records without `description` default to null. Saved names and presentation
+are retained during replay; historical generated names are not reclassified or
+replaced from current workflow definitions.
 
 Persistence changes trigger publication after successful commit. This includes
 generated titles even when no subsequent step runs, child workflow usage changes,

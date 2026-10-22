@@ -85,6 +85,9 @@ class WorkflowExecutor:
                 **configuration.model_dump(),
                 "kind": entry.kind,
                 "version": entry.version,
+                "name": (
+                    configuration.name if configuration.name is not None else entry.name
+                ),
                 "presentation": entry.presentation.model_copy(deep=True),
             }
         )

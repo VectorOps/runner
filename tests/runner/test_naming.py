@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 from unittest.mock import AsyncMock, patch
 
 import connect
@@ -50,10 +50,14 @@ async def naming(path: Path) -> WorkflowNaming:
     return WorkflowNaming(llm)
 
 
-async def test_name_survives_restart_without_steps_and_preserves_configuration(
+@pytest.mark.parametrize("workflow_name", [None, "Customer workflow", "Legacy title"])
+async def test_description_survives_restart_without_steps_and_preserves_name(
     tmp_path: Path,
+    workflow_name: Optional[str],
 ) -> None:
     database = await store(tmp_path / "history.sqlite3")
+    if workflow_name is not None:
+        await database.set_workflow_name("workflow", workflow_name)
     original = await database.get_workflow("workflow")
     await database.register_input(
         "request",
@@ -62,28 +66,32 @@ async def test_name_survives_restart_without_steps_and_preserves_configuration(
     await database.answer_input(answer(content("Fix my failing tests")))
     owner = await naming(tmp_path)
     async with CachedHistory(database, cache_workflows=False) as cache:
-        assert (await cache.get_workflow("workflow")).name is None
+        assert (await cache.get_workflow("workflow")).description is None
         await asyncio.gather(
             *(owner.ensure_name(database, "workflow") for _ in range(3))
         )
-        assert (await cache.get_workflow("workflow")).name == "Fix failing tests"
+        assert (await cache.get_workflow("workflow")).description == "Fix failing tests"
         await cache.save_workflow(original)
     reopened = SQLiteHistory(database.path)
-    assert (await reopened.get_workflow("workflow")).name == "Fix failing tests"
+    saved = await reopened.get_workflow("workflow")
+    assert saved.description == "Fix failing tests"
+    assert saved.name == workflow_name
     cast(AsyncMock, owner.llm.generate).assert_awaited_once()
     arguments = cast(AsyncMock, owner.llm.generate).call_args.kwargs
     assert arguments["max_output_tokens"] is None
     assert "at most 8 words" in arguments["system_prompt"]
     await (await naming(tmp_path)).ensure_name(reopened, "workflow")
     assert (await reopened.inspect_execution()).stats.steps == 1
-    assert (await reopened.execution_summary()).name == "Fix failing tests"
+    summary = await reopened.execution_summary()
+    assert summary.description == "Fix failing tests"
+    assert summary.name == workflow_name
     with pytest.raises(ValueError, match="configuration conflict"):
         await reopened.save_workflow(
             original.model_copy(update={"input": {"changed": True}})
         )
     assert (
-        await reopened.set_workflow_name("workflow", "Replacement")
-    ).name == "Fix failing tests"
+        await reopened.set_workflow_description("workflow", "Replacement")
+    ).description == "Fix failing tests"
 
 
 async def test_only_first_typed_prompt_is_used_after_failure(tmp_path: Path) -> None:
@@ -94,7 +102,7 @@ async def test_only_first_typed_prompt_is_used_after_failure(tmp_path: Path) -> 
     owner = await naming(tmp_path)
     cast(AsyncMock, owner.llm.generate).side_effect = RuntimeError("offline")
     await owner.ensure_name(database, "workflow")
-    assert (await database.get_workflow("workflow")).name is None
+    assert (await database.get_workflow("workflow")).description is None
     await database.update_step(
         (await database.get_step("request")).model_copy(
             update={"outcome": models.StepCompleted()}
@@ -163,12 +171,14 @@ async def test_runner_names_after_accepting_input(tmp_path: Path) -> None:
         )
         assert accepted.status == "answered"
         await asyncio.wait_for(started.wait(), 1)
-        assert (await database.get_workflow("workflow")).name is None
+        assert (await database.get_workflow("workflow")).description is None
         release.set()
         async with asyncio.timeout(5):
-            while (await database.get_workflow("workflow")).name is None:
+            while (await database.get_workflow("workflow")).description is None:
                 await asyncio.sleep(0.01)
-        assert (await database.get_workflow("workflow")).name == "Fix failing tests"
+        assert (
+            await database.get_workflow("workflow")
+        ).description == "Fix failing tests"
     finally:
         await runner.aclose()
 
@@ -212,11 +222,12 @@ async def test_naming_failure_does_not_cancel_workflow(
             ).status == "completed"
 
 
-async def test_resume_does_not_wait_for_name_and_name_survives_execution_exit(
+async def test_resume_does_not_wait_for_description_and_preserves_definition_name(
     workspace: Path,
 ) -> None:
     (workspace / "workflows/chat.py").write_text(
-        "from vectorops.runner.api import llm\n"
+        "from vectorops.runner.api import composition, llm\n"
+        "@composition.workflow(name='Customer workflow')\n"
         "async def main(ctx):\n"
         "    await llm.request_user_message()\n"
         "    return 'completed'\n"
@@ -255,14 +266,21 @@ async def test_resume_does_not_wait_for_name_and_name_survives_execution_exit(
                 == "completed"
             )
             await asyncio.wait_for(started.wait(), 1)
-            assert (await database.get_workflow(request.workflow_id)).name is None
+            assert (
+                await database.get_workflow(request.workflow_id)
+            ).description is None
             release.set()
             async with asyncio.timeout(5):
-                while (await database.get_workflow(request.workflow_id)).name is None:
+                while (
+                    await database.get_workflow(request.workflow_id)
+                ).description is None:
                     await asyncio.sleep(0.01)
             assert (
                 await database.get_workflow(request.workflow_id)
-            ).name == "Background title"
+            ).description == "Background title"
+            assert (
+                await database.get_workflow(request.workflow_id)
+            ).name == "Customer workflow"
     finally:
         await runner.aclose()
 
@@ -313,10 +331,17 @@ async def test_shutdown_and_deletion_cancel_background_naming(
         assert cancelled.is_set()
 
 
-@pytest.mark.parametrize("name", ["", "x" * 121])
-def test_invalid_workflow_name(name: str) -> None:
+def test_invalid_workflow_name() -> None:
     with pytest.raises(ValueError):
-        models.Workflow(id="workflow", definition_ref="test:workflow", name=name)
+        models.Workflow(id="workflow", definition_ref="test:workflow", name="")
+
+
+@pytest.mark.parametrize("description", ["", "x" * 121])
+def test_invalid_execution_description(description: str) -> None:
+    with pytest.raises(ValueError):
+        models.Workflow(
+            id="workflow", definition_ref="test:workflow", description=description
+        )
 
 
 @pytest.mark.parametrize("text", ["", " \n\t", '""'])
@@ -332,7 +357,7 @@ async def test_empty_titles_are_not_persisted(tmp_path: Path, text: str) -> None
         content=[connect.TextBlock(text=text)], finish_reason="stop"
     )
     await owner.ensure_name(database, "workflow")
-    assert (await database.get_workflow("workflow")).name is None
+    assert (await database.get_workflow("workflow")).description is None
 
 
 async def test_naming_cancellation_propagates_and_can_recover(tmp_path: Path) -> None:
@@ -346,7 +371,7 @@ async def test_naming_cancellation_propagates_and_can_recover(tmp_path: Path) ->
     cast(AsyncMock, owner.llm.generate).side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
         await owner.ensure_name(database, "workflow")
-    assert (await database.get_workflow("workflow")).name is None
+    assert (await database.get_workflow("workflow")).description is None
     reopened = SQLiteHistory(database.path)
     await (await naming(tmp_path)).ensure_name(reopened, "workflow")
-    assert (await reopened.get_workflow("workflow")).name == "Fix failing tests"
+    assert (await reopened.get_workflow("workflow")).description == "Fix failing tests"

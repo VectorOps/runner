@@ -391,15 +391,31 @@ class SQLiteHistory:
 
     async def set_workflow_name(self, workflow_id: str, name: str) -> models.Workflow:
         """Set presentation metadata once without replacing execution configuration."""
+        return await self._set_workflow_text(workflow_id, "name", name)
+
+    async def set_workflow_description(
+        self, workflow_id: str, description: str
+    ) -> models.Workflow:
+        """Set the generated execution description without changing its workflow name."""
+        return await self._set_workflow_text(workflow_id, "description", description)
+
+    async def _set_workflow_text(
+        self,
+        workflow_id: str,
+        field: typing.Literal["name", "description"],
+        value: str,
+    ) -> models.Workflow:
+        """Commit write-once text metadata and publish the updated snapshots."""
 
         def update(connection: sqlite3.Connection) -> models.Workflow:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 workflow = self._workflow(connection, workflow_id)
-                if workflow.name is not None:
+                current = workflow.name if field == "name" else workflow.description
+                if current is not None:
                     return workflow
                 updated = models.Workflow.model_validate(
-                    {**workflow.model_dump(), "name": name}
+                    {**workflow.model_dump(), field: value}
                 )
                 sql.execute(
                     connection,

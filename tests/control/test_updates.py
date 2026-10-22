@@ -161,10 +161,11 @@ async def test_mailbox_changes_push_without_step_events(tmp_path: Path) -> None:
         await service.aclose()
 
 
-async def test_generated_name_pushes_through_runner_without_new_steps(
+async def test_generated_description_pushes_without_changing_workflow_name(
     tmp_path: Path,
 ) -> None:
     database = await store(tmp_path / "data/executions/execution/history.sqlite3")
+    await database.set_workflow_name("workflow", "Customer workflow")
     await database.register_input(
         "request",
         user_input.input_spec(chat_input.UserMessageRequest(prompt="Message?")),
@@ -188,11 +189,13 @@ async def test_generated_name_pushes_through_runner_without_new_steps(
                     event = await captured.get()
                     if event.get("kind") == "workflow.updated":
                         snapshot = events.WorkflowUpdated.model_validate(event)
-                        if snapshot.workflow.name == "Generated title":
+                        assert snapshot.workflow.name == "Customer workflow"
+                        if snapshot.workflow.description == "Generated title":
                             named = True
                     elif event.get("kind") == "execution.updated":
                         summary = events.ExecutionUpdated.model_validate(event)
-                        if summary.summary.name == "Generated title":
+                        assert summary.summary.name == "Customer workflow"
+                        if summary.summary.description == "Generated title":
                             summarized = True
         assert (await database.inspect_execution()).stats.steps == 1
     finally:

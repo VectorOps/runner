@@ -28,6 +28,7 @@ async def test_committed_names_usage_inputs_and_heads_update_projection(
     index = await runner.execution_index()
     with patch.object(index, "discover", side_effect=AssertionError("archive scan")):
         await history.set_workflow_name("root", "Projected title")
+        await history.set_workflow_description("root", "Execution task")
         await history.append_step(generation("first"))
         await history.append_step(generation("second", previous="first", incoming=300))
         await spawn(history, "root", "child")
@@ -57,6 +58,7 @@ async def test_committed_names_usage_inputs_and_heads_update_projection(
         projected = await project.summaries.get("execution")
         assert projected == await history.execution_summary()
         assert projected.name == "Projected title"
+        assert projected.description == "Execution task"
         assert projected.pending_inputs == 1
         assert projected.usage is not None and projected.usage.root_context is not None
         assert projected.usage.totals.input_tokens == 500
@@ -70,6 +72,9 @@ async def test_committed_names_usage_inputs_and_heads_update_projection(
             assert (
                 await runner.execution_summary("execution")
             ).name == "Projected title"
+            assert (
+                await runner.execution_summary("execution")
+            ).description == "Execution task"
 
 
 async def test_stale_revisions_and_deleted_sources_cannot_restore_old_stats(

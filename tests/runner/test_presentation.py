@@ -16,11 +16,11 @@ from vectorops.runner.api import composition as c
 from vectorops.runner.api.builtin_tools.subworkflows import subworkflow_tool
 from vectorops.runner.presentation import WorkflowPresentation, WorkflowPresentationOverride
 
-@c.workflow(presentation=WorkflowPresentation(short_name="Research", bgcolor="#ABCDEF", options=["llm_only"]))
+@c.workflow(name="Analysis worker", presentation=WorkflowPresentation(short_name="Research", bgcolor="#ABCDEF", options=["llm_only"]))
 async def child(ctx):
     return "message"
 
-@c.workflow(presentation=WorkflowPresentation(short_name="Root", bgcolor="#123456", options=["prefix_messages", "hide_subworkflows"]))
+@c.workflow(name="Research coordinator", presentation=WorkflowPresentation(short_name="Root", bgcolor="#123456", options=["prefix_messages", "hide_subworkflows"]))
 async def main(ctx):
     first, second = await asyncio.gather(
         ctx.spawn_workflow("presentation:child", presentation=WorkflowPresentationOverride(short_name="First", options=[])),
@@ -41,8 +41,12 @@ def presentation_source(workspace: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize("legacy_names", [False, True])
 async def test_parallel_direct_and_tool_spawn_overrides(
-    runner: WorkflowRunner, history: MemoryHistory, presentation_source: Path
+    runner: WorkflowRunner,
+    history: MemoryHistory,
+    presentation_source: Path,
+    legacy_names: bool,
 ) -> None:
     assert (
         await runner.run(
@@ -53,12 +57,15 @@ async def test_parallel_direct_and_tool_spawn_overrides(
         == "done"
     )
     root = history.workflows["root"]
+    assert root.name == "Research coordinator"
     assert root.presentation.short_name == "Root"
     assert root.presentation.bgcolor == "#654321"
     children = [item for item in history.workflows.values() if item.id != "root"]
     assert len(children) == 4
+    assert all(item.name == "Analysis worker" for item in children)
     by_name = {item.presentation.short_name: item for item in children}
     assert by_name["First"].presentation.options == []
+    assert p.resolve_display(by_name["First"]).label == "First"
     assert by_name["First"].presentation.bgcolor == "#abcdef"
     assert by_name["Tool"].presentation.options == []
     assert all(
@@ -73,10 +80,17 @@ async def test_parallel_direct_and_tool_spawn_overrides(
     )
     descriptor = await (await runner.project()).resolver.describe("presentation:child")
     assert descriptor.presentation.short_name == "Research"
+    if legacy_names:
+        history.workflows = {
+            key: value.model_copy(update={"name": None})
+            for key, value in history.workflows.items()
+        }
     saved = {key: value.model_dump() for key, value in history.workflows.items()}
     appended = list(history.appended)
     presentation_source.write_text(
-        SOURCE.replace("Research", "Changed").replace("First", "Other")
+        SOURCE.replace("Research", "Changed")
+        .replace("First", "Other")
+        .replace("Analysis worker", "New worker")
     )
     assert (
         await WorkflowRunner(runner.path, history).run(
@@ -107,18 +121,22 @@ async def test_persistent_start_and_resume_keep_resolved_metadata(
     execution_id = runner.last_execution_id
     assert execution_id is not None
     saved = await runner.workflow_state(execution_id, "root")
+    assert saved.name == "Research coordinator"
     assert saved.presentation == p.WorkflowPresentation(
         short_name="Run", bgcolor="#123456"
     )
     await runner.aclose()
     presentation_source.write_text(
-        SOURCE.replace("Root", "New default").replace("Research", "New child")
+        SOURCE.replace("Root", "New default")
+        .replace("Research", "New child")
+        .replace("Analysis worker", "New worker")
     )
     restarted = WorkflowRunner(workspace)
     assert await restarted.resume(execution_id) == "done"
     assert (
         await restarted.workflow_state(execution_id, "root")
     ).presentation == saved.presentation
+    assert (await restarted.workflow_state(execution_id, "root")).name == saved.name
     assert (
         await restarted.run("presentation:child", workflow_id="independent")
         == "message"
@@ -126,6 +144,7 @@ async def test_persistent_start_and_resume_keep_resolved_metadata(
     other_id = restarted.last_execution_id
     assert other_id is not None
     independent = await restarted.workflow_state(other_id, "independent")
+    assert independent.name == "New worker"
     assert independent.presentation.short_name == "New child"
     assert independent.presentation.options == [p.PresentationOption.LLM_ONLY]
     await restarted.aclose()

@@ -97,6 +97,7 @@ class SummaryHistory:
             reference=workflow.definition_ref,
             root_workflow_id=workflow.id,
             name=workflow.name,
+            description=workflow.description,
             status=execution.status,
             pending_inputs=pending,
             usage=usage.ExecutionUsage(

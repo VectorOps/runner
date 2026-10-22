@@ -41,7 +41,8 @@ class Workflow(_JsonModel):
     inbox_version: typing.Optional[typing.Literal[1]] = None
     child_cancellation_version: typing.Optional[typing.Literal[1]] = None
     created_at: typing.Optional[str] = None
-    name: typing.Optional[str] = pydantic.Field(
+    name: typing.Optional[str] = pydantic.Field(default=None, min_length=1)
+    description: typing.Optional[str] = pydantic.Field(
         default=None, min_length=1, max_length=120
     )
     usage: typing.Optional[usage_models.WorkflowUsage] = None
@@ -53,8 +54,8 @@ class Workflow(_JsonModel):
     def same_configuration(self, other: Workflow) -> bool:
         """Compare execution configuration without mutable presentation metadata."""
         return self.model_dump(
-            exclude={"name", "usage", "presentation"}
-        ) == other.model_dump(exclude={"name", "usage", "presentation"})
+            exclude={"name", "description", "usage", "presentation"}
+        ) == other.model_dump(exclude={"name", "description", "usage", "presentation"})
 
 
 class StepOperation(_JsonModel):

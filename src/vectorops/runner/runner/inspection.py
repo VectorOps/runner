@@ -25,6 +25,7 @@ class ExecutionSummary(pydantic.BaseModel):
     reference: typing.Optional[str] = None
     root_workflow_id: typing.Optional[str] = None
     name: typing.Optional[str] = None
+    description: typing.Optional[str] = None
     status: typing.Literal[
         "starting", "running", "paused", "stopping", "completed", "failed", "cancelled"
     ]

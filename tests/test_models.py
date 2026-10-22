@@ -68,6 +68,22 @@ def test_workflow_json_defaults_and_frozen_fields() -> None:
         workflow.id = "changed"
 
 
+def test_workflow_name_and_description_are_independent_metadata() -> None:
+    legacy = m.Workflow.model_validate(
+        {"id": "w", "definition_ref": "example:workflow", "name": "Saved title"}
+    )
+    assert legacy.name == "Saved title"
+    assert legacy.description is None
+    workflow = m.Workflow(
+        id="w",
+        definition_ref="example:workflow",
+        name="Customer workflow",
+        description="Investigate failed tests",
+    )
+    assert m.Workflow.model_validate_json(workflow.model_dump_json()) == workflow
+    assert workflow.same_configuration(legacy)
+
+
 @pytest.mark.parametrize("description", [None, "", "Review the workflow"])
 def test_spawn_description_roundtrip(description: typing.Optional[str]) -> None:
     step = m.WorkflowStep(
