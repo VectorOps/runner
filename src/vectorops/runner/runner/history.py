@@ -1,9 +1,25 @@
 """Storage-independent access to workflow configuration and replay paths."""
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from typing import Optional, Protocol, runtime_checkable
 
 from vectorops.runner import models
+
+
+@runtime_checkable
+class SnapshotUpdater(Protocol):
+    async def replace_step(
+        self,
+        step_id: str,
+        replacement: Callable[[models.WorkflowStep], models.WorkflowStep],
+    ) -> models.WorkflowStep:
+        """Apply an internal replacement under the cache lock.
+
+        The callback borrows the previous snapshot without mutating or retaining it.
+        The returned snapshot is cache-owned and may only be read by the session;
+        it must be detached before passing to arbitrary consumers.
+        """
+        ...
 
 
 @runtime_checkable

@@ -141,11 +141,9 @@ class UsageHistory:
     def workflow_usage(
         connection: sqlite3.Connection, workflow_id: str
     ) -> usage.WorkflowUsage:
-        row = sql.execute(
-            connection,
-            sql.Query.from_(WORKFLOWS)
-            .select(sql.json_extract(WORKFLOWS.payload, "$.usage"))
-            .where(WORKFLOWS.id == workflow_id),
+        row = connection.execute(
+            "SELECT json_extract(payload, '$.usage') FROM workflows WHERE id = ?",
+            (workflow_id,),
         ).fetchone()
         if row is None:
             raise KeyError(workflow_id)
@@ -159,18 +157,9 @@ class UsageHistory:
     def save_usage(
         connection: sqlite3.Connection, workflow_id: str, totals: usage.WorkflowUsage
     ) -> None:
-        sql.execute(
-            connection,
-            sql.Query.update(WORKFLOWS)
-            .set(
-                WORKFLOWS.payload,
-                sql.json_set(
-                    WORKFLOWS.payload,
-                    "$.usage",
-                    sql.json_value(totals.model_dump_json()),
-                ),
-            )
-            .where(WORKFLOWS.id == workflow_id),
+        connection.execute(
+            "UPDATE workflows SET payload = json_set(payload, '$.usage', json(?)) WHERE id = ?",
+            (totals.model_dump_json(), workflow_id),
         )
 
     @staticmethod
@@ -223,22 +212,17 @@ class UsageHistory:
             if current in result:
                 raise ValueError("cycle in workflow tree")
             result.append(current)
-            row = sql.execute(
-                connection,
-                sql.Query.from_(PARENTS)
-                .select(PARENTS.parent_id)
-                .where(PARENTS.child_id == current),
+            row = connection.execute(
+                "SELECT parent_id FROM workflow_parents WHERE child_id = ?",
+                (current,),
             ).fetchone()
             current = None if row is None else str(row[0])
         return result
 
     @staticmethod
     def snapshot(connection: sqlite3.Connection) -> tuple[int, usage.Totals]:
-        row = sql.execute(
-            connection,
-            sql.Query.from_(STATE)
-            .select(STATE.revision, STATE.payload)
-            .where(STATE.id == 1),
+        row = connection.execute(
+            "SELECT revision, payload FROM usage_state WHERE id = 1"
         ).fetchone()
         return int(row[0]), usage.Totals.model_validate_json(row[1])
 
@@ -254,12 +238,9 @@ class UsageHistory:
             return None
         revision, total = UsageHistory.snapshot(connection)
         total = total.replace(old, new)
-        sql.execute(
-            connection,
-            sql.Query.update(STATE)
-            .set(STATE.revision, revision + 1)
-            .set(STATE.payload, total.model_dump_json())
-            .where(STATE.id == 1),
+        connection.execute(
+            "UPDATE usage_state SET revision = ?, payload = ? WHERE id = 1",
+            (revision + 1, total.model_dump_json()),
         )
         ancestors = UsageHistory.ancestors(connection, step.workflow_id)
         for identifier in ancestors:

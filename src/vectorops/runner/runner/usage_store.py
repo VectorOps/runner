@@ -31,11 +31,8 @@ class UsageStore:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS usage_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
         )
-        row = sql.execute(
-            connection,
-            sql.Query.from_(DOCUMENTS)
-            .select(DOCUMENTS.payload)
-            .where(DOCUMENTS.name == "usage"),
+        row = connection.execute(
+            "SELECT payload FROM documents WHERE name = ?", ("usage",)
         ).fetchone()
         return (
             usage.RunnerUsage()
@@ -52,11 +49,9 @@ class UsageStore:
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
                 counters = self._initialize(connection)
-                row = sql.execute(
-                    connection,
-                    sql.Query.from_(EXECUTIONS)
-                    .select(EXECUTIONS.payload)
-                    .where(EXECUTIONS.execution_id == execution_id),
+                row = connection.execute(
+                    "SELECT payload FROM usage_executions WHERE execution_id = ?",
+                    (execution_id,),
                 ).fetchone()
                 previous: Optional[Entry] = (
                     None if row is None else Entry.model_validate_json(row[0])
@@ -80,12 +75,10 @@ class UsageStore:
                         )
                     }
                 )
-                sql.execute(
-                    connection,
-                    sql.Query.into(EXECUTIONS)
-                    .insert(execution_id, entry.model_dump_json())
-                    .on_conflict(EXECUTIONS.execution_id)
-                    .do_update(EXECUTIONS.payload),
+                connection.execute(
+                    "INSERT INTO usage_executions (execution_id, payload) VALUES (?, ?) "
+                    "ON CONFLICT (execution_id) DO UPDATE SET payload = excluded.payload",
+                    (execution_id, entry.model_dump_json()),
                 )
                 WorkspaceDatabase.put_document(
                     connection, "usage", counters.model_dump_json()

@@ -31,7 +31,7 @@ from vectorops.runner.worktrees.runtime import ExecutionTargets
 from vectorops.runner.runner.checkpoint import CheckpointReporter
 from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner.execution_state import timestamp
-from vectorops.runner.runner.history import WorkflowHistory
+from vectorops.runner.runner.history import SnapshotUpdater, WorkflowHistory
 from vectorops.runner.runner.events import StepEvent, StepEventSink
 from vectorops.runner.runner.resources import CleanupRegistry, finish_cleanup
 from vectorops.runner.runner.scheduler import Scheduler
@@ -888,11 +888,11 @@ class ExecutionSession:
     async def update(self, step: models.WorkflowStep) -> None:
         if step.workflow_id != self.workflow.id:
             raise ValueError("step belongs to another workflow")
-        async with self._history_lock:
-            previous = await self.history.get_step(step.id)
+
+        def replacement(previous: models.WorkflowStep) -> models.WorkflowStep:
             if previous.authorized is False and step.authorized is True:
                 previous = previous.model_copy(update={"authorization_rule_id": None})
-            step = step.model_copy(
+            return step.model_copy(
                 update={
                     "authorized": (
                         previous.authorized
@@ -917,8 +917,14 @@ class ExecutionSession:
                     ),
                 }
             )
-            await self.history.update_step(step)
-            await self._emit(step)
+
+        async with self._history_lock:
+            if isinstance(self.history, SnapshotUpdater):
+                snapshot = await self.history.replace_step(step.id, replacement)
+            else:
+                snapshot = replacement(await self.history.get_step(step.id))
+                await self.history.update_step(snapshot)
+            await self._emit(snapshot)
         if self.reporter is not None and self.durable_head is not None:
             self.reporter.record(self.workflow.id, self.durable_head)
 
@@ -997,7 +1003,7 @@ class ExecutionSession:
                 StepEvent(
                     kind=kind,
                     execution_id=self.execution_id,
-                    step=step.model_copy(deep=True),
+                    step=models.WorkflowStep.model_validate(step.model_dump()),
                     position=await self.history.get_step_position(step.id),
                 )
             )

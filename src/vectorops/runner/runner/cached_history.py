@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import aclosing
 import math
 import typing
@@ -132,18 +132,33 @@ class CachedHistory:
             return step
 
     async def update_step(self, step: models.WorkflowStep) -> None:
+        await self.replace_step(step.id, lambda previous: step)
+
+    async def replace_step(
+        self,
+        step_id: str,
+        replacement: Callable[[models.WorkflowStep], models.WorkflowStep],
+    ) -> models.WorkflowStep:
+        """Detach changed fields once and share cache-owned operation data.
+
+        Only the internal session may borrow the result. Public reads still detach
+        it, and failed write-through persistence never installs the replacement.
+        """
         async with self._lock:
             self._check()
-            previous = await self._get_step(step.id)
+            previous = await self._get_step(step_id)
+            step = replacement(previous)
             if previous.outcome.kind not in ("streaming", "pending", "waiting"):
                 raise ValueError("terminal steps cannot be updated")
             if (
+                previous.id,
                 previous.workflow_id,
                 previous.previous_step_id,
                 previous.operation,
                 previous.deferred_delivery,
                 previous.deliveries,
             ) != (
+                step.id,
                 step.workflow_id,
                 step.previous_step_id,
                 step.operation,
@@ -151,7 +166,12 @@ class CachedHistory:
                 step.deliveries,
             ):
                 raise ValueError("step identity and links cannot change")
-            snapshot = step.model_copy(deep=True)
+            snapshot = models.WorkflowStep.model_validate(
+                {
+                    **step.model_dump(exclude={"operation"}),
+                    "operation": previous.operation,
+                }
+            )
             snapshot.validate_authorization_update(previous)
             if snapshot.outcome.kind == "streaming" and not self.write_through:
                 self._pending[step.id] = snapshot
@@ -164,6 +184,7 @@ class CachedHistory:
                 await self.backend.update_step(snapshot)
                 self._pending.pop(step.id, None)
                 self._cache_step(snapshot)
+            return snapshot
 
     async def _flush(
         self, identifiers: typing.Optional[tuple[str, ...]] = None

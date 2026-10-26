@@ -184,12 +184,10 @@ class WorkspaceDatabase:
 
     @staticmethod
     def put_document(connection: sqlite3.Connection, name: str, payload: str) -> None:
-        sql.execute(
-            connection,
-            sql.Query.into(DOCUMENTS)
-            .insert(name, payload)
-            .on_conflict(DOCUMENTS.name)
-            .do_update(DOCUMENTS.payload),
+        connection.execute(
+            "INSERT INTO documents (name, payload) VALUES (?, ?) "
+            "ON CONFLICT (name) DO UPDATE SET payload = excluded.payload",
+            (name, payload),
         )
 
     async def load_document(self, name: str, initial: Callable[[], str]) -> str:

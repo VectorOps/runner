@@ -309,9 +309,8 @@ class SQLiteHistory:
 
     @staticmethod
     def _step(connection: sqlite3.Connection, step_id: str) -> models.WorkflowStep:
-        row = sql.execute(
-            connection,
-            sql.Query.from_(STEPS).select(STEPS.payload).where(STEPS.id == step_id),
+        row = connection.execute(
+            "SELECT payload FROM steps WHERE id = ?", (step_id,)
         ).fetchone()
         if row is None:
             raise KeyError(step_id)
@@ -1537,11 +1536,9 @@ class SQLiteHistory:
                     ):
                         raise ValueError("step identity and links cannot change")
                     step.validate_authorization_update(previous)
-                    sql.execute(
-                        connection,
-                        sql.Query.update(STEPS)
-                        .set(STEPS.payload, payload)
-                        .where(STEPS.id == step.id),
+                    connection.execute(
+                        "UPDATE steps SET payload = ? WHERE id = ?",
+                        (payload, step.id),
                     )
                     changes.account(UsageHistory.update(connection, step, previous))
                     changes.changed = True
