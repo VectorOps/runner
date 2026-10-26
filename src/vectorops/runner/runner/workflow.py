@@ -39,6 +39,7 @@ from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
 from vectorops.runner.runner import inspection, summary_history
+from vectorops.runner.runner.summary_runtime import SummaryRuntime
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
 from vectorops.runner.runner import inbox
@@ -79,6 +80,7 @@ class WorkflowRunner:
         self.mcp_pool = mcp_pool
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
+        self._summaries: dict[str, SummaryRuntime] = {}
         self._suspending: set[str] = set()
         self._stop_requests: set[str] = set()
         self._deleting: set[str] = set()
@@ -242,6 +244,9 @@ class WorkflowRunner:
                     try:
                         await finish_cleanup(asyncio.create_task(settle()))
                     finally:
+                        runtime = self._summaries.pop(execution_id, None)
+                        if runtime is not None:
+                            await runtime.close()
                         self._execution_tasks.pop(execution_id, None)
                         self._suspending.discard(execution_id)
                         self._stop_requests.discard(execution_id)
@@ -624,6 +629,15 @@ class WorkflowRunner:
                     history_path.is_file
                 ):
                     raise FileNotFoundError("execution history is missing")
+                runtime = SummaryRuntime(
+                    project.summaries,
+                    (
+                        partial(self.change_sink, execution_id)
+                        if self.change_sink is not None
+                        else None
+                    ),
+                )
+                self._summaries[execution_id] = runtime
                 async with (
                     SQLiteHistory(
                         history_path,
@@ -632,6 +646,7 @@ class WorkflowRunner:
                         ),
                         usage_store=project.usage,
                         summary_store=project.summaries,
+                        summary_runtime=runtime,
                         event_sink=self.event_sink,
                         mailbox_sink=self.mailbox_sink,
                         change_sink=(
@@ -976,6 +991,7 @@ class WorkflowRunner:
             workspace_rules=tool_authorization_store.WorkspaceRules(project.database),
             usage_store=project.usage,
             summary_store=project.summaries,
+            summary_runtime=self._summaries.get(execution_id),
             event_sink=self.event_sink,
             mailbox_sink=self.mailbox_sink,
             change_sink=(

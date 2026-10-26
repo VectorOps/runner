@@ -28,6 +28,7 @@ from vectorops.runner.runner.usage_history import UsageHistory
 from vectorops.runner.runner.usage_store import UsageStore
 from vectorops.runner.runner import summary_history
 from vectorops.runner.runner.summary_store import SummaryStore
+from vectorops.runner.runner.summary_runtime import SummaryRuntime
 from vectorops.runner.runner.resources import finish_cleanup
 
 T = typing.TypeVar("T")
@@ -63,6 +64,7 @@ class SQLiteHistory:
         batch_size: int = 128,
         usage_store: typing.Optional[UsageStore] = None,
         summary_store: typing.Optional[SummaryStore] = None,
+        summary_runtime: typing.Optional[SummaryRuntime] = None,
         change_sink: typing.Optional[events.HistoryChangeSink] = None,
         event_sink: typing.Optional[events.StepEventSink] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
@@ -78,6 +80,11 @@ class SQLiteHistory:
         self._closed = False
         self._usage_store = usage_store
         self._summary_store = summary_store
+        self._summary_runtime = summary_runtime or (
+            SummaryRuntime(summary_store, change_sink)
+            if summary_store is not None
+            else None
+        )
         self._change_sink = change_sink
         self._event_sink = event_sink
         self._mailbox_sink = mailbox_sink
@@ -88,6 +95,8 @@ class SQLiteHistory:
             raise RuntimeError("history writer is already open or closed")
         await self._prepare()
         self._writer = SQLiteWriter(self._connect)
+        if self._summary_runtime is not None:
+            self._summary_runtime.active = True
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -97,6 +106,8 @@ class SQLiteHistory:
         self._closed = True
         if self._writer is not None:
             await self._writer.aclose()
+        if self._summary_runtime is not None:
+            await self._summary_runtime.close()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -179,6 +190,40 @@ class SQLiteHistory:
         notifications: typing.Optional[
             list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
         ] = None,
+        streaming: bool = False,
+    ) -> T:
+        async def run() -> T:
+            if self._summary_runtime is None:
+                return await self._run_committed(
+                    operation,
+                    account=account,
+                    workflow_ids=workflow_ids,
+                    notify=notify,
+                    notifications=notifications,
+                )
+            async with self._summary_runtime.lock:
+                return await self._run_committed(
+                    operation,
+                    account=account,
+                    workflow_ids=workflow_ids,
+                    notify=notify,
+                    notifications=notifications,
+                    streaming=streaming,
+                )
+
+        return await finish_cleanup(asyncio.create_task(run()))
+
+    async def _run_committed(
+        self,
+        operation: Callable[[sqlite3.Connection], T],
+        *,
+        account: bool = False,
+        workflow_ids: tuple[str, ...] = (),
+        notify: bool = False,
+        notifications: typing.Optional[
+            list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
+        ] = None,
+        streaming: bool = False,
     ) -> T:
         if (
             self._summary_store is not None
@@ -193,8 +238,13 @@ class SQLiteHistory:
 
             def tracked(connection: sqlite3.Connection) -> T:
                 nonlocal changed, committed, project_summary
+                runtime = self._summary_runtime
+                if runtime is not None:
+                    runtime.working.begin(connection)
                 before = connection.total_changes
                 result = operation(connection)
+                if runtime is not None:
+                    runtime.working.commit(connection)
                 committed = tuple(notifications or ())
                 project_summary = connection.total_changes != before
                 if self._change_sink is not None and connection.total_changes != before:
@@ -211,11 +261,16 @@ class SQLiteHistory:
                 return await self._accounted(tracked, account=account)
             finally:
                 projection_cancelled = False
-                if project_summary and self._summary_store is not None:
+                if project_summary and self._summary_runtime is not None:
                     try:
-                        await finish_cleanup(
-                            asyncio.create_task(self._publish_summary())
-                        )
+                        snapshot = self._summary_runtime.working.snapshot
+                        if snapshot is not None:
+                            await self._summary_runtime.changed(
+                                snapshot,
+                                changed or (),
+                                prompt=not streaming,
+                                notify=notify,
+                            )
                     except asyncio.CancelledError:
                         projection_cancelled = True
                 for event in committed:
@@ -231,7 +286,7 @@ class SQLiteHistory:
                             level=diagnostics.Level.ERROR,
                             error=exc,
                         )
-                if changed is not None:
+                if changed is not None and self._summary_runtime is None:
                     assert self._change_sink is not None
                     try:
                         self._change_sink(changed)
@@ -245,27 +300,6 @@ class SQLiteHistory:
                     raise asyncio.CancelledError
         return await self._accounted(operation, account=account)
 
-    async def _publish_summary(self) -> None:
-        """A projection failure cannot undo or fail an already committed history write."""
-        assert self._summary_store is not None
-        try:
-            snapshot = await self.summary_snapshot()
-        except KeyError:
-            return
-        except Exception as exc:
-            await self._summary_store.database.invalidate_index()
-            diagnostics.log(
-                "summary.snapshot_failed", level=diagnostics.Level.ERROR, error=exc
-            )
-            return
-        try:
-            await self._summary_store.record(snapshot)
-        except Exception as exc:
-            await self._summary_store.database.invalidate_index()
-            diagnostics.log(
-                "summary.publish_failed", level=diagnostics.Level.ERROR, error=exc
-            )
-
     async def _accounted(
         self, operation: Callable[[sqlite3.Connection], T], *, account: bool
     ) -> T:
@@ -276,7 +310,19 @@ class SQLiteHistory:
 
             async def persist() -> T:
                 result = await self._invoke(operation)
-                revision, total = await self._invoke(UsageHistory.snapshot)
+                runtime = self._summary_runtime
+                snapshot = runtime.working.snapshot if runtime is not None else None
+                if (
+                    runtime is not None
+                    and snapshot is not None
+                    and snapshot.summary.usage is not None
+                ):
+                    revision, total = (
+                        runtime.working.usage_revision,
+                        snapshot.summary.usage.totals,
+                    )
+                else:
+                    revision, total = await self._invoke(UsageHistory.snapshot)
                 await store.record(self.path.parent.name, revision, total)
                 return result
 
@@ -360,9 +406,10 @@ class SQLiteHistory:
         def read(connection: sqlite3.Connection) -> list[LocalExecutionTarget]:
             with connection:
                 connection.execute("BEGIN")
-                return summary_history.SummaryHistory.targets(
-                    connection, self._execution(connection)
-                )
+                runtime = self._summary_runtime
+                if runtime is not None and runtime.working.snapshot is not None:
+                    return list(runtime.working.snapshot.targets)
+                return summary_history.TargetReferences.read(connection)
 
         return await self._run(read)
 
@@ -1436,11 +1483,14 @@ class SQLiteHistory:
                         .where(STEPS.id == step.id),
                     )
                     UsageHistory.update(connection, step, previous)
+                    if self._summary_runtime is not None:
+                        self._summary_runtime.working.step(step)
 
         await self._run(
             update,
             account=True,
             workflow_ids=tuple({step.workflow_id for step in steps}),
+            streaming=all(step.outcome.kind == "streaming" for step in steps),
         )
 
     def _snapshot_path(self, workflow_id: str, head_step_id: str) -> sqlite3.Connection:

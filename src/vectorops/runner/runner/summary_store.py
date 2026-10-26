@@ -97,16 +97,28 @@ class SummaryStore:
         connection: sqlite3.Connection, snapshot: summary_history.Snapshot
     ) -> None:
         identifier = snapshot.summary.execution_id
-        sql.execute(
-            connection,
-            sql.Query.from_(TARGETS).delete().where(TARGETS.execution_id == identifier),
+        previous = set(
+            connection.execute(
+                "SELECT root, worktree_id FROM execution_targets WHERE execution_id = ?",
+                (identifier,),
+            )
+        )
+        current = {
+            (target.root, str(target.worktree_id or "")) for target in snapshot.targets
+        }
+        connection.executemany(
+            "DELETE FROM execution_targets WHERE execution_id = ? AND root = ? AND worktree_id = ?",
+            [
+                (identifier, root, worktree_id)
+                for root, worktree_id in previous - current
+            ],
         )
         sql.insert_many(
             connection,
             TARGETS,
             [
-                (identifier, target.root, str(target.worktree_id or ""))
-                for target in snapshot.targets
+                (identifier, root, worktree_id)
+                for root, worktree_id in current - previous
             ],
             ignore=True,
         )

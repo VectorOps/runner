@@ -262,12 +262,19 @@ class UsageHistory:
             UsageHistory.save_usage(connection, identifier, updated)
 
     @staticmethod
+    def context(step: models.WorkflowStep) -> usage.Context:
+        from vectorops.runner.api.llm import observability
+
+        value = (step.metrics or {}).get("llm")
+        if value is None:
+            return usage.Context(step_id=step.id)
+        return observability.Metrics.model_validate(value).context(step.id)
+
+    @staticmethod
     def root_context(
         connection: sqlite3.Connection, root_id: str
     ) -> Optional[usage.Context]:
         """Use the latest generation on the authoritative root path, not row order."""
-        from vectorops.runner.api.llm import observability
-
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'generation_ancestors'"
         ).fetchone():
@@ -298,10 +305,6 @@ class UsageHistory:
             ).fetchone()
             step = models.WorkflowStep.model_validate_json(row[0])
             if step.operation.kind == "llm.generate":
-                value = (step.metrics or {}).get("llm")
-                if value is None:
-                    return usage.Context(step_id=step.id)
-                metrics = observability.Metrics.model_validate(value)
-                return metrics.context(step.id)
+                return UsageHistory.context(step)
             current = step.previous_step_id
         return None
