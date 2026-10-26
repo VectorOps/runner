@@ -2,7 +2,7 @@ import asyncio
 from contextlib import closing
 from pathlib import Path
 import sqlite3
-from time import perf_counter
+from time import perf_counter, process_time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +11,7 @@ from tests.runner.test_usage import generation, seed
 from vectorops.runner import models
 from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.runner import summary_history
+from vectorops.runner.runner import branching, execution_state, mailbox
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.summary_runtime import SummaryRuntime
 from vectorops.runner.runner.summary_store import SummaryStore
@@ -54,6 +55,7 @@ async def test_streaming_work_is_independent_of_retained_workflows(
         await database.get_execution()
         statements.clear()
         started = perf_counter()
+        cpu_started = process_time()
         with (
             patch.object(
                 summary_history.SummaryHistory,
@@ -90,6 +92,11 @@ async def test_streaming_work_is_independent_of_retained_workflows(
                 )
                 database._summary_runtime._timer = None
         elapsed = perf_counter() - started
+        cpu_elapsed = process_time() - cpu_started
+        assert not any(
+            "TRIGGER" in statement.upper() or "summary_capture" in statement
+            for statement in statements
+        )
         assert not any(
             'FROM "workflows"' in statement and "WHERE" not in statement
             for statement in statements
@@ -101,7 +108,7 @@ async def test_streaming_work_is_independent_of_retained_workflows(
         expected = await database.summary_snapshot()
         assert database._summary_runtime.working.snapshot == expected
         print(
-            f"retained={retained}: 20 updates, old target rows examined={20 * retained}, new discovery queries=0, projection writes=1, seconds={elapsed:.4f}"
+            f"retained={retained}: 20 updates, old target rows examined={20 * retained}, new discovery queries=0, projection writes=1, seconds={elapsed:.4f}, cpu_seconds={cpu_elapsed:.4f}, cpu_ms_per_persisted_step={cpu_elapsed * 1000 / 80:.4f}"
         )
 
 
@@ -247,19 +254,13 @@ async def test_target_query_vm_work_before_and_after(
     database = SQLiteHistory(tmp_path / "history.sqlite3")
     await seed(database)
     target = LocalExecutionTarget(root=str(tmp_path))
-    with closing(sqlite3.connect(database.path)) as connection, connection:
-        connection.executemany(
-            "INSERT INTO workflows VALUES (?, ?)",
-            [
-                (
-                    f"retained-{index}",
-                    models.Workflow(
-                        id=f"retained-{index}", definition_ref="test", target=target
-                    ).model_dump_json(),
-                )
-                for index in range(retained)
-            ],
+    for index in range(retained):
+        await database.save_workflow(
+            models.Workflow(
+                id=f"retained-{index}", definition_ref="test", target=target
+            )
         )
+    with closing(sqlite3.connect(database.path)) as connection, connection:
         operations = 0
 
         def progress() -> int:
@@ -283,3 +284,250 @@ async def test_target_query_vm_work_before_and_after(
     print(
         f"retained={retained}: target discovery SQLite VM instructions before={before}, durable reference read after={after}; active streaming reference reads=0"
     )
+
+
+async def test_reads_and_noops_do_not_process_summary_or_write_derived_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = workspace(tmp_path)
+    database = SQLiteHistory(tmp_path / "history.sqlite3", summary_store=store)
+    await seed(database)
+    step = generation("stream", streaming=True)
+    await database.append_step(step)
+    await database.set_workflow_name("root", "Named")
+    record = await database.get_execution()
+    await database.save_execution(record)
+    before = await database.summary_snapshot()
+    statements: list[str] = []
+    original = database._connect
+
+    def connect() -> sqlite3.Connection:
+        connection = original()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(database, "_connect", connect)
+    with patch.object(
+        summary_history.WorkingSummary,
+        "base",
+        side_effect=AssertionError("read processed summary"),
+    ):
+        await database.get_execution()
+        await database.get_workflow("root")
+        await database.get_step("stream")
+        await database.referenced_targets()
+        await database.usage_snapshot()
+        await database.list_inputs(mailbox.RequestQuery(execution_id="execution"))
+    assert not any(
+        statement.lstrip()
+        .upper()
+        .startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "DROP"))
+        for statement in statements
+    )
+    statements.clear()
+    with patch.object(store, "record", new=AsyncMock()) as publish:
+        await database.update_step(step)
+        await database.save_execution(record)
+        await database.save_workflow(await database.get_workflow("root"))
+        await database.set_workflow_name("root", "Ignored")
+        await database.cancel_inputs("missing")
+        publish.assert_not_awaited()
+    assert await database.summary_snapshot() == before
+    assert not any(
+        statement.lstrip()
+        .upper()
+        .startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "DROP"))
+        and any(
+            table in statement
+            for table in ("summary_state", "target_references", "usage_state")
+        )
+        for statement in statements
+    )
+
+
+async def test_migration_removes_triggers_preserves_identity_and_reference_union(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "history.sqlite3"
+    database = SQLiteHistory(path)
+    await seed(database)
+    historical = LocalExecutionTarget(root=str(tmp_path / "historical"))
+    await database.reference_target(historical)
+    before = await database.summary_snapshot()
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "CREATE TRIGGER summary_execution_update AFTER UPDATE ON execution BEGIN UPDATE summary_state SET revision = revision + 1; END"
+        )
+        connection.execute(
+            "CREATE TRIGGER references_workflows_insert AFTER INSERT ON workflows BEGIN SELECT 1; END"
+        )
+        connection.execute(
+            "UPDATE execution SET payload = json_set(payload, '$.referenced_targets', json('[]'))"
+        )
+        revision = connection.execute("SELECT revision FROM summary_state").fetchone()[
+            0
+        ]
+    reopened = SQLiteHistory(path)
+    migrated = await reopened.summary_snapshot()
+    assert migrated.source_id == before.source_id
+    assert migrated.revision == revision
+    assert migrated.targets == [historical]
+    assert await SQLiteHistory(path).summary_snapshot() == migrated
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+            == []
+        )
+    await reopened.append_step(generation("one", streaming=True))
+    first = await reopened.summary_snapshot()
+    assert first.revision == migrated.revision + 1
+    await reopened.update_step(generation("one", streaming=True, outgoing=99))
+    assert (await reopened.summary_snapshot()).revision == first.revision + 1
+
+
+async def test_branch_and_input_deltas_match_durable_state(tmp_path: Path) -> None:
+    store = workspace(tmp_path)
+    database = SQLiteHistory(tmp_path / "history.sqlite3", summary_store=store)
+    await seed(database)
+    await database.append_step(generation("first"))
+    await database.append_step(generation("second", previous="first"))
+    await database.append_step(
+        models.WorkflowStep(
+            id="input",
+            workflow_id="root",
+            previous_step_id="second",
+            operation=models.StepOperation(kind=mailbox.KIND, name="request_input"),
+            outcome=models.StepPending(),
+            deferred_delivery=True,
+        )
+    )
+    async with database:
+        assert database._summary_runtime is not None
+        owner = database._summary_runtime
+        await database.register_input("input", mailbox.InputSpec(channel="approval"))
+        assert (await store.get("execution")).pending_inputs == 1
+        await database.set_paused({"input"})
+        assert (await store.get("execution")).status == "paused"
+        await database.answer_input(
+            mailbox.Answer(
+                execution_id="execution",
+                request_id="input",
+                response="yes",
+                idempotency_key="answer",
+            )
+        )
+        assert owner.working.snapshot == await database.summary_snapshot()
+        await database.accept_branch(
+            branching.Branch(
+                execution_id="execution",
+                step_id="input",
+                idempotency_key="branch",
+                action=branching.InsertInput(response="edited"),
+            )
+        )
+        await database.apply_branch()
+        assert owner.working.snapshot == await database.summary_snapshot()
+        record = await database.get_execution()
+        await database.save_execution(
+            record.model_copy(
+                update={
+                    "checkpoint": execution_state.ExecutionCheckpoint(
+                        heads={"root": "first"}
+                    )
+                }
+            ),
+            replace_heads=True,
+        )
+        assert owner.working.snapshot == await database.summary_snapshot()
+
+
+async def test_normal_updates_do_not_starve_and_urgent_status_bypasses_interval(
+    tmp_path: Path,
+) -> None:
+    store = workspace(tmp_path)
+    database = SQLiteHistory(tmp_path / "history.sqlite3", summary_store=store)
+    await seed(database)
+    await database.append_step(generation("stream", streaming=True))
+    async with database:
+        assert database._summary_runtime is not None
+        owner = database._summary_runtime
+        owner.interval = 0.04
+        owner._next_publication = 0
+        times: list[float] = []
+        original = store.record
+
+        async def record(snapshot: summary_history.Snapshot) -> None:
+            times.append(asyncio.get_running_loop().time())
+            await original(snapshot)
+
+        with patch.object(store, "record", side_effect=record):
+            await database.set_workflow_name("root", "Normal metadata")
+            assert not times
+            for index in range(25):
+                await database.update_step(
+                    generation("stream", streaming=True, outgoing=30 + index)
+                )
+                await asyncio.sleep(0.008)
+            assert len(times) >= 2
+            assert all(
+                right - left >= owner.interval * 0.9
+                for left, right in zip(times, times[1:])
+            )
+            owner.interval = 60
+            before = len(times)
+            await database.update_step(generation("stream", outgoing=100))
+            assert len(times) == before
+            await database.stop_execution()
+            assert len(times) == before + 1
+            assert (await store.get("execution")).status == "cancelled"
+
+
+async def test_flush_retains_newer_changes_and_failure_does_not_spin(
+    tmp_path: Path,
+) -> None:
+    store = workspace(tmp_path)
+    database = SQLiteHistory(tmp_path / "history.sqlite3")
+    await seed(database)
+    snapshot = await database.summary_snapshot()
+    owner = SummaryRuntime(store, None)
+    owner.active = True
+    owner.interval = 0.02
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = store.record
+    published: list[int] = []
+
+    async def hold(value: summary_history.Snapshot) -> None:
+        entered.set()
+        await release.wait()
+        await original(value)
+        published.append(value.revision)
+
+    newer = snapshot.model_copy(
+        update={
+            "revision": snapshot.revision + 1,
+            "summary": snapshot.summary.model_copy(update={"name": "New"}),
+        }
+    )
+    with patch.object(store, "record", side_effect=hold):
+        await owner.changed(snapshot, (), urgency=summary_history.Urgency.NORMAL)
+        await asyncio.wait_for(entered.wait(), 2)
+        await owner.changed(newer, ("root",), urgency=summary_history.Urgency.NORMAL)
+        release.set()
+        await owner.close()
+    assert published == [snapshot.revision, newer.revision]
+    owner.active = True
+    with patch.object(
+        store, "record", new=AsyncMock(side_effect=RuntimeError("offline"))
+    ) as publish:
+        await owner.changed(
+            snapshot.model_copy(update={"revision": newer.revision + 1}),
+            (),
+            urgency=summary_history.Urgency.NORMAL,
+        )
+        await asyncio.sleep(0.12)
+        assert publish.await_count == 1
+    await owner.close()

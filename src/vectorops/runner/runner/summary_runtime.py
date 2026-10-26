@@ -28,30 +28,39 @@ class SummaryRuntime:
         self._timer: Optional[asyncio.Task[None]] = None
         self._wake = asyncio.Event()
         self._publication_lock = asyncio.Lock()
+        self._next_publication = 0.0
 
     async def changed(
         self,
         snapshot: summary_history.Snapshot,
         workflows: tuple[str, ...],
         *,
-        prompt: bool,
+        urgency: summary_history.Urgency,
         notify: bool = False,
     ) -> None:
         self._pending = snapshot
         self._workflows.update(workflows)
         self._notify = self._notify or notify
-        if prompt or not self.active:
+        if urgency == summary_history.Urgency.IMMEDIATE or not self.active:
             await self.flush()
         elif self._timer is None:
+            self._next_publication = max(
+                self._next_publication,
+                asyncio.get_running_loop().time() + self.interval,
+            )
             self._timer = asyncio.create_task(self._later())
 
     async def _later(self) -> None:
         try:
             while self._pending is not None:
+                delay = max(
+                    0.0, self._next_publication - asyncio.get_running_loop().time()
+                )
                 try:
-                    await asyncio.wait_for(self._wake.wait(), timeout=self.interval)
+                    await asyncio.wait_for(self._wake.wait(), timeout=delay)
                 except TimeoutError:
-                    pass
+                    if asyncio.get_running_loop().time() < self._next_publication:
+                        continue
                 self._wake.clear()
                 if not await self.flush():
                     break
@@ -65,6 +74,7 @@ class SummaryRuntime:
             if snapshot is None:
                 return True
             previous = self._published
+            self._next_publication = asyncio.get_running_loop().time() + self.interval
             notify = self._notify
             workflows = tuple(sorted(self._workflows))
             self._notify = False

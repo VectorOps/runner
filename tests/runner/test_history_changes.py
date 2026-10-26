@@ -10,6 +10,7 @@ from tests.runner.test_mailbox import store
 from tests.runner.test_usage import generation, seed
 from vectorops.runner import models
 from vectorops.runner.runner import branching, events, mailbox
+from vectorops.runner.runner import summary_history
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 
 
@@ -43,17 +44,15 @@ async def test_commit_notification_survives_caller_cancellation(
     changes.clear()
     entered = asyncio.Event()
     release = asyncio.Event()
-    original = database._accounted
+    original = database._invoke
 
-    async def hold[T](
-        operation: Callable[[sqlite3.Connection], T], *, account: bool
-    ) -> T:
-        result = await original(operation, account=account)
+    async def hold[T](operation: Callable[[sqlite3.Connection], T]) -> T:
+        result = await original(operation)
         entered.set()
         await release.wait()
         return result
 
-    monkeypatch.setattr(database, "_accounted", hold)
+    monkeypatch.setattr(database, "_invoke", hold)
     task = asyncio.create_task(database.set_workflow_name("root", "Committed"))
     await entered.wait()
     task.cancel()
@@ -185,17 +184,15 @@ async def test_durable_events_survive_caller_cancellation(
     )
     entered = asyncio.Event()
     release = asyncio.Event()
-    accounted = database._accounted
+    invoke = database._invoke
 
-    async def hold[T](
-        operation: Callable[[sqlite3.Connection], T], *, account: bool
-    ) -> T:
-        result = await accounted(operation, account=account)
+    async def hold[T](operation: Callable[[sqlite3.Connection], T]) -> T:
+        result = await invoke(operation)
         entered.set()
         await release.wait()
         return result
 
-    monkeypatch.setattr(database, "_accounted", hold)
+    monkeypatch.setattr(database, "_invoke", hold)
     if writer:
         await database.__aenter__()
     try:
@@ -264,7 +261,11 @@ async def test_failed_branches_do_not_publish_durable_events(
         assert result is not None and result.status == "failed"
     else:
 
-        def fail_status(connection: sqlite3.Connection, status: str) -> None:
+        def fail_status(
+            connection: sqlite3.Connection,
+            status: str,
+            changes: summary_history.Changes,
+        ) -> None:
             raise RuntimeError("transaction failed")
 
         monkeypatch.setattr(database, "_set_status", fail_status)

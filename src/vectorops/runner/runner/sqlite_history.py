@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
 import typing
@@ -138,8 +138,10 @@ class SQLiteHistory:
         with closing(self._connect()) as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ValueError(f"unsupported history schema version: {version}")
+            if version == 1:
+                connection.execute("PRAGMA locking_mode = EXCLUSIVE")
             connection.executescript("""
                 BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS workflows (
@@ -171,109 +173,79 @@ class SQLiteHistory:
                     idempotency_key TEXT NOT NULL UNIQUE,
                     payload TEXT NOT NULL
                 );
-                PRAGMA user_version = 1;
-                COMMIT;
                 """)
             with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                UsageHistory.initialize(connection)
                 summary_history.SummaryHistory.initialize(connection)
+                UsageHistory.initialize(connection)
                 SQLiteWorkflowGrants.initialize(connection)
+                connection.execute("PRAGMA user_version = 2")
 
     async def _run(
         self,
         operation: Callable[[sqlite3.Connection], T],
-        *,
-        account: bool = False,
-        workflow_ids: tuple[str, ...] = (),
-        notify: bool = False,
-        notifications: typing.Optional[
-            list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
-        ] = None,
-        streaming: bool = False,
     ) -> T:
-        async def run() -> T:
-            if self._summary_runtime is None:
-                return await self._run_committed(
-                    operation,
-                    account=account,
-                    workflow_ids=workflow_ids,
-                    notify=notify,
-                    notifications=notifications,
-                )
-            async with self._summary_runtime.lock:
-                return await self._run_committed(
-                    operation,
-                    account=account,
-                    workflow_ids=workflow_ids,
-                    notify=notify,
-                    notifications=notifications,
-                    streaming=streaming,
-                )
+        return await self._invoke(operation)
 
-        return await finish_cleanup(asyncio.create_task(run()))
+    @contextmanager
+    def _transaction(
+        self, connection: sqlite3.Connection, changes: summary_history.Changes
+    ) -> typing.Iterator[typing.Optional[summary_history.Snapshot]]:
+        """Commit business writes, references and one source revision atomically."""
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 2:
+                raise ValueError("unsupported history schema version")
+            runtime = self._summary_runtime
+            base = runtime.working.base(connection) if runtime is not None else None
+            yield base
+            if changes.changed:
+                revision = connection.execute(
+                    "UPDATE summary_state SET revision = revision + 1 WHERE id = 1 RETURNING revision"
+                ).fetchone()[0]
+                if runtime is not None:
+                    if base is not None:
+                        changes.snapshot = summary_history.WorkingSummary.project(
+                            base, changes, revision
+                        )
+                    else:
+                        try:
+                            changes.snapshot = summary_history.SummaryHistory.snapshot(
+                                connection
+                            )
+                        except KeyError:
+                            pass
 
-    async def _run_committed(
+    async def _mutate(
         self,
         operation: Callable[[sqlite3.Connection], T],
+        changes: summary_history.Changes,
         *,
-        account: bool = False,
-        workflow_ids: tuple[str, ...] = (),
-        notify: bool = False,
         notifications: typing.Optional[
             list[typing.Union[events.StepEvent, mailbox.InputsCancelled]]
         ] = None,
-        streaming: bool = False,
     ) -> T:
-        if (
-            self._summary_store is not None
-            or notifications is not None
-            or (self._change_sink is not None and (notify or workflow_ids or account))
-        ):
-            changed: typing.Optional[tuple[str, ...]] = None
-            project_summary = False
-            committed: tuple[
-                typing.Union[events.StepEvent, mailbox.InputsCancelled], ...
-            ] = ()
-
-            def tracked(connection: sqlite3.Connection) -> T:
-                nonlocal changed, committed, project_summary
-                runtime = self._summary_runtime
-                if runtime is not None:
-                    runtime.working.begin(connection)
-                before = connection.total_changes
-                result = operation(connection)
-                if runtime is not None:
-                    runtime.working.commit(connection)
-                committed = tuple(notifications or ())
-                project_summary = connection.total_changes != before
-                if self._change_sink is not None and connection.total_changes != before:
-                    identifiers = set(workflow_ids)
-                    if account:
-                        for identifier in workflow_ids:
-                            identifiers.update(
-                                UsageHistory.ancestors(connection, identifier)
-                            )
-                    changed = tuple(sorted(identifiers))
-                return result
-
+        async def persist() -> T:
+            result = await self._invoke(operation)
+            runtime = self._summary_runtime
+            if changes.snapshot is not None and runtime is not None:
+                runtime.working.snapshot = changes.snapshot
             try:
-                return await self._accounted(tracked, account=account)
+                if self._usage_store is not None and changes.accounting is not None:
+                    async with self._usage_store.lock:
+                        await self._usage_store.record(
+                            self.path.parent.name,
+                            changes.accounting.revision,
+                            changes.accounting.totals,
+                        )
             finally:
-                projection_cancelled = False
-                if project_summary and self._summary_runtime is not None:
-                    try:
-                        snapshot = self._summary_runtime.working.snapshot
-                        if snapshot is not None:
-                            await self._summary_runtime.changed(
-                                snapshot,
-                                changed or (),
-                                prompt=not streaming,
-                                notify=notify,
-                            )
-                    except asyncio.CancelledError:
-                        projection_cancelled = True
-                for event in committed:
+                if changes.snapshot is not None and runtime is not None:
+                    await runtime.changed(
+                        changes.snapshot,
+                        tuple(sorted(changes.workflows)),
+                        urgency=changes.urgency,
+                        notify=changes.notify,
+                    )
+                for event in notifications or ():
                     try:
                         if isinstance(event, events.StepEvent):
                             if self._event_sink is not None:
@@ -286,54 +258,29 @@ class SQLiteHistory:
                             level=diagnostics.Level.ERROR,
                             error=exc,
                         )
-                if changed is not None and self._summary_runtime is None:
-                    assert self._change_sink is not None
+                if (
+                    changes.changed
+                    and runtime is None
+                    and self._change_sink is not None
+                    and (changes.notify or changes.workflows)
+                ):
                     try:
-                        self._change_sink(changed)
+                        self._change_sink(tuple(sorted(changes.workflows)))
                     except Exception as exc:
                         diagnostics.log(
                             "history.sink_failed",
                             level=diagnostics.Level.ERROR,
                             error=exc,
                         )
-                if projection_cancelled:
-                    raise asyncio.CancelledError
-        return await self._accounted(operation, account=account)
+            return result
 
-    async def _accounted(
-        self, operation: Callable[[sqlite3.Connection], T], *, account: bool
-    ) -> T:
-        if self._usage_store is None or not account:
-            return await self._invoke(operation)
-        store = self._usage_store
-        async with store.lock:
+        async def run() -> T:
+            if self._summary_runtime is None:
+                return await persist()
+            async with self._summary_runtime.lock:
+                return await persist()
 
-            async def persist() -> T:
-                result = await self._invoke(operation)
-                runtime = self._summary_runtime
-                snapshot = runtime.working.snapshot if runtime is not None else None
-                if (
-                    runtime is not None
-                    and snapshot is not None
-                    and snapshot.summary.usage is not None
-                ):
-                    revision, total = (
-                        runtime.working.usage_revision,
-                        snapshot.summary.usage.totals,
-                    )
-                else:
-                    revision, total = await self._invoke(UsageHistory.snapshot)
-                await store.record(self.path.parent.name, revision, total)
-                return result
-
-            task = asyncio.create_task(persist())
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                try:
-                    await task
-                finally:
-                    raise
+        return await finish_cleanup(asyncio.create_task(run()))
 
     async def _invoke(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         if self._closed:
@@ -372,10 +319,10 @@ class SQLiteHistory:
 
     async def save_workflow(self, workflow: models.Workflow) -> None:
         payload = workflow.model_copy(update={"usage": None}).model_dump_json()
+        changes = summary_history.Changes()
 
         def save(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 row = sql.execute(
                     connection,
                     sql.Query.from_(WORKFLOWS)
@@ -392,8 +339,13 @@ class SQLiteHistory:
                     connection,
                     sql.Query.into(WORKFLOWS).insert(workflow.id, payload),
                 )
+                changes.changed = True
+                changes.workflows.add(workflow.id)
+                changes.targets = summary_history.TargetReferences.add(
+                    connection, [workflow.target] if workflow.target is not None else []
+                )
 
-        await self._run(save, workflow_ids=(workflow.id,))
+        await self._mutate(save, changes)
 
     async def get_workflow(self, workflow_id: str) -> models.Workflow:
         return await self._run(
@@ -408,17 +360,22 @@ class SQLiteHistory:
                 connection.execute("BEGIN")
                 runtime = self._summary_runtime
                 if runtime is not None and runtime.working.snapshot is not None:
-                    return list(runtime.working.snapshot.targets)
+                    snapshot = runtime.working.snapshot
+                    version = connection.execute(
+                        "SELECT source_id, revision FROM summary_state WHERE id = 1"
+                    ).fetchone()
+                    if version == (snapshot.source_id, snapshot.revision):
+                        return list(snapshot.targets)
                 return summary_history.TargetReferences.read(connection)
 
         return await self._run(read)
 
     async def reference_target(self, target: LocalExecutionTarget) -> None:
         """Retain runtime worktree references before using their files or processes."""
+        changes = summary_history.Changes()
 
         def write(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 execution = self._execution(connection)
                 if target in execution.referenced_targets:
                     return
@@ -433,8 +390,12 @@ class SQLiteHistory:
                     .set(EXECUTION.payload, execution.model_dump_json())
                     .where(EXECUTION.singleton == 1),
                 )
+                changes.changed = True
+                changes.targets = summary_history.TargetReferences.add(
+                    connection, [target]
+                )
 
-        await self._run(write, notify=True)
+        await self._mutate(write, changes)
 
     async def set_workflow_name(self, workflow_id: str, name: str) -> models.Workflow:
         """Set presentation metadata once without replacing execution configuration."""
@@ -453,10 +414,10 @@ class SQLiteHistory:
         value: str,
     ) -> models.Workflow:
         """Commit write-once text metadata and publish the updated snapshots."""
+        changes = summary_history.Changes()
 
         def update(connection: sqlite3.Connection) -> models.Workflow:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 workflow = self._workflow(connection, workflow_id)
                 current = workflow.name if field == "name" else workflow.description
                 if current is not None:
@@ -470,9 +431,12 @@ class SQLiteHistory:
                     .set(WORKFLOWS.payload, updated.model_dump_json())
                     .where(WORKFLOWS.id == workflow_id),
                 )
+                changes.changed = True
+                changes.workflows.add(workflow_id)
+                changes.metadata[workflow_id] = (updated.name, updated.description)
                 return updated
 
-        return await self._run(update, workflow_ids=(workflow_id,))
+        return await self._mutate(update, changes)
 
     async def first_input(
         self, workflow_id: str, request_type: str
@@ -511,10 +475,11 @@ class SQLiteHistory:
         replace_heads: bool = False,
         preserve_status: bool = False,
     ) -> None:
+        changes = summary_history.Changes()
+
         def save(connection: sqlite3.Connection) -> None:
             saved = execution
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 self._workflow(connection, execution.root_workflow_id)
                 existing = sql.execute(
                     connection,
@@ -561,46 +526,88 @@ class SQLiteHistory:
                 for workflow_id, step_id in execution.checkpoint.heads.items():
                     if self._step(connection, step_id).workflow_id != workflow_id:
                         raise ValueError("checkpoint head belongs to another workflow")
+                old_heads = dict(
+                    connection.execute(
+                        "SELECT workflow_id, step_id FROM workflow_heads"
+                    )
+                )
+                heads_changed = (
+                    existing is None or replace_heads
+                ) and old_heads != saved.checkpoint.heads
+                payload = saved.model_dump_json()
+                if (
+                    existing is not None
+                    and existing[0] == payload
+                    and not heads_changed
+                ):
+                    return
                 sql.execute(
                     connection,
                     sql.Query.into(EXECUTION)
-                    .insert(1, saved.model_dump_json())
+                    .insert(1, payload)
                     .on_conflict(EXECUTION.singleton)
                     .do_update(EXECUTION.payload),
                 )
-                if existing is None or replace_heads:
+                if heads_changed:
                     sql.execute(connection, sql.Query.from_(HEADS).delete())
                     sql.insert_many(
                         connection,
                         HEADS,
                         execution.checkpoint.heads.items(),
                     )
+                    if old_heads.get(
+                        saved.root_workflow_id
+                    ) != saved.checkpoint.heads.get(saved.root_workflow_id):
+                        changes.context_changed = True
+                        changes.context = UsageHistory.root_context(
+                            connection, saved.root_workflow_id
+                        )
+                changes.changed = changes.notify = True
+                changes.status, changes.updated_at = saved.status, saved.updated_at
+                if existing is None or previous.status != saved.status:
+                    changes.urgency = summary_history.Urgency.IMMEDIATE
+                references = list(saved.referenced_targets)
+                if saved.target is not None:
+                    references.append(saved.target)
+                if existing is not None:
+                    retained = set(previous.referenced_targets)
+                    if previous.target is not None:
+                        retained.add(previous.target)
+                    references = [
+                        target for target in references if target not in retained
+                    ]
+                changes.targets = summary_history.TargetReferences.add(
+                    connection, references
+                )
 
-        await self._run(save, notify=True)
+        await self._mutate(save, changes)
 
     async def set_paused(self, requests: set[str]) -> bool:
         """Pause only if every observed dependency is still unanswered at commit."""
         if not requests:
             return False
+        changes = summary_history.Changes()
 
         def pause(connection: sqlite3.Connection) -> bool:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 execution = self._execution(connection)
                 if execution.status != "running" or any(
                     self._input(connection, request).status != "pending"
                     for request in requests
                 ):
                     return False
-                self._set_status(connection, "paused")
+                self._set_status(connection, "paused", changes)
                 return True
 
-        return await self._run(pause, notify=True)
+        return await self._mutate(pause, changes)
 
     @staticmethod
     def _set_status(
-        connection: sqlite3.Connection, status: state.ExecutionStatus
+        connection: sqlite3.Connection,
+        status: state.ExecutionStatus,
+        changes: summary_history.Changes,
     ) -> None:
+        updated_at = state.timestamp()
         sql.execute(
             connection,
             sql.Query.update(EXECUTION)
@@ -611,41 +618,45 @@ class SQLiteHistory:
                     "$.status",
                     status,
                     "$.updated_at",
-                    state.timestamp(),
+                    updated_at,
                 ),
             )
             .where(EXECUTION.singleton == 1),
         )
+        changes.changed = changes.notify = True
+        changes.status, changes.updated_at = status, updated_at
+        changes.urgency = summary_history.Urgency.IMMEDIATE
 
     async def wake_execution(self) -> bool:
+        changes = summary_history.Changes()
+
         def wake(connection: sqlite3.Connection) -> bool:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 if self._execution(connection).status != "paused":
                     return False
-                self._set_status(connection, "running")
+                self._set_status(connection, "running", changes)
                 return True
 
-        return await self._run(wake, notify=True)
+        return await self._mutate(wake, changes)
 
     async def stop_execution(self, *, require_paused: bool = False) -> None:
         """Cancel an unloaded execution and its requests in one transaction."""
+        changes = summary_history.Changes()
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
             []
         )
 
         def stop(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 status = self._execution(connection).status
                 if status not in ("running", "paused"):
                     raise ValueError("execution is not active")
                 if require_paused and status != "paused":
                     raise ValueError("execution is running; force is required")
-                self._cancel_inputs(connection, notifications)
-                self._set_status(connection, "cancelled")
+                self._cancel_inputs(connection, notifications, changes)
+                self._set_status(connection, "cancelled", changes)
 
-        await self._run(stop, notify=True, notifications=notifications)
+        await self._mutate(stop, changes, notifications=notifications)
 
     def _branch_plan(
         self, connection: sqlite3.Connection, operation: branching.Operation
@@ -659,10 +670,10 @@ class SQLiteHistory:
 
     async def accept_branch(self, request: branching.Branch) -> branching.Operation:
         """Validate before interruption and durably accept an execution-scoped key."""
+        changes = summary_history.Changes()
 
         def accept(connection: sqlite3.Connection) -> branching.Operation:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 row = sql.execute(
                     connection,
                     sql.Query.from_(BRANCHES)
@@ -702,9 +713,10 @@ class SQLiteHistory:
                         operation.model_dump_json(),
                     ),
                 )
+                changes.changed = True
                 return operation
 
-        return await self._run(accept)
+        return await self._mutate(accept, changes)
 
     async def pending_branch(self) -> bool:
         return await self._run(
@@ -719,6 +731,7 @@ class SQLiteHistory:
 
     async def apply_branch(self) -> typing.Optional[branching.Operation]:
         """Commit path selection and synthetic input atomically after writer cleanup."""
+        changes = summary_history.Changes()
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
             []
         )
@@ -726,8 +739,7 @@ class SQLiteHistory:
         def apply(
             connection: sqlite3.Connection,
         ) -> typing.Optional[branching.Operation]:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes) as base:
                 row = sql.execute(
                     connection,
                     sql.Query.from_(BRANCHES)
@@ -746,7 +758,7 @@ class SQLiteHistory:
                         update={"status": "failed", "error": str(exc)}
                     )
                 else:
-                    self._cancel_inputs(connection, notifications)
+                    self._cancel_inputs(connection, notifications, changes)
                     step = plan.input_step
                     if step is not None:
                         cursor = sql.execute(
@@ -759,7 +771,9 @@ class SQLiteHistory:
                             ),
                         )
                         assert cursor.lastrowid is not None
-                        UsageHistory.link(connection, step)
+                        changes.workflows.update(UsageHistory.link(connection, step))
+                        changes.workflows.add(step.workflow_id)
+                        changes.account(UsageHistory.update(connection, step))
                         notifications.append(
                             events.StepEvent(
                                 kind="step.completed",
@@ -775,10 +789,18 @@ class SQLiteHistory:
                                 step.id, plan.input_request.model_dump_json()
                             ),
                         )
+                        changes.pending_delta += int(
+                            plan.input_request.status == "pending"
+                        )
                     sql.execute(connection, sql.Query.from_(HEADS).delete())
                     sql.insert_many(connection, HEADS, plan.heads.items())
                     SQLiteWorkflowGrants.retain(connection, plan.retained_step_ids)
-                    self._set_status(connection, "running")
+                    self._set_status(connection, "running", changes)
+                    if base is not None:
+                        changes.context_changed = True
+                        changes.context = UsageHistory.root_context(
+                            connection, base.summary.root_workflow_id or ""
+                        )
                     operation = operation.model_copy(update={"status": "applied"})
                 sql.execute(
                     connection,
@@ -786,9 +808,10 @@ class SQLiteHistory:
                     .set(BRANCHES.payload, operation.model_dump_json())
                     .where(BRANCHES.id == operation.id),
                 )
+                changes.changed = changes.notify = True
                 return operation
 
-        return await self._run(apply, notify=True, notifications=notifications)
+        return await self._mutate(apply, changes, notifications=notifications)
 
     async def get_execution(self) -> state.ExecutionRecord:
         def read(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -838,7 +861,7 @@ class SQLiteHistory:
             self.path.as_uri() + "?mode=ro", uri=True, timeout=30
         )
         try:
-            if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if connection.execute("PRAGMA user_version").fetchone()[0] not in (1, 2):
                 raise ValueError("unsupported history schema version")
             connection.execute("BEGIN")
             return connection
@@ -1076,21 +1099,25 @@ class SQLiteHistory:
         return await self._run(read)
 
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
+        changes = summary_history.Changes()
+
         def record(connection: sqlite3.Connection) -> models.WorkflowStep:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 head = self._step(connection, head_id)
                 target = self._step(connection, step_id)
                 updated = head.delivered(target)
+                if updated == head:
+                    return updated
                 sql.execute(
                     connection,
                     sql.Query.update(STEPS)
                     .set(STEPS.payload, updated.model_dump_json())
                     .where(STEPS.id == head_id),
                 )
+                changes.changed = True
                 return updated
 
-        return await self._run(record)
+        return await self._mutate(record, changes)
 
     @staticmethod
     def _input(
@@ -1110,10 +1137,10 @@ class SQLiteHistory:
         self, request_id: str, spec: mailbox.InputSpec
     ) -> mailbox.InputRequest:
         """Register only against an existing pending activity, never an inbox."""
+        changes = summary_history.Changes()
 
         def register(connection: sqlite3.Connection) -> mailbox.InputRequest:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 step = self._step(connection, request_id)
                 execution = self._execution(connection)
                 if execution.status not in ("running", "paused"):
@@ -1143,9 +1170,12 @@ class SQLiteHistory:
                         request_id, request.model_dump_json()
                     ),
                 )
+                changes.changed = changes.notify = True
+                changes.pending_delta = 1
+                changes.urgency = summary_history.Urgency.IMMEDIATE
                 return request.public()
 
-        return await self._run(register, notify=True)
+        return await self._mutate(register, changes)
 
     async def get_input(self, request_id: str) -> mailbox.InputRequest:
         request = await self._run(
@@ -1177,19 +1207,24 @@ class SQLiteHistory:
         value: tool_policy.RuleInput,
         rule_id: typing.Optional[UUID] = None,
     ) -> tool_policy.AuthorizationRule:
+        changes = summary_history.Changes()
+
         def save(connection: sqlite3.Connection) -> tool_policy.AuthorizationRule:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 self._workflow(connection, workflow_id)
-                return SQLiteWorkflowGrants.save(
+                rule = SQLiteWorkflowGrants.save(
                     connection, workflow_id, value, rule_id
                 )
+                changes.changed = True
+                return rule
 
-        return await self._run(save)
+        return await self._mutate(save, changes)
 
     async def delete_authorization_rule(self, workflow_id: str, rule_id: UUID) -> None:
+        changes = summary_history.Changes()
+
         def delete(connection: sqlite3.Connection) -> None:
-            with connection:
+            with self._transaction(connection, changes):
                 if (
                     sql.execute(
                         connection,
@@ -1203,8 +1238,9 @@ class SQLiteHistory:
                     != 1
                 ):
                     raise KeyError(str(rule_id))
+                changes.changed = True
 
-        await self._run(delete)
+        await self._mutate(delete, changes)
 
     async def approval_rule_id(self, request_id: str) -> typing.Optional[UUID]:
         await self.publish_authorization_rules()
@@ -1236,10 +1272,15 @@ class SQLiteHistory:
         )
         for rule in pending:
             canonical_id = await self._workspace_rules.import_rule(rule)
+            changes = summary_history.Changes()
 
             def delivered(connection: sqlite3.Connection) -> None:
-                with connection:
-                    connection.execute("BEGIN IMMEDIATE")
+                with self._transaction(connection, changes):
+                    if not connection.execute(
+                        "SELECT 1 FROM tool_rule_outbox WHERE id = ? AND delivered = 0",
+                        (str(rule.id),),
+                    ).fetchone():
+                        return
                     sql.execute(
                         connection,
                         sql.Query.update(RECEIPTS)
@@ -1257,8 +1298,9 @@ class SQLiteHistory:
                         .set(OUTBOX.delivered, 1)
                         .where(OUTBOX.id == str(rule.id)),
                     )
+                    changes.changed = True
 
-            await self._run(delivered)
+            await self._mutate(delivered, changes)
 
     async def list_inputs(self, query: mailbox.RequestQuery) -> mailbox.RequestPage:
         def read(connection: sqlite3.Connection) -> mailbox.RequestPage:
@@ -1303,10 +1345,10 @@ class SQLiteHistory:
 
     async def answer_input(self, answer: mailbox.Answer) -> mailbox.InputRequest:
         """Commit the winning response and its retry receipt in one transaction."""
+        changes = summary_history.Changes()
 
         def respond(connection: sqlite3.Connection) -> mailbox.InputRequest:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes):
                 request = self._input(connection, answer.request_id)
                 if request.execution_id != answer.execution_id:
                     raise mailbox.MailboxConflict("execution identity mismatch")
@@ -1353,7 +1395,7 @@ class SQLiteHistory:
                     .where(INPUTS.request_id == request.request_id),
                 )
                 if self._execution(connection).status == "paused":
-                    self._set_status(connection, "running")
+                    self._set_status(connection, "running", changes)
                 step = self._step(connection, request.request_id)
                 SQLiteWorkflowGrants.record_answer(
                     connection,
@@ -1363,9 +1405,11 @@ class SQLiteHistory:
                     payload=request.payload,
                     response=answer.response,
                 )
+                changes.changed = changes.notify = True
+                changes.pending_delta = -1
                 return request.public()
 
-        result = await self._run(respond, notify=True)
+        result = await self._mutate(respond, changes)
         await self.publish_authorization_rules()
         return result
 
@@ -1373,6 +1417,7 @@ class SQLiteHistory:
     def _cancel_inputs(
         connection: sqlite3.Connection,
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]],
+        changes: summary_history.Changes,
         request_id: typing.Optional[str] = None,
     ) -> None:
         statement = (
@@ -1386,6 +1431,8 @@ class SQLiteHistory:
             connection, statement.returning(INPUTS.request_id)
         ).fetchall()
         if rows:
+            changes.changed = changes.notify = True
+            changes.pending_delta -= len(rows)
             notifications.append(
                 mailbox.InputsCancelled(
                     execution_id=SQLiteHistory._execution(connection).id,
@@ -1394,23 +1441,23 @@ class SQLiteHistory:
             )
 
     async def cancel_inputs(self, request_id: typing.Optional[str] = None) -> None:
+        changes = summary_history.Changes()
         notifications: list[typing.Union[events.StepEvent, mailbox.InputsCancelled]] = (
             []
         )
 
         def cancel(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                self._cancel_inputs(connection, notifications, request_id)
+            with self._transaction(connection, changes):
+                self._cancel_inputs(connection, notifications, changes, request_id)
 
-        await self._run(cancel, notify=True, notifications=notifications)
+        await self._mutate(cancel, changes, notifications=notifications)
 
     async def append_step(self, step: models.WorkflowStep) -> None:
         payload = step.model_dump_json()
+        changes = summary_history.Changes()
 
         def append(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes) as base:
                 self._workflow(connection, step.workflow_id)
                 if step.previous_step_id is not None:
                     previous = self._step(connection, step.previous_step_id)
@@ -1440,10 +1487,22 @@ class SQLiteHistory:
                     .on_conflict(HEADS.workflow_id)
                     .do_update(HEADS.step_id),
                 )
-                UsageHistory.link(connection, step)
-                UsageHistory.update(connection, step)
+                changes.workflows.update(UsageHistory.link(connection, step))
+                changes.account(UsageHistory.update(connection, step))
+                changes.changed = True
+                changes.workflows.add(step.workflow_id)
+                if (
+                    base is not None
+                    and base.summary.root_workflow_id == step.workflow_id
+                ):
+                    changes.context_changed = True
+                    changes.context = (
+                        UsageHistory.context(step)
+                        if step.operation.kind == "llm.generate"
+                        else UsageHistory.root_context(connection, step.workflow_id)
+                    )
 
-        await self._run(append, account=True, workflow_ids=(step.workflow_id,))
+        await self._mutate(append, changes)
 
     async def update_step(self, step: models.WorkflowStep) -> None:
         await self.update_steps((step,))
@@ -1453,12 +1512,14 @@ class SQLiteHistory:
         snapshots = tuple((step, step.model_dump_json()) for step in steps)
         if not snapshots:
             return
+        changes = summary_history.Changes()
 
         def update(connection: sqlite3.Connection) -> None:
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._transaction(connection, changes) as base:
                 for step, payload in snapshots:
                     previous = self._step(connection, step.id)
+                    if previous == step:
+                        continue
                     if previous.outcome.kind not in ("streaming", "pending", "waiting"):
                         raise ValueError("terminal steps cannot be updated")
                     if (
@@ -1482,16 +1543,19 @@ class SQLiteHistory:
                         .set(STEPS.payload, payload)
                         .where(STEPS.id == step.id),
                     )
-                    UsageHistory.update(connection, step, previous)
-                    if self._summary_runtime is not None:
-                        self._summary_runtime.working.step(step)
+                    changes.account(UsageHistory.update(connection, step, previous))
+                    changes.changed = True
+                    changes.workflows.add(step.workflow_id)
+                    context = (
+                        base.summary.usage.root_context
+                        if base is not None and base.summary.usage is not None
+                        else None
+                    )
+                    if context is not None and context.step_id == step.id:
+                        changes.context_changed = True
+                        changes.context = UsageHistory.context(step)
 
-        await self._run(
-            update,
-            account=True,
-            workflow_ids=tuple({step.workflow_id for step in steps}),
-            streaming=all(step.outcome.kind == "streaming" for step in steps),
-        )
+        await self._mutate(update, changes)
 
     def _snapshot_path(self, workflow_id: str, head_step_id: str) -> sqlite3.Connection:
         """Materialize the selected path in SQLite temporary storage, not Python lists."""

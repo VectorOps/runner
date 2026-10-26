@@ -1,6 +1,7 @@
 """Transactional usage accounting owned by execution history."""
 
 import sqlite3
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final, Optional
 
@@ -13,6 +14,13 @@ PARENTS: Final = sql.Table("workflow_parents")
 STATE: Final = sql.Table("usage_state")
 ANCESTORS: Final = sql.Table("generation_ancestors")
 HEADS: Final = sql.Table("workflow_heads")
+
+
+@dataclass(frozen=True)
+class Change:
+    revision: int
+    totals: usage.Totals
+    workflows: tuple[str, ...]
 
 
 def contribution(step: models.WorkflowStep) -> usage.Totals:
@@ -166,10 +174,12 @@ class UsageHistory:
         )
 
     @staticmethod
-    def link(connection: sqlite3.Connection, step: models.WorkflowStep) -> None:
+    def link(
+        connection: sqlite3.Connection, step: models.WorkflowStep
+    ) -> tuple[str, ...]:
         UsageHistory._link_context(connection, step)
         if not isinstance(step.operation, models.WorkflowSpawnOperation):
-            return
+            return ()
         child = step.operation.child_workflow_id
         parent = step.workflow_id
         row = sql.execute(
@@ -181,7 +191,7 @@ class UsageHistory:
         if row is not None:
             if row[0] != parent:
                 raise ValueError("workflow has multiple parents")
-            return
+            return ()
         ancestors = UsageHistory.ancestors(connection, parent)
         if child in ancestors:
             raise ValueError("cycle in workflow tree")
@@ -203,6 +213,7 @@ class UsageHistory:
                     }
                 ),
             )
+        return tuple(ancestors)
 
     @staticmethod
     def ancestors(connection: sqlite3.Connection, workflow_id: str) -> list[str]:
@@ -236,20 +247,22 @@ class UsageHistory:
         connection: sqlite3.Connection,
         step: models.WorkflowStep,
         previous: Optional[models.WorkflowStep] = None,
-    ) -> None:
+    ) -> Optional[Change]:
         old = usage.Totals() if previous is None else contribution(previous)
         new = contribution(step)
         if old == new:
-            return
+            return None
         revision, total = UsageHistory.snapshot(connection)
+        total = total.replace(old, new)
         sql.execute(
             connection,
             sql.Query.update(STATE)
             .set(STATE.revision, revision + 1)
-            .set(STATE.payload, total.replace(old, new).model_dump_json())
+            .set(STATE.payload, total.model_dump_json())
             .where(STATE.id == 1),
         )
-        for identifier in UsageHistory.ancestors(connection, step.workflow_id):
+        ancestors = UsageHistory.ancestors(connection, step.workflow_id)
+        for identifier in ancestors:
             totals = UsageHistory.workflow_usage(connection, identifier)
             updated = usage.WorkflowUsage(
                 own=(
@@ -260,6 +273,7 @@ class UsageHistory:
                 subtree=totals.subtree.replace(old, new),
             )
             UsageHistory.save_usage(connection, identifier, updated)
+        return Change(revision + 1, total, tuple(ancestors))
 
     @staticmethod
     def context(step: models.WorkflowStep) -> usage.Context:
