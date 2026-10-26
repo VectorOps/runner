@@ -581,6 +581,65 @@ class SQLiteHistory:
 
         await self._mutate(save, changes)
 
+    async def checkpoint_execution(
+        self,
+        execution_id: str,
+        *,
+        status: typing.Optional[state.ExecutionStatus] = None,
+    ) -> None:
+        """Refresh activity metadata without reading or validating retained heads.
+
+        Head ownership belongs to append and branch transactions. Terminal saves
+        materialize the legacy execution envelope from those authoritative rows,
+        while ordinary checkpoints leave its redundant head map untouched.
+        """
+        changes = summary_history.Changes()
+
+        def checkpoint(connection: sqlite3.Connection) -> None:
+            with self._transaction(connection, changes) as base:
+                if base is not None:
+                    if base.summary.execution_id != execution_id:
+                        raise ValueError("execution identity mismatch")
+                    previous = base.summary.status
+                else:
+                    row = connection.execute(
+                        "SELECT json_extract(payload, '$.id'), json_extract(payload, '$.status') "
+                        "FROM execution WHERE singleton = 1"
+                    ).fetchone()
+                    if row is None:
+                        raise KeyError("execution state")
+                    if row[0] != execution_id:
+                        raise ValueError("execution identity mismatch")
+                    previous = row[1]
+                updated_at = state.timestamp()
+                connection.execute(
+                    "UPDATE execution SET payload = json_set(payload, '$.updated_at', ?, "
+                    "'$.checkpoint.updated_at', ?) WHERE singleton = 1",
+                    (updated_at, updated_at),
+                )
+                if status is not None:
+                    connection.execute(
+                        "UPDATE execution SET payload = json_set(payload, '$.status', ?) WHERE singleton = 1",
+                        (status,),
+                    )
+                    changes.status = status
+                    if previous != status:
+                        changes.urgency = summary_history.Urgency.IMMEDIATE
+                if status in ("completed", "failed", "cancelled"):
+                    connection.execute(
+                        "UPDATE execution SET payload = json_set(payload, '$.checkpoint.heads', "
+                        "json((SELECT json_group_object(workflow_id, step_id) FROM workflow_heads)), "
+                        "'$.completion_step_id', (SELECT steps.id FROM workflow_heads "
+                        "JOIN steps ON steps.id = workflow_heads.step_id "
+                        "WHERE workflow_heads.workflow_id = json_extract(execution.payload, '$.root_workflow_id') "
+                        "AND json_extract(steps.payload, '$.operation.kind') = 'workflow.complete')) "
+                        "WHERE singleton = 1"
+                    )
+                changes.changed = changes.notify = True
+                changes.updated_at = updated_at
+
+        await self._mutate(checkpoint, changes)
+
     async def set_paused(self, requests: set[str]) -> bool:
         """Pause only if every observed dependency is still unanswered at commit."""
         if not requests:

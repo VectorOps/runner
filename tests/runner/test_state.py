@@ -361,6 +361,7 @@ async def test_periodic_state_flush_stays_inside_history_database(
         await history.save_workflow(
             models.Workflow(id="root", definition_ref="file:workflow")
         )
+        await history_database.save_execution(record)
         checkpointer = ExecutionCheckpointer(
             history_database, history, record, interval=0.01
         )

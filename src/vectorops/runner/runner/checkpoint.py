@@ -1,4 +1,4 @@
-"""Collect executor heads and flush history before publishing runner checkpoints."""
+"""Flush activity snapshots and checkpoint metadata without reconstructing heads."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import typing
 from vectorops.runner.runner.cached_history import CachedHistory
 from vectorops.runner.runner import execution_state as state
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
+from vectorops.runner.runner.resources import finish_cleanup
 
 
 class CheckpointReporter(typing.Protocol):
@@ -30,53 +31,40 @@ class ExecutionCheckpointer:
             raise ValueError("checkpoint interval must be finite and positive")
         self.store = store
         self.history = history
-        self.execution = record
+        self.execution_id = record.id
         self.heads = dict(record.checkpoint.heads)
         self.interval = interval
-        self._dirty = False
+        self._generation = 0
+        self._persisted_generation = 0
         self._worker: typing.Optional[asyncio.Task[None]] = None
         self._lock = asyncio.Lock()
 
     def record(self, workflow_id: str, step_id: str) -> None:
         if self._worker is not None and self._worker.done():
             self._worker.result()
-        self.heads[workflow_id] = step_id
-        self._dirty = True
+        if self.heads.get(workflow_id) != step_id:
+            self.heads[workflow_id] = step_id
+        self._generation += 1
 
     async def persist(
         self,
         status: typing.Optional[state.ExecutionStatus] = None,
     ) -> None:
-        async with self._lock:
-            await self.history.flush()
-            heads = dict(self.heads)
-            for workflow_id, step_id in heads.items():
-                step = await self.history.get_step(step_id)
-                if step.workflow_id != workflow_id:
-                    raise ValueError("checkpoint head belongs to another workflow")
-            completion_id = None
-            root_head = heads.get(self.execution.root_workflow_id)
-            if root_head is not None:
-                root = await self.history.get_step(root_head)
-                if root.operation.kind == "workflow.complete":
-                    completion_id = root.id
-            self.execution = self.execution.model_copy(
-                update={
-                    "status": self.execution.status if status is None else status,
-                    "updated_at": state.timestamp(),
-                    "checkpoint": state.ExecutionCheckpoint(heads=heads),
-                    "completion_step_id": completion_id,
-                }
-            )
-            await self.store.save_execution(
-                self.execution, preserve_status=status is None
-            )
-            self._dirty = self.heads != heads
+        """Settle accepted writes before cancellation and acknowledge only flushed activity."""
+
+        async def persist() -> None:
+            async with self._lock:
+                generation = self._generation
+                await self.history.flush()
+                await self.store.checkpoint_execution(self.execution_id, status=status)
+                self._persisted_generation = generation
+
+        await finish_cleanup(asyncio.create_task(persist()))
 
     async def _periodic(self) -> None:
         while True:
             await asyncio.sleep(self.interval)
-            if self._dirty:
+            if self._generation != self._persisted_generation:
                 await self.persist()
 
     @asynccontextmanager
