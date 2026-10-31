@@ -28,6 +28,8 @@ class SnapshotPublisher:
         self._execution = execution
         self._emit = emit
         self._pending: dict[str, set[str]] = {}
+        self._summaries: set[str] = set()
+        self._executions: set[str] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._snapshots: OrderedDict[tuple[str, str, str], pydantic.BaseModel] = (
             OrderedDict()
@@ -36,9 +38,18 @@ class SnapshotPublisher:
         self._suppressed: set[str] = set()
 
     def changed(self, execution_id: str, workflow_ids: tuple[str, ...] = ()) -> None:
+        self.publish(
+            execution_id, events.Publication(workflow_ids, summary=True, execution=True)
+        )
+
+    def publish(self, execution_id: str, publication: events.Publication) -> None:
         if self._closed or execution_id in self._suppressed:
             return
-        self._pending.setdefault(execution_id, set()).update(workflow_ids)
+        self._pending.setdefault(execution_id, set()).update(publication.workflows)
+        if publication.summary:
+            self._summaries.add(execution_id)
+        if publication.execution:
+            self._executions.add(execution_id)
         if execution_id not in self._tasks:
             self._tasks[execution_id] = asyncio.create_task(self._publish(execution_id))
 
@@ -64,6 +75,10 @@ class SnapshotPublisher:
         try:
             while execution_id in self._pending:
                 identifiers = self._pending.pop(execution_id)
+                summary_changed = execution_id in self._summaries
+                execution_changed = execution_id in self._executions
+                self._summaries.discard(execution_id)
+                self._executions.discard(execution_id)
                 for identifier in sorted(identifiers):
                     workflow = await self._workflow(execution_id, identifier)
                     self._send(
@@ -73,15 +88,20 @@ class SnapshotPublisher:
                             execution_id=execution_id, workflow=workflow
                         ),
                     )
-                try:
-                    summary = await self._summary(execution_id)
-                except (FileNotFoundError, KeyError):
+                if summary_changed:
+                    try:
+                        summary = await self._summary(execution_id)
+                    except (FileNotFoundError, KeyError):
+                        continue
+                    self._send(
+                        (execution_id, "execution.updated", ""),
+                        summary,
+                        events.ExecutionUpdated(
+                            execution_id=execution_id, summary=summary
+                        ),
+                    )
+                if not execution_changed:
                     continue
-                self._send(
-                    (execution_id, "execution.updated", ""),
-                    summary,
-                    events.ExecutionUpdated(execution_id=execution_id, summary=summary),
-                )
                 try:
                     execution = await self._execution(execution_id)
                 except (FileNotFoundError, KeyError):
@@ -111,6 +131,8 @@ class SnapshotPublisher:
         self._suppressed.add(execution_id)
         try:
             self._pending.pop(execution_id, None)
+            self._summaries.discard(execution_id)
+            self._executions.discard(execution_id)
             task = self._tasks.get(execution_id)
             if task is not None:
                 task.cancel()

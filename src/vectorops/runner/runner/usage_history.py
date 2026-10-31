@@ -189,20 +189,18 @@ class UsageHistory:
             sql.Query.into(PARENTS).insert(child, parent),
         )
         child_usage = UsageHistory.workflow_usage(connection, child)
+        changed = []
         for identifier in ancestors:
             totals = UsageHistory.workflow_usage(connection, identifier)
-            UsageHistory.save_usage(
-                connection,
-                identifier,
-                totals.model_copy(
-                    update={
-                        "subtree": totals.subtree.replace(
-                            usage.Cost(), child_usage.subtree
-                        )
-                    }
-                ),
+            updated = totals.model_copy(
+                update={
+                    "subtree": totals.subtree.replace(usage.Cost(), child_usage.subtree)
+                }
             )
-        return tuple(ancestors)
+            if updated != totals:
+                UsageHistory.save_usage(connection, identifier, updated)
+                changed.append(identifier)
+        return tuple(changed)
 
     @staticmethod
     def ancestors(connection: sqlite3.Connection, workflow_id: str) -> list[str]:
@@ -243,6 +241,7 @@ class UsageHistory:
             (revision + 1, total.model_dump_json()),
         )
         ancestors = UsageHistory.ancestors(connection, step.workflow_id)
+        changed = []
         for identifier in ancestors:
             totals = UsageHistory.workflow_usage(connection, identifier)
             updated = usage.WorkflowUsage(
@@ -253,8 +252,10 @@ class UsageHistory:
                 ),
                 subtree=totals.subtree.replace(old, new),
             )
-            UsageHistory.save_usage(connection, identifier, updated)
-        return Change(revision + 1, total, tuple(ancestors))
+            if updated != totals:
+                UsageHistory.save_usage(connection, identifier, updated)
+                changed.append(identifier)
+        return Change(revision + 1, total, tuple(changed))
 
     @staticmethod
     def context(step: models.WorkflowStep) -> usage.Context:

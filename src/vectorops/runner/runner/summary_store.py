@@ -90,7 +90,13 @@ class SummaryStore:
             .set(STATE.generation, STATE.generation + 1)
             .where(STATE.id == 1),
         )
-        SummaryStore._targets(connection, snapshot)
+        if (
+            repair
+            or previous is None
+            or previous[0] != snapshot.source_id
+            or previous[1] != snapshot.targets_base_revision
+        ):
+            SummaryStore._targets(connection, snapshot)
 
     @staticmethod
     def _targets(

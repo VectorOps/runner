@@ -13,10 +13,15 @@ class SummaryRuntime:
     """Serialize adapters and coalesce projections without weakening history commits."""
 
     def __init__(
-        self, store: SummaryStore, sink: Optional[events.HistoryChangeSink]
+        self,
+        store: SummaryStore,
+        sink: Optional[events.HistoryChangeSink],
+        *,
+        publication_sink: Optional[events.PublicationSink] = None,
     ) -> None:
         self.store = store
         self.sink = sink
+        self.publication_sink = publication_sink
         self.lock = asyncio.Lock()
         self.working = summary_history.WorkingSummary()
         self.active = False
@@ -25,6 +30,8 @@ class SummaryRuntime:
         self._published: Optional[summary_history.Snapshot] = None
         self._workflows: set[str] = set()
         self._notify = False
+        self._execution_changed = False
+        self._recorded: Optional[summary_history.Snapshot] = None
         self._timer: Optional[asyncio.Task[None]] = None
         self._wake = asyncio.Event()
         self._publication_lock = asyncio.Lock()
@@ -37,11 +44,25 @@ class SummaryRuntime:
         *,
         urgency: summary_history.Urgency,
         notify: bool = False,
+        execution_changed: bool = False,
     ) -> None:
         self._pending = snapshot
         self._workflows.update(workflows)
         self._notify = self._notify or notify
-        if urgency == summary_history.Urgency.IMMEDIATE or not self.active:
+        self._execution_changed = self._execution_changed or execution_changed
+        references_changed = (
+            bool(snapshot.targets)
+            if self._published is None
+            else (
+                self._published.targets is not snapshot.targets
+                and self._published.targets != snapshot.targets
+            )
+        )
+        if (
+            urgency == summary_history.Urgency.IMMEDIATE
+            or references_changed
+            or not self.active
+        ):
             await self.flush()
         elif self._timer is None:
             self._next_publication = max(
@@ -76,8 +97,10 @@ class SummaryRuntime:
             previous = self._published
             self._next_publication = asyncio.get_running_loop().time() + self.interval
             notify = self._notify
+            execution_changed = self._execution_changed
             workflows = tuple(sorted(self._workflows))
             self._notify = False
+            self._execution_changed = False
             self._workflows.clear()
             relevant = previous is None or (
                 snapshot.summary,
@@ -86,9 +109,21 @@ class SummaryRuntime:
             ) != (previous.summary, previous.targets, previous.updated_at)
             try:
                 if relevant:
-                    await self.store.record(snapshot)
+                    recorded = self._recorded
+                    projection = snapshot
+                    if (
+                        recorded is not None
+                        and recorded.source_id == snapshot.source_id
+                        and recorded.targets is snapshot.targets
+                    ):
+                        projection = snapshot.model_copy(
+                            update={"targets_base_revision": recorded.revision}
+                        )
+                    await self.store.record(projection)
+                    self._recorded = snapshot
             except Exception as exc:
                 self._notify = self._notify or notify
+                self._execution_changed = self._execution_changed or execution_changed
                 self._workflows.update(workflows)
                 try:
                     await self.store.database.invalidate_index()
@@ -105,6 +140,25 @@ class SummaryRuntime:
             self._published = snapshot
             if self._pending is snapshot:
                 self._pending = None
+            if self.publication_sink is not None:
+                publication = events.Publication(
+                    workflows=workflows,
+                    summary=previous is None or previous.summary != snapshot.summary,
+                    execution=execution_changed,
+                )
+                if (
+                    publication.workflows
+                    or publication.summary
+                    or publication.execution
+                ):
+                    try:
+                        self.publication_sink(publication)
+                    except Exception as exc:
+                        diagnostics.log(
+                            "history.sink_failed",
+                            level=diagnostics.Level.ERROR,
+                            error=exc,
+                        )
             if self.sink is not None and (relevant or workflows or notify):
                 try:
                     self.sink(workflows)

@@ -67,6 +67,7 @@ class WorkflowRunner:
         project: typing.Optional[RunnerProject] = None,
         workspace_directory: typing.Optional[str] = None,
         change_sink: typing.Optional[events.ExecutionChangeSink] = None,
+        publication_sink: typing.Optional[events.ExecutionPublicationSink] = None,
         tool_policy: typing.Optional[tool_policy.ToolPolicy] = None,
     ) -> None:
         self.path = Path(path)
@@ -74,6 +75,7 @@ class WorkflowRunner:
         self.history = history
         self.event_sink = event_sink
         self.change_sink = change_sink
+        self.publication_sink = publication_sink
         self._state_store = state_store
         self._diagnostic_log = diagnostic_log
         self.authentication = authentication or AuthenticationService()
@@ -636,6 +638,11 @@ class WorkflowRunner:
                         if self.change_sink is not None
                         else None
                     ),
+                    publication_sink=(
+                        partial(self.publication_sink, execution_id)
+                        if self.publication_sink is not None
+                        else None
+                    ),
                 )
                 self._summaries[execution_id] = runtime
                 async with (
@@ -992,6 +999,11 @@ class WorkflowRunner:
             usage_store=project.usage,
             summary_store=project.summaries,
             summary_runtime=self._summaries.get(execution_id),
+            publication_sink=(
+                partial(self.publication_sink, execution_id)
+                if self.publication_sink is not None
+                else None
+            ),
             event_sink=self.event_sink,
             mailbox_sink=self.mailbox_sink,
             change_sink=(

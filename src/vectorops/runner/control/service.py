@@ -95,7 +95,7 @@ class RunnerService:
             authentication=self.authentication,
             mcp_pool=self.mcp_pool,
             project=project,
-            change_sink=self._changed,
+            publication_sink=self._published,
         )
         self._updates = SnapshotPublisher(
             self._summary,
@@ -228,6 +228,10 @@ class RunnerService:
     def _changed(self, execution_id: str, workflow_ids: tuple[str, ...]) -> None:
         if self._updates is not None and self._listeners:
             self._updates.changed(execution_id, workflow_ids)
+
+    def _published(self, execution_id: str, publication: events.Publication) -> None:
+        if self._updates is not None and self._listeners:
+            self._updates.publish(execution_id, publication)
 
     def _step(self, event: events.StepEvent) -> None:
         self._emit(event.model_dump(mode="json"))

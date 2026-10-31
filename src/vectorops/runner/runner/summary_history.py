@@ -76,6 +76,7 @@ class Snapshot(pydantic.BaseModel):
     updated_at: str
     summary: inspection.ExecutionSummary
     targets: list[LocalExecutionTarget] = pydantic.Field(default_factory=list)
+    targets_base_revision: Optional[int] = pydantic.Field(default=None, exclude=True)
 
 
 class SummaryHistory:
@@ -195,6 +196,7 @@ class Changes:
     context: Optional[usage.Context] = None
     workflows: set[str] = field(default_factory=set)
     notify: bool = False
+    execution_changed: bool = False
     urgency: Urgency = Urgency.NORMAL
     snapshot: Optional[Snapshot] = None
 
@@ -247,13 +249,18 @@ class WorkingSummary:
                     else summary.usage.root_context
                 ),
             )
-        return Snapshot(
-            source_id=base.source_id,
-            revision=revision,
-            updated_at=changes.updated_at or base.updated_at,
-            summary=summary,
-            targets=sorted(
-                set(base.targets) | changes.targets,
+        targets = base.targets
+        if changes.targets:
+            targets = sorted(
+                set(targets) | changes.targets,
                 key=lambda target: (target.root, str(target.worktree_id)),
-            ),
+            )
+        return base.model_copy(
+            update={
+                "revision": revision,
+                "updated_at": changes.updated_at or base.updated_at,
+                "summary": summary,
+                "targets": targets,
+                "targets_base_revision": None,
+            }
         )

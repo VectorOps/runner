@@ -10,6 +10,8 @@ import sqlite3
 import typing
 from uuid import UUID, uuid4
 
+import pydantic
+
 from vectorops.runner import models, usage, tool_policy
 from vectorops.runner.environment.target import LocalExecutionTarget
 from vectorops.runner.tool_authorization_store import (
@@ -44,6 +46,11 @@ OUTBOX: typing.Final = sql.Table("tool_rule_outbox")
 REPLAY: typing.Final = sql.Table("replay")
 
 
+class ExecutionMetadata(pydantic.BaseModel):
+    id: str
+    status: state.ExecutionStatus
+
+
 async def _offload(function: Callable[[], T]) -> T:
     """Finish database work before cancellation can trigger connection cleanup."""
     task = asyncio.create_task(asyncio.to_thread(function))
@@ -66,6 +73,7 @@ class SQLiteHistory:
         summary_store: typing.Optional[SummaryStore] = None,
         summary_runtime: typing.Optional[SummaryRuntime] = None,
         change_sink: typing.Optional[events.HistoryChangeSink] = None,
+        publication_sink: typing.Optional[events.PublicationSink] = None,
         event_sink: typing.Optional[events.StepEventSink] = None,
         mailbox_sink: typing.Optional[mailbox.EventSink] = None,
         workspace_rules: typing.Optional[WorkspaceRules] = None,
@@ -81,7 +89,9 @@ class SQLiteHistory:
         self._usage_store = usage_store
         self._summary_store = summary_store
         self._summary_runtime = summary_runtime or (
-            SummaryRuntime(summary_store, change_sink)
+            SummaryRuntime(
+                summary_store, change_sink, publication_sink=publication_sink
+            )
             if summary_store is not None
             else None
         )
@@ -197,6 +207,8 @@ class SQLiteHistory:
                 raise ValueError("unsupported history schema version")
             runtime = self._summary_runtime
             base = runtime.working.base(connection) if runtime is not None else None
+            if runtime is not None and base is not runtime.working.snapshot:
+                changes.execution_changed = True
             yield base
             if changes.changed:
                 revision = connection.execute(
@@ -244,6 +256,7 @@ class SQLiteHistory:
                         tuple(sorted(changes.workflows)),
                         urgency=changes.urgency,
                         notify=changes.notify,
+                        execution_changed=changes.execution_changed,
                     )
                 for event in notifications or ():
                     try:
@@ -390,6 +403,7 @@ class SQLiteHistory:
                     .where(EXECUTION.singleton == 1),
                 )
                 changes.changed = True
+                changes.execution_changed = True
                 changes.targets = summary_history.TargetReferences.add(
                     connection, [target]
                 )
@@ -562,6 +576,7 @@ class SQLiteHistory:
                             connection, saved.root_workflow_id
                         )
                 changes.changed = changes.notify = True
+                changes.execution_changed = True
                 changes.status, changes.updated_at = saved.status, saved.updated_at
                 if existing is None or previous.status != saved.status:
                     changes.urgency = summary_history.Urgency.IMMEDIATE
@@ -636,6 +651,7 @@ class SQLiteHistory:
                         "WHERE singleton = 1"
                     )
                 changes.changed = changes.notify = True
+                changes.execution_changed = True
                 changes.updated_at = updated_at
 
         await self._mutate(checkpoint, changes)
@@ -648,7 +664,7 @@ class SQLiteHistory:
 
         def pause(connection: sqlite3.Connection) -> bool:
             with self._transaction(connection, changes):
-                execution = self._execution(connection)
+                execution = self._execution_metadata(connection)
                 if execution.status != "running" or any(
                     self._input(connection, request).status != "pending"
                     for request in requests
@@ -682,6 +698,7 @@ class SQLiteHistory:
             .where(EXECUTION.singleton == 1),
         )
         changes.changed = changes.notify = True
+        changes.execution_changed = True
         changes.status, changes.updated_at = status, updated_at
         changes.urgency = summary_history.Urgency.IMMEDIATE
 
@@ -690,7 +707,7 @@ class SQLiteHistory:
 
         def wake(connection: sqlite3.Connection) -> bool:
             with self._transaction(connection, changes):
-                if self._execution(connection).status != "paused":
+                if self._execution_metadata(connection).status != "paused":
                     return False
                 self._set_status(connection, "running", changes)
                 return True
@@ -706,7 +723,7 @@ class SQLiteHistory:
 
         def stop(connection: sqlite3.Connection) -> None:
             with self._transaction(connection, changes):
-                status = self._execution(connection).status
+                status = self._execution_metadata(connection).status
                 if status not in ("running", "paused"):
                     raise ValueError("execution is not active")
                 if require_paused and status != "paused":
@@ -867,6 +884,7 @@ class SQLiteHistory:
                     .where(BRANCHES.id == operation.id),
                 )
                 changes.changed = changes.notify = True
+                changes.execution_changed = True
                 return operation
 
         return await self._mutate(apply, changes, notifications=notifications)
@@ -881,6 +899,16 @@ class SQLiteHistory:
 
     async def usage_snapshot(self) -> tuple[int, usage.Totals]:
         return await self._invoke(UsageHistory.snapshot)
+
+    @staticmethod
+    def _execution_metadata(connection: sqlite3.Connection) -> ExecutionMetadata:
+        row = connection.execute(
+            "SELECT json_extract(payload, '$.id'), json_extract(payload, '$.status') "
+            "FROM execution WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise KeyError("execution state")
+        return ExecutionMetadata(id=row[0], status=row[1])
 
     @staticmethod
     def _execution(connection: sqlite3.Connection) -> state.ExecutionRecord:
@@ -1200,7 +1228,7 @@ class SQLiteHistory:
         def register(connection: sqlite3.Connection) -> mailbox.InputRequest:
             with self._transaction(connection, changes):
                 step = self._step(connection, request_id)
-                execution = self._execution(connection)
+                execution = self._execution_metadata(connection)
                 if execution.status not in ("running", "paused"):
                     raise mailbox.MailboxConflict("execution is not running")
                 if (
@@ -1364,7 +1392,7 @@ class SQLiteHistory:
         def read(connection: sqlite3.Connection) -> mailbox.RequestPage:
             with connection:
                 connection.execute("BEGIN")
-                execution = self._execution(connection)
+                execution = self._execution_metadata(connection)
                 if execution.id != query.execution_id:
                     raise ValueError("execution identity mismatch")
                 statement = (
@@ -1426,9 +1454,11 @@ class SQLiteHistory:
                     ):
                         return request.public()
                     raise mailbox.MailboxConflict("input request is already answered")
-                if request.status != "pending" or self._execution(
-                    connection
-                ).status not in ("running", "paused"):
+                execution = self._execution_metadata(connection)
+                if request.status != "pending" or execution.status not in (
+                    "running",
+                    "paused",
+                ):
                     raise mailbox.MailboxConflict("input request is closed")
                 request.validate_response(answer.response)
                 if request.request_type == "tool.approval.v1":
@@ -1452,7 +1482,7 @@ class SQLiteHistory:
                     .set(INPUTS.payload, request.model_dump_json())
                     .where(INPUTS.request_id == request.request_id),
                 )
-                if self._execution(connection).status == "paused":
+                if execution.status == "paused":
                     self._set_status(connection, "running", changes)
                 step = self._step(connection, request.request_id)
                 SQLiteWorkflowGrants.record_answer(
@@ -1493,7 +1523,7 @@ class SQLiteHistory:
             changes.pending_delta -= len(rows)
             notifications.append(
                 mailbox.InputsCancelled(
-                    execution_id=SQLiteHistory._execution(connection).id,
+                    execution_id=SQLiteHistory._execution_metadata(connection).id,
                     request_ids=sorted(row[0] for row in rows),
                 )
             )
@@ -1548,6 +1578,7 @@ class SQLiteHistory:
                 changes.workflows.update(UsageHistory.link(connection, step))
                 changes.account(UsageHistory.update(connection, step))
                 changes.changed = True
+                changes.execution_changed = True
                 changes.workflows.add(step.workflow_id)
                 if (
                     base is not None
@@ -1601,7 +1632,6 @@ class SQLiteHistory:
                     )
                     changes.account(UsageHistory.update(connection, step, previous))
                     changes.changed = True
-                    changes.workflows.add(step.workflow_id)
                     context = (
                         base.summary.usage.root_context
                         if base is not None and base.summary.usage is not None

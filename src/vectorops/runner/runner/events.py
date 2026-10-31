@@ -1,6 +1,7 @@
 """Executor step snapshots for future UI and transport listeners."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 import typing
 
 import pydantic
@@ -45,3 +46,16 @@ class ExecutionStateUpdated(pydantic.BaseModel):
 
 HistoryChangeSink: typing.TypeAlias = Callable[[tuple[str, ...]], None]
 ExecutionChangeSink: typing.TypeAlias = Callable[[str, tuple[str, ...]], None]
+
+
+@dataclass(frozen=True)
+class Publication:
+    """Internal invalidation categories; unrelated snapshots need not be loaded."""
+
+    workflows: tuple[str, ...] = ()
+    summary: bool = False
+    execution: bool = False
+
+
+PublicationSink: typing.TypeAlias = Callable[[Publication], None]
+ExecutionPublicationSink: typing.TypeAlias = Callable[[str, Publication], None]
