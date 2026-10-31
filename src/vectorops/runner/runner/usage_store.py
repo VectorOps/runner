@@ -11,9 +11,8 @@ from vectorops.runner.runner import sql
 from vectorops.runner.runner.execution_state import timestamp
 from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
-EXECUTIONS: Final = sql.Table("usage_confirmed_executions")
+EXECUTIONS: Final = sql.Table("usage_executions")
 DOCUMENTS: Final = sql.Table("documents")
-DOCUMENT: Final = "usage_confirmed_v2"
 
 
 class Entry(pydantic.BaseModel):
@@ -30,15 +29,16 @@ class UsageStore:
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> usage.RunnerUsage:
         connection.execute(
-            "CREATE TABLE IF NOT EXISTS usage_confirmed_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS usage_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
         )
         row = connection.execute(
-            "SELECT payload FROM documents WHERE name = ?", (DOCUMENT,)
+            "SELECT payload FROM documents WHERE name = ?", ("usage",)
         ).fetchone()
-        if row is None:
-            connection.execute("DELETE FROM usage_confirmed_executions")
-            return usage.RunnerUsage()
-        return usage.RunnerUsage.model_validate_json(row[0])
+        return (
+            usage.RunnerUsage()
+            if row is None
+            else usage.RunnerUsage.model_validate_json(row[0])
+        )
 
     async def record(
         self, execution_id: str, revision: int, total: usage.Totals
@@ -50,7 +50,7 @@ class UsageStore:
                 connection.execute("BEGIN IMMEDIATE")
                 counters = self._initialize(connection)
                 row = connection.execute(
-                    "SELECT payload FROM usage_confirmed_executions WHERE execution_id = ?",
+                    "SELECT payload FROM usage_executions WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()
                 previous: Optional[Entry] = (
@@ -76,12 +76,12 @@ class UsageStore:
                     }
                 )
                 connection.execute(
-                    "INSERT INTO usage_confirmed_executions (execution_id, payload) VALUES (?, ?) "
+                    "INSERT INTO usage_executions (execution_id, payload) VALUES (?, ?) "
                     "ON CONFLICT (execution_id) DO UPDATE SET payload = excluded.payload",
                     (execution_id, entry.model_dump_json()),
                 )
                 WorkspaceDatabase.put_document(
-                    connection, DOCUMENT, counters.model_dump_json()
+                    connection, "usage", counters.model_dump_json()
                 )
 
         await self.database.run(write)
@@ -126,7 +126,7 @@ class UsageStore:
                         reset_at=timestamp(), generation=counters.generation + 1
                     )
                 WorkspaceDatabase.put_document(
-                    connection, DOCUMENT, counters.model_dump_json()
+                    connection, "usage", counters.model_dump_json()
                 )
                 return counters
 

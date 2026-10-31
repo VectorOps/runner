@@ -2,6 +2,7 @@
 
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final, Optional
 
 from vectorops.runner import models, usage
@@ -42,10 +43,8 @@ def contribution(step: models.WorkflowStep) -> usage.Totals:
         reasoning_tokens=provider.reasoning_tokens,
         cache_read_tokens=provider.cache_read_tokens,
         cache_write_tokens=provider.cache_write_tokens,
-        cost_estimate_usd=cost,
+        cost_estimate_usd=cost or Decimal(0),
         calls=1,
-        confirmed_calls=1,
-        priced_calls=int(cost is not None),
         incomplete_calls=int(cost is None or metrics.retries > 0),
     )
 
@@ -55,33 +54,19 @@ class UsageHistory:
     def initialize(connection: sqlite3.Connection) -> None:
         """Backfill existing histories once, in the same transaction as the new state."""
         UsageHistory._initialize_context(connection)
-        existing = connection.execute(
+        if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_state'"
-        ).fetchone()
-        revision = 0
-        if existing:
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(usage_state)")
-            }
-            if "accounting_version" in columns:
-                return
-            revision = UsageHistory.snapshot_revision(connection) + 1
-            connection.execute("DROP TABLE usage_state")
-            connection.execute("DROP TABLE workflow_parents")
-            connection.execute(
-                "UPDATE summary_state SET revision = revision + 1 WHERE id = 1"
-            )
+        ).fetchone():
+            return
         connection.execute(
             "CREATE TABLE workflow_parents (child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL)"
         )
         connection.execute(
-            "CREATE TABLE usage_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL, payload TEXT NOT NULL, accounting_version INTEGER NOT NULL)"
+            "CREATE TABLE usage_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL, payload TEXT NOT NULL)"
         )
         sql.execute(
             connection,
-            sql.Query.into(STATE).insert(
-                1, revision, usage.Totals().model_dump_json(), 2
-            ),
+            sql.Query.into(STATE).insert(1, 0, usage.Totals().model_dump_json()),
         )
         sql.execute(
             connection,
@@ -223,14 +208,6 @@ class UsageHistory:
             ).fetchone()
             current = None if row is None else str(row[0])
         return result
-
-    @staticmethod
-    def snapshot_revision(connection: sqlite3.Connection) -> int:
-        return int(
-            connection.execute(
-                "SELECT revision FROM usage_state WHERE id = 1"
-            ).fetchone()[0]
-        )
 
     @staticmethod
     def snapshot(connection: sqlite3.Connection) -> tuple[int, usage.Totals]:

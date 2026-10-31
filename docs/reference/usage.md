@@ -20,7 +20,7 @@ reset = await client.reset_runner_usage()
 | `executions.summary` | `execution_id` | Execution summary, including optional `usage` |
 
 Execution summary lists expose the same usage contract. Starting summaries can have `usage: null`.
-Within an available usage envelope, `totals` is null until at least one finalized provider measurement exists.
+Usage fields retain their existing names and types. Totals remain numeric and start at zero.
 
 ## Scopes
 
@@ -32,10 +32,11 @@ Within an available usage envelope, `totals` is null until at least one finalize
 
 ## Current context size
 
-`root_context.input_tokens` is finalized provider input usage, including cache-read
-and cache-write tokens. `output_tokens` is the measured output of that request.
-`step_id` identifies the measurement; `catalog_model` and `context_window` describe
-its model. Before the first measurement, `root_context` is null.
+`root_context.input_tokens_estimate` retains its existing wire name but contains
+finalized provider input usage, including cache-read and cache-write tokens.
+`input_tokens_source` is `provider_usage`; `output_tokens_estimate` contains the
+measured output of that request. `step_id` identifies the measurement. Before the
+first measurement, `root_context` is null.
 
 Starting another request does not replace the last measurement with an estimate.
 The measurement does not include newly added user input or tool results. A newer,
@@ -46,15 +47,16 @@ not exposed as context measurements or included in cumulative usage.
 
 ## Accuracy and reset behavior
 
-Only finalized provider usage contributes tokens and cost. Partial snapshots and
-local estimates contribute no consumption. `confirmed_calls` counts measured
-requests; `priced_calls` counts requests with known model pricing.
-`cost_estimate_usd` serializes as a decimal string, or null when no measured request
-has known pricing. A reported zero cost is distinct from unavailable pricing.
+New contributions use only finalized provider usage for tokens and cost. Partial
+snapshots and local estimates contribute no consumption. `cost_estimate_usd`
+retains its decimal-string format and zero default. Zero alone does not establish
+that all calls were free or priced.
 `incomplete_calls` counts contributions with missing usage or pricing, or
 unrecorded retry attempts. Finalization clears the corresponding pending coverage.
+`estimated_calls` remains available for previously stored estimated contributions;
+new contributions do not count estimates.
 `input_tokens` is uncached input. `cache_read_tokens` and `cache_write_tokens` are
-separate; `all_input_tokens` sums these three categories for cache-inclusive input.
+separate; sum these three existing fields when a cache-inclusive total is needed.
 Reasoning tokens are reported separately and must not be added again to output.
 Earlier retry attempt usage is not retained in the step snapshot. These totals are not a billing ledger.
 
@@ -64,11 +66,10 @@ Reset does not have an idempotency key; do not automatically retry it after an u
 
 Retained histories are reconciled once at service startup, or on first usage access/execution for a library runner. Later writes update counters incrementally; reads, resets, and new runs do not rescan historical executions. Restart reconciles any history committed before a workspace write failed. Work deleted before accounting was introduced cannot be reconstructed.
 
-The confirmed-accounting rollout rebuilds retained history aggregates without
-changing steps or replay outcomes. Workspace confirmed counters use a new ledger;
-old mixed counters and reset baselines are not carried forward. Retained measured
-usage is reconciled into the new ledger; previously deleted history cannot be
-recovered.
+Existing stored aggregates and reset baselines are retained as recorded. There is
+no usage schema migration, historical recalculation, or replacement workspace
+ledger. The corrected calculation applies to new contributions; historical totals
+can therefore still include estimates recorded by earlier versions.
 
 ## Related
 

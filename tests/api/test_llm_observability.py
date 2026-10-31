@@ -221,9 +221,12 @@ def test_multimodal_context_uses_measured_usage_without_changing_metrics(
     before = metrics.model_dump()
     context = metrics.context("image-call")
     assert context is not None
-    assert context.input_tokens == 700
-    assert context.output_tokens == 20
+    assert context.input_tokens_estimate == 700
+    assert context.output_tokens_estimate == 20
     assert context.context_window == 1000
+    assert context.input_tokens_source == "provider_usage"
+    assert context.context_remaining_estimate == 300
+    assert context.remaining_output_headroom_estimate == 180
     assert metrics.input_tokens_estimate is None
     assert metrics.model_dump() == before
 

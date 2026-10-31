@@ -108,8 +108,7 @@ async def test_workflow_tree_persists_own_and_subtree_usage(tmp_path: Path) -> N
     assert summary.usage.totals.input_tokens == 600
     assert set(root.usage.subtree.model_dump()) == {
         "cost_estimate_usd",
-        "confirmed_calls",
-        "priced_calls",
+        "estimated_calls",
         "incomplete_calls",
     }
     assert summary.usage.root_context.step_id == "root-call"
@@ -177,7 +176,7 @@ async def test_replacement_streaming_and_reset_baseline(tmp_path: Path) -> None:
     totals = (await store.read()).totals
     assert totals.input_tokens == 100 and totals.output_tokens == 10
     assert totals.cost_estimate_usd == Decimal("0.03")
-    assert totals.confirmed_calls == totals.priced_calls == 1
+    assert totals.estimated_calls == 0
     assert totals.calls == 0
     workflow = await history.get_workflow("root")
     assert workflow.usage is not None
@@ -221,7 +220,7 @@ async def test_all_branches_cost_but_only_active_root_context(tmp_path: Path) ->
     assert summary.usage.totals.calls == 4
     assert summary.usage.totals.cost_estimate_usd == Decimal("0.04")
     assert summary.usage.root_context.step_id == "branch"
-    assert summary.usage.root_context.input_tokens == 200
+    assert summary.usage.root_context.input_tokens_estimate == 200
 
 
 @pytest.mark.parametrize("estimate", [None, 123])
@@ -263,10 +262,10 @@ async def test_root_context_prefers_final_cache_inclusive_usage(
         summary = await owner.execution_summary()
         assert summary.usage is not None and summary.usage.root_context is not None
         context = summary.usage.root_context
-        assert context.input_tokens == expected
-        assert context.output_tokens == 20
+        assert context.input_tokens_estimate == expected
+        assert context.output_tokens_estimate == 20
         assert context.context_window == 1000
-        assert "estimate" not in " ".join(context.model_dump())
+        assert context.input_tokens_source == "provider_usage"
         assert await owner.get_step("call") == step
         assert await owner.usage_snapshot() == before
 
@@ -291,7 +290,7 @@ async def test_root_context_partial_usage_is_not_a_measurement(
     summary = await history.execution_summary()
     assert summary.usage is not None
     assert summary.usage.root_context is None
-    assert summary.usage.totals is None
+    assert summary.usage.totals.input_tokens == summary.usage.totals.output_tokens == 0
 
 
 async def test_latest_unknown_context_keeps_last_measurement(
@@ -310,7 +309,7 @@ async def test_latest_unknown_context_keeps_last_measurement(
     summary = await history.execution_summary()
     assert summary.usage is not None and summary.usage.root_context is not None
     assert summary.usage.root_context.step_id == "first"
-    assert summary.usage.root_context.input_tokens == 100
+    assert summary.usage.root_context.input_tokens_estimate == 100
 
 
 def test_unknown_and_estimated_usage() -> None:
@@ -471,13 +470,13 @@ async def test_coverage_replacement_clears_only_completed_contribution(
     await history.append_step(generation("child-call", "child", streaming=True))
     root = await history.get_workflow("root")
     assert root.usage is not None
-    assert root.usage.subtree.confirmed_calls == 0
+    assert root.usage.subtree.estimated_calls == 0
     assert root.usage.subtree.incomplete_calls == 2
     await history.update_step(generation("root-call"))
     root = await history.get_workflow("root")
     assert root.usage is not None
-    assert root.usage.own.confirmed_calls == 1
-    assert root.usage.subtree.confirmed_calls == 1
+    assert root.usage.own.estimated_calls == 0
+    assert root.usage.subtree.estimated_calls == 0
     assert root.usage.subtree.incomplete_calls == 1
     await history.update_step(generation("child-call", "child"))
     root = await history.get_workflow("root")
@@ -536,11 +535,11 @@ async def test_runs_do_not_repeat_usage_reconciliation(
     assert (await runner.runner_usage()).totals == usage.Totals()
 
 
-def test_measured_zero_and_unknown_cost_are_distinct() -> None:
+def test_measured_zero_and_unknown_cost_use_existing_coverage() -> None:
     zero = contribution(generation("zero", incoming=0, outgoing=0, cost="0"))
-    assert zero.confirmed_calls == zero.priced_calls == 1
+    assert zero.calls == 1 and zero.incomplete_calls == 0
     assert zero.cost_estimate_usd == Decimal(0)
-    assert zero.all_input_tokens == 0
+    assert zero.input_tokens == 0
     assert usage.Totals.model_validate_json(zero.model_dump_json()) == zero
     assert zero.since(zero) == usage.Totals()
     step = generation("unpriced").model_copy(
@@ -551,8 +550,8 @@ def test_measured_zero_and_unknown_cost_are_distinct() -> None:
         }
     )
     unpriced = contribution(step)
-    assert unpriced.confirmed_calls == 1 and unpriced.priced_calls == 0
-    assert unpriced.cost_estimate_usd is None
+    assert unpriced.calls == unpriced.incomplete_calls == 1
+    assert unpriced.cost_estimate_usd == Decimal(0)
 
 
 async def test_cached_finalization_counts_only_confirmed_usage_once(
@@ -609,10 +608,13 @@ async def test_cached_finalization_counts_only_confirmed_usage_once(
     assert (await store.read()).totals == totals
     assert totals.input_tokens == 7000
     assert totals.cache_read_tokens == 700000 and totals.cache_write_tokens == 5000
-    assert totals.all_input_tokens == 712000
+    assert (
+        totals.input_tokens + totals.cache_read_tokens + totals.cache_write_tokens
+        == 712000
+    )
     assert totals.output_tokens == 30 and totals.reasoning_tokens == 5
     assert totals.cost_estimate_usd == Decimal("0.57")
-    assert totals.confirmed_calls == totals.calls == 2
+    assert totals.calls == 2 and totals.estimated_calls == 0
 
 
 async def test_measured_context_stays_stable_then_accepts_reduction_and_branch(
@@ -633,14 +635,14 @@ async def test_measured_context_stays_stable_then_accepts_reduction_and_branch(
     ):
         assert summary.usage is not None and summary.usage.root_context is not None
         assert summary.usage.root_context.step_id == "first"
-        assert summary.usage.root_context.input_tokens == 704000
+        assert summary.usage.root_context.input_tokens_estimate == 704000
     await history.update_step(generation("next", previous="first", incoming=707000))
     await history.append_step(generation("smaller", previous="next", incoming=100000))
     for owner in (history, SQLiteHistory(history.path)):
         summary = await owner.execution_summary()
         assert summary.usage is not None and summary.usage.root_context is not None
         assert summary.usage.root_context.step_id == "smaller"
-        assert summary.usage.root_context.input_tokens == 100000
+        assert summary.usage.root_context.input_tokens_estimate == 100000
     await history.save_execution(
         execution_state.ExecutionRecord(
             id="execution",
@@ -652,10 +654,10 @@ async def test_measured_context_stays_stable_then_accepts_reduction_and_branch(
     projected = await summaries.get("execution")
     assert projected.usage is not None and projected.usage.root_context is not None
     assert projected.usage.root_context.step_id == "first"
-    assert projected.usage.root_context.input_tokens == 704000
+    assert projected.usage.root_context.input_tokens_estimate == 704000
 
 
-async def test_rebuild_mixed_accounting_before_resuming_inflight_request(
+async def test_existing_usage_is_not_rebuilt_or_schema_changed(
     tmp_path: Path,
 ) -> None:
     history = SQLiteHistory(tmp_path / "history.sqlite3")
@@ -673,7 +675,6 @@ async def test_rebuild_mixed_accounting_before_resuming_inflight_request(
     await history.append_step(pending)
     before_revision, _ = await history.usage_snapshot()
     with closing(sqlite3.connect(history.path)) as connection, connection:
-        connection.execute("ALTER TABLE usage_state DROP COLUMN accounting_version")
         connection.execute(
             "UPDATE usage_state SET payload = ?",
             (
@@ -688,24 +689,23 @@ async def test_rebuild_mixed_accounting_before_resuming_inflight_request(
         )
     reopened = SQLiteHistory(history.path)
     revision, totals = await reopened.usage_snapshot()
-    assert revision > before_revision
-    assert totals.input_tokens == 100 and totals.confirmed_calls == 1
-    assert totals.cost_estimate_usd == Decimal("0.1")
+    assert revision == before_revision
+    assert totals.input_tokens == 500100 and totals.estimated_calls == 1
+    assert totals.cost_estimate_usd == Decimal("10.1")
     assert await reopened.get_step("first") == first
     assert await reopened.get_step("pending") == pending
     assert await SQLiteHistory(history.path).usage_snapshot() == (revision, totals)
-    await reopened.update_step(
-        generation("pending", previous="first", incoming=1000, cost="0.01")
-    )
-    _, finalized = await reopened.usage_snapshot()
-    assert finalized.input_tokens == 1100 and finalized.confirmed_calls == 2
-    assert finalized.cost_estimate_usd == Decimal("0.11")
+    with closing(sqlite3.connect(history.path)) as connection:
+        assert [
+            row[1] for row in connection.execute("PRAGMA table_info(usage_state)")
+        ] == ["id", "revision", "payload"]
+    workflow = await reopened.get_workflow("root")
+    assert workflow.usage is not None
+    assert workflow.usage.own.input_tokens == 500100
 
 
-@pytest.mark.parametrize("confirmed_document", [False, True])
-async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
+async def test_existing_workspace_usage_and_reset_baseline_are_preserved(
     tmp_path: Path,
-    confirmed_document: bool,
 ) -> None:
     workspace = WorkspaceDatabase(tmp_path)
 
@@ -725,46 +725,49 @@ async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
                 "usage",
                 '{"totals":{"input_tokens":500000,"estimated_calls":1}}',
             )
-            if confirmed_document:
-                WorkspaceDatabase.put_document(
-                    connection, "usage_confirmed", usage.RunnerUsage().model_dump_json()
-                )
 
     await workspace.run(legacy)
     store = UsageStore(workspace)
-    assert (await store.read()).totals == usage.Totals()
+    existing = (await store.read()).totals
+    assert existing.input_tokens == 500000 and existing.estimated_calls == 1
     measured = contribution(generation("first"))
     await store.record("execution", 1, measured)
-    assert (await store.read()).totals == measured
-    assert (await UsageStore(workspace).read()).totals == measured
-
-
-async def test_legacy_writer_cannot_contaminate_confirmed_workspace_ledger(
-    tmp_path: Path,
-) -> None:
-    workspace = WorkspaceDatabase(tmp_path)
-    store = UsageStore(workspace)
-    first = contribution(generation("first"))
-    await store.record("execution", 1, first)
-
-    def legacy_write(connection: sqlite3.Connection) -> None:
-        with connection:
-            connection.execute(
-                "CREATE TABLE usage_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO usage_executions VALUES ('execution', ?)",
-                (
-                    '{"revision":999,"total":{"estimated_calls":1},"baseline":{"estimated_calls":0}}',
-                ),
-            )
-
-    await workspace.run(legacy_write)
+    assert (await store.read()).totals == existing
     restarted = UsageStore(workspace)
-    assert (await restarted.read()).totals == first
-    await restarted.record(
-        "execution", 2, contribution(generation("second", incoming=200))
-    )
-    assert (await restarted.read()).totals.input_tokens == 200
+    assert (await restarted.read()).totals == existing
+    await restarted.record("new-execution", 1, measured)
+    assert (await restarted.read()).totals.input_tokens == 500100
     assert (await restarted.read(reset=True)).totals == usage.Totals()
     assert (await restarted.read()).totals == usage.Totals()
+    names = await workspace.run(
+        lambda connection: [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        ]
+    )
+    assert "usage_executions" in names
+    assert "usage_confirmed_executions" not in names
+
+
+def test_legacy_usage_preserves_sums_and_reset_baselines() -> None:
+    legacy = {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "calls": 1,
+        "cost_estimate_usd": "0.01",
+        "estimated_token_calls": 1,
+        "estimated_cost_calls": 1,
+        "unknown_input_calls": 0,
+        "unknown_output_calls": 0,
+        "unknown_cost_calls": 0,
+        "partial_provider_calls": 1,
+        "unrecorded_attempts": 0,
+    }
+    totals = usage.Totals.model_validate(legacy)
+    workflow = usage.WorkflowUsage.model_validate({"own": legacy, "subtree": legacy})
+    assert workflow.own == totals
+    assert workflow.subtree.cost_estimate_usd == Decimal("0.01")
+    assert totals.estimated_calls == 2 and totals.incomplete_calls == 1
+    assert totals.since(usage.Totals.model_validate(legacy)) == usage.Totals()
