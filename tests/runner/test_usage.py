@@ -702,8 +702,10 @@ async def test_rebuild_mixed_accounting_before_resuming_inflight_request(
     assert finalized.cost_estimate_usd == Decimal("0.11")
 
 
+@pytest.mark.parametrize("confirmed_document", [False, True])
 async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
     tmp_path: Path,
+    confirmed_document: bool,
 ) -> None:
     workspace = WorkspaceDatabase(tmp_path)
 
@@ -715,7 +717,7 @@ async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
             connection.execute(
                 "INSERT INTO usage_executions VALUES ('execution', ?)",
                 (
-                    '{"revision":999,"total":{"input_tokens":500000,"estimated_calls":1}}',
+                    '{"revision":999,"total":{"input_tokens":500000,"estimated_calls":1},"baseline":{"estimated_calls":0}}',
                 ),
             )
             WorkspaceDatabase.put_document(
@@ -723,6 +725,10 @@ async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
                 "usage",
                 '{"totals":{"input_tokens":500000,"estimated_calls":1}}',
             )
+            if confirmed_document:
+                WorkspaceDatabase.put_document(
+                    connection, "usage_confirmed", usage.RunnerUsage().model_dump_json()
+                )
 
     await workspace.run(legacy)
     store = UsageStore(workspace)
@@ -731,3 +737,34 @@ async def test_confirmed_workspace_ledger_does_not_relabel_legacy_estimates(
     await store.record("execution", 1, measured)
     assert (await store.read()).totals == measured
     assert (await UsageStore(workspace).read()).totals == measured
+
+
+async def test_legacy_writer_cannot_contaminate_confirmed_workspace_ledger(
+    tmp_path: Path,
+) -> None:
+    workspace = WorkspaceDatabase(tmp_path)
+    store = UsageStore(workspace)
+    first = contribution(generation("first"))
+    await store.record("execution", 1, first)
+
+    def legacy_write(connection: sqlite3.Connection) -> None:
+        with connection:
+            connection.execute(
+                "CREATE TABLE usage_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO usage_executions VALUES ('execution', ?)",
+                (
+                    '{"revision":999,"total":{"estimated_calls":1},"baseline":{"estimated_calls":0}}',
+                ),
+            )
+
+    await workspace.run(legacy_write)
+    restarted = UsageStore(workspace)
+    assert (await restarted.read()).totals == first
+    await restarted.record(
+        "execution", 2, contribution(generation("second", incoming=200))
+    )
+    assert (await restarted.read()).totals.input_tokens == 200
+    assert (await restarted.read(reset=True)).totals == usage.Totals()
+    assert (await restarted.read()).totals == usage.Totals()

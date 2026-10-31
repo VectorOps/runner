@@ -72,7 +72,7 @@ async def test_delete_terminal_cleans_records_and_receipts(
             "execution_index",
             "execution_summaries",
             "execution_targets",
-            "usage_executions",
+            "usage_confirmed_executions",
             "worktree_uses",
         ):
             count = await project.database.run(
