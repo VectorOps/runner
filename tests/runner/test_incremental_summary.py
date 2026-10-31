@@ -83,7 +83,7 @@ async def test_streaming_work_is_independent_of_retained_workflows(
                 )
             assert publish.call_count == 0
             await database._summary_runtime.flush()
-            assert publish.call_count == 1
+            assert publish.call_count == 0
             database._summary_runtime.interval = 0
             if database._summary_runtime._timer is not None:
                 database._summary_runtime._timer.cancel()
@@ -108,7 +108,7 @@ async def test_streaming_work_is_independent_of_retained_workflows(
         expected = await database.summary_snapshot()
         assert database._summary_runtime.working.snapshot == expected
         print(
-            f"retained={retained}: 20 updates, old target rows examined={20 * retained}, new discovery queries=0, projection writes=1, seconds={elapsed:.4f}, cpu_seconds={cpu_elapsed:.4f}, cpu_ms_per_persisted_step={cpu_elapsed * 1000 / 80:.4f}"
+            f"retained={retained}: 20 updates, old target rows examined={20 * retained}, new discovery queries=0, projection writes=0, seconds={elapsed:.4f}, cpu_seconds={cpu_elapsed:.4f}, cpu_ms_per_persisted_step={cpu_elapsed * 1000 / 80:.4f}"
         )
 
 
@@ -186,9 +186,7 @@ async def test_shutdown_failure_recovery_and_late_publication(tmp_path: Path) ->
         with patch.object(
             store, "record", new=AsyncMock(side_effect=RuntimeError("unavailable"))
         ):
-            await database.update_step(
-                generation("stream", streaming=True, outgoing=77)
-            )
+            await database.update_step(generation("stream", outgoing=77))
             assert database._summary_runtime is not None
             assert not await database._summary_runtime.flush()
     snapshot = await SQLiteHistory(database.path).summary_snapshot()
@@ -468,9 +466,7 @@ async def test_normal_updates_do_not_starve_and_urgent_status_bypasses_interval(
             await database.set_workflow_name("root", "Normal metadata")
             assert not times
             for index in range(25):
-                await database.update_step(
-                    generation("stream", streaming=True, outgoing=30 + index)
-                )
+                await database.append_step(generation(f"measured-{index}"))
                 await asyncio.sleep(0.008)
             assert len(times) >= 2
             assert all(
@@ -478,6 +474,8 @@ async def test_normal_updates_do_not_starve_and_urgent_status_bypasses_interval(
                 for left, right in zip(times, times[1:])
             )
             owner.interval = 60
+            await owner.flush()
+            owner._next_publication = asyncio.get_running_loop().time() + 60
             before = len(times)
             await database.update_step(generation("stream", outgoing=100))
             assert len(times) == before

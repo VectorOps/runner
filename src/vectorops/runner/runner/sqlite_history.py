@@ -1585,10 +1585,8 @@ class SQLiteHistory:
                     and base.summary.root_workflow_id == step.workflow_id
                 ):
                     changes.context_changed = True
-                    changes.context = (
-                        UsageHistory.context(step)
-                        if step.operation.kind == "llm.generate"
-                        else UsageHistory.root_context(connection, step.workflow_id)
+                    changes.context = UsageHistory.root_context(
+                        connection, step.workflow_id
                     )
 
         await self._mutate(append, changes)
@@ -1632,14 +1630,16 @@ class SQLiteHistory:
                     )
                     changes.account(UsageHistory.update(connection, step, previous))
                     changes.changed = True
-                    context = (
-                        base.summary.usage.root_context
-                        if base is not None and base.summary.usage is not None
-                        else None
-                    )
-                    if context is not None and context.step_id == step.id:
+                    if (
+                        base is not None
+                        and base.summary.root_workflow_id == step.workflow_id
+                        and step.operation.kind == "llm.generate"
+                        and UsageHistory.context(step) is not None
+                    ):
                         changes.context_changed = True
-                        changes.context = UsageHistory.context(step)
+                        changes.context = UsageHistory.root_context(
+                            connection, step.workflow_id
+                        )
 
         await self._mutate(update, changes)
 

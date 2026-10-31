@@ -41,36 +41,21 @@ class Metrics(pydantic.BaseModel):
     retries: int = 0
     compaction: Optional[CompactionSavings] = None
 
-    def context(self, step_id: str) -> usage_models.Context:
-        """Project measured context when final usage exists, preserving stored estimates."""
-        values = self.model_dump(
-            include=set(usage_models.Context.model_fields)
-            - {"step_id", "input_tokens_source"}
-        )
-        source: Optional[Literal["provider_usage", "token_estimate"]] = (
-            "token_estimate" if self.input_tokens_estimate is not None else None
-        )
+    def context(self, step_id: str) -> Optional[usage_models.Context]:
+        """Project finalized provider measurements without exposing provisional estimates."""
         provider = self.provider_usage
-        if provider is not None and provider.completeness == "final":
-            incoming = (
+        if provider is None or provider.completeness != "final":
+            return None
+        return usage_models.Context(
+            step_id=step_id,
+            input_tokens=(
                 provider.input_tokens
                 + provider.cache_read_tokens
                 + provider.cache_write_tokens
-            )
-            values["input_tokens_estimate"] = incoming
-            source = "provider_usage"
-            if self.context_window is not None:
-                remaining = self.context_window - incoming
-                values["context_remaining_estimate"] = max(0, remaining)
-                values["context_overflow_estimate"] = max(
-                    0, (self.output_budget or 0) - remaining
-                )
-                headroom = [remaining - provider.output_tokens]
-                if self.output_budget is not None:
-                    headroom.append(self.output_budget - provider.output_tokens)
-                values["remaining_output_headroom_estimate"] = max(0, min(headroom))
-        return usage_models.Context(
-            step_id=step_id, input_tokens_source=source, **values
+            ),
+            output_tokens=provider.output_tokens,
+            catalog_model=self.catalog_model,
+            context_window=self.context_window,
         )
 
 

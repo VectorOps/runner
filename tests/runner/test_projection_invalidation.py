@@ -37,8 +37,10 @@ async def test_usage_only_publication_skips_execution_and_unchanged_ancestors(
         await database.update_step(
             generation("call", "child", streaming=True, outgoing=50)
         )
-        assert [call.args[1] for call in save.call_args_list] == ["child"]
-    assert published == [events.Publication(("child",), summary=True)]
+        assert not save.called
+    assert published == []
+    await database.update_step(generation("call", "child", outgoing=50))
+    assert published == [events.Publication(("child", "root"), summary=True)]
     execution = AsyncMock(side_effect=AssertionError("usage-only execution read"))
     summary = AsyncMock(return_value=await store.get("execution"))
     workflow = AsyncMock(return_value=await database.get_workflow("child"))
@@ -49,17 +51,17 @@ async def test_usage_only_publication_skips_execution_and_unchanged_ancestors(
     await publisher.close()
     execution.assert_not_awaited()
     summary.assert_awaited_once()
-    workflow.assert_awaited_once_with("execution", "child")
+    assert workflow.await_count == 2
+    workflow.assert_any_await("execution", "child")
+    workflow.assert_any_await("execution", "root")
     published.clear()
     with patch.object(
         UsageHistory, "save_usage", wraps=UsageHistory.save_usage
     ) as save:
-        await database.update_step(
-            generation("call", "child", streaming=True, outgoing=60, cost="0.02")
-        )
+        await database.append_step(generation("second", "child", cost="0.02"))
         assert {call.args[1] for call in save.call_args_list} == {"child", "root"}
     assert published[0].workflows == ("child", "root")
-    assert not published[0].execution
+    assert published[0].execution
     await database.checkpoint_execution("execution")
     assert published[-1] == events.Publication(execution=True)
 
@@ -154,7 +156,7 @@ async def test_targets_reused_and_projection_reads_skipped_until_membership_chan
             side_effect=AssertionError("target projection read"),
         ),
     ):
-        await database.update_step(generation("call", streaming=True, outgoing=50))
+        await database.update_step(generation("call", outgoing=50))
         await database.checkpoint_execution("execution")
     current = database._summary_runtime.working.snapshot
     assert current is not None and current.targets is before.targets
@@ -185,14 +187,14 @@ async def test_target_projection_repair_after_missing_row_and_external_writer(
 
     await store.database.run(remove_projection)
     with patch.object(SummaryStore, "_targets", wraps=SummaryStore._targets) as targets:
-        await database.update_step(generation("call", streaming=True, outgoing=50))
+        await database.update_step(generation("call", outgoing=50))
         assert targets.call_count == 1
     external = SQLiteHistory(database.path)
     await external.reference_target(
         LocalExecutionTarget(root=str(tmp_path / "external"))
     )
     with patch.object(SummaryStore, "_targets", wraps=SummaryStore._targets) as targets:
-        await database.update_step(generation("call", streaming=True, outgoing=60))
+        await database.append_step(generation("second", outgoing=60))
         assert targets.call_count == 1
     roots = await store.database.run(
         lambda connection: list(

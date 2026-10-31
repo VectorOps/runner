@@ -55,7 +55,9 @@ async def test_stream_replacement_uses_bound_static_sql(
                     lambda connection: UsageHistory.ancestors(connection, identifier)
                 )
                 await database.update_steps([])
-            assert (await usage.read()).totals.output_tokens == 198
+            assert (await usage.read()).totals.output_tokens == 0
+            await database.update_step(generation(identifier, identifier, outgoing=99))
+            assert (await usage.read()).totals.output_tokens == 99
 
 
 async def test_session_replacements_are_isolated_without_deepcopy(

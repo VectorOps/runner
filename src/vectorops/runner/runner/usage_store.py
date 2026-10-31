@@ -13,6 +13,7 @@ from vectorops.runner.runner.workspace_database import WorkspaceDatabase
 
 EXECUTIONS: Final = sql.Table("usage_executions")
 DOCUMENTS: Final = sql.Table("documents")
+DOCUMENT: Final = "usage_confirmed"
 
 
 class Entry(pydantic.BaseModel):
@@ -32,13 +33,12 @@ class UsageStore:
             "CREATE TABLE IF NOT EXISTS usage_executions (execution_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
         )
         row = connection.execute(
-            "SELECT payload FROM documents WHERE name = ?", ("usage",)
+            "SELECT payload FROM documents WHERE name = ?", (DOCUMENT,)
         ).fetchone()
-        return (
-            usage.RunnerUsage()
-            if row is None
-            else usage.RunnerUsage.model_validate_json(row[0])
-        )
+        if row is None:
+            connection.execute("DELETE FROM usage_executions")
+            return usage.RunnerUsage()
+        return usage.RunnerUsage.model_validate_json(row[0])
 
     async def record(
         self, execution_id: str, revision: int, total: usage.Totals
@@ -81,7 +81,7 @@ class UsageStore:
                     (execution_id, entry.model_dump_json()),
                 )
                 WorkspaceDatabase.put_document(
-                    connection, "usage", counters.model_dump_json()
+                    connection, DOCUMENT, counters.model_dump_json()
                 )
 
         await self.database.run(write)
@@ -126,7 +126,7 @@ class UsageStore:
                         reset_at=timestamp(), generation=counters.generation + 1
                     )
                 WorkspaceDatabase.put_document(
-                    connection, "usage", counters.model_dump_json()
+                    connection, DOCUMENT, counters.model_dump_json()
                 )
                 return counters
 

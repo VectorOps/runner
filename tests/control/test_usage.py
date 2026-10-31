@@ -103,10 +103,35 @@ async def test_context_api_reports_measured_image_usage_after_restart(
     async with client.embedded(tmp_path) as connection:
         summary = await connection.execution_summary("execution")
         assert summary.usage is not None and summary.usage.root_context is not None
-        assert summary.usage.root_context.input_tokens_estimate == 306054
-        assert summary.usage.root_context.input_tokens_source == "provider_usage"
+        assert summary.usage.root_context.input_tokens == 306054
         assert summary.usage.root_context.context_window == 1050000
         assert (await connection.execution_summaries()).executions[
             0
         ].usage == summary.usage
     assert (await history.get_step("image-call")).metrics == step.metrics
+
+
+async def test_usage_api_has_null_measurements_until_provider_reports(
+    tmp_path: Path,
+) -> None:
+    history = SQLiteHistory(tmp_path / "data/executions/execution/history.sqlite3")
+    await seed(history)
+    await history.append_step(generation("pending", streaming=True, provider=False))
+    await history.save_execution(
+        execution_state.ExecutionRecord(
+            id="execution", root_workflow_id="root", status="paused"
+        )
+    )
+    async with client.embedded(tmp_path) as connection:
+        summary = await connection.execution_summary("execution")
+        assert summary.usage is not None
+        assert summary.usage.totals is None and summary.usage.root_context is None
+        assert (await connection.runner_usage()).totals.cost_estimate_usd is None
+    await history.update_step(generation("pending", incoming=0, outgoing=0, cost="0"))
+    async with client.embedded(tmp_path) as connection:
+        summary = await connection.execution_summary("execution")
+        assert summary.usage is not None and summary.usage.totals is not None
+        assert summary.usage.totals.input_tokens == 0
+        assert summary.usage.totals.cost_estimate_usd == Decimal(0)
+        assert summary.usage.root_context is not None
+        assert summary.usage.root_context.input_tokens == 0

@@ -2,7 +2,6 @@
 
 import sqlite3
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Final, Optional
 
 from vectorops.runner import models, usage
@@ -34,26 +33,20 @@ def contribution(step: models.WorkflowStep) -> usage.Totals:
         return usage.Totals(calls=1, incomplete_calls=1)
     metrics = observability.Metrics.model_validate(value)
     provider = metrics.provider_usage
-    incoming = metrics.input_tokens_estimate
-    outgoing = metrics.output_tokens_estimate
-    if provider is not None:
-        incoming, outgoing = provider.input_tokens, provider.output_tokens
+    if provider is None or provider.completeness != "final":
+        return usage.Totals(calls=1, incomplete_calls=1)
+    cost = metrics.cost_estimate_usd if metrics.cost_basis == "provider_usage" else None
     return usage.Totals(
-        input_tokens=incoming or 0,
-        output_tokens=outgoing or 0,
-        reasoning_tokens=0 if provider is None else provider.reasoning_tokens or 0,
-        cache_read_tokens=0 if provider is None else provider.cache_read_tokens or 0,
-        cache_write_tokens=0 if provider is None else provider.cache_write_tokens or 0,
-        cost_estimate_usd=metrics.cost_estimate_usd or Decimal(0),
+        input_tokens=provider.input_tokens,
+        output_tokens=provider.output_tokens,
+        reasoning_tokens=provider.reasoning_tokens,
+        cache_read_tokens=provider.cache_read_tokens,
+        cache_write_tokens=provider.cache_write_tokens,
+        cost_estimate_usd=cost,
         calls=1,
-        estimated_calls=int(provider is None or metrics.cost_basis == "token_estimate"),
-        incomplete_calls=int(
-            incoming is None
-            or outgoing is None
-            or metrics.cost_estimate_usd is None
-            or metrics.retries > 0
-            or (provider is not None and provider.completeness != "final")
-        ),
+        confirmed_calls=1,
+        priced_calls=int(cost is not None),
+        incomplete_calls=int(cost is None or metrics.retries > 0),
     )
 
 
@@ -62,19 +55,33 @@ class UsageHistory:
     def initialize(connection: sqlite3.Connection) -> None:
         """Backfill existing histories once, in the same transaction as the new state."""
         UsageHistory._initialize_context(connection)
-        if connection.execute(
+        existing = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_state'"
-        ).fetchone():
-            return
+        ).fetchone()
+        revision = 0
+        if existing:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(usage_state)")
+            }
+            if "accounting_version" in columns:
+                return
+            revision = UsageHistory.snapshot_revision(connection) + 1
+            connection.execute("DROP TABLE usage_state")
+            connection.execute("DROP TABLE workflow_parents")
+            connection.execute(
+                "UPDATE summary_state SET revision = revision + 1 WHERE id = 1"
+            )
         connection.execute(
             "CREATE TABLE workflow_parents (child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL)"
         )
         connection.execute(
-            "CREATE TABLE usage_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL, payload TEXT NOT NULL)"
+            "CREATE TABLE usage_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL, payload TEXT NOT NULL, accounting_version INTEGER NOT NULL)"
         )
         sql.execute(
             connection,
-            sql.Query.into(STATE).insert(1, 0, usage.Totals().model_dump_json()),
+            sql.Query.into(STATE).insert(
+                1, revision, usage.Totals().model_dump_json(), 2
+            ),
         )
         sql.execute(
             connection,
@@ -218,6 +225,14 @@ class UsageHistory:
         return result
 
     @staticmethod
+    def snapshot_revision(connection: sqlite3.Connection) -> int:
+        return int(
+            connection.execute(
+                "SELECT revision FROM usage_state WHERE id = 1"
+            ).fetchone()[0]
+        )
+
+    @staticmethod
     def snapshot(connection: sqlite3.Connection) -> tuple[int, usage.Totals]:
         row = connection.execute(
             "SELECT revision, payload FROM usage_state WHERE id = 1"
@@ -258,19 +273,19 @@ class UsageHistory:
         return Change(revision + 1, total, tuple(changed))
 
     @staticmethod
-    def context(step: models.WorkflowStep) -> usage.Context:
+    def context(step: models.WorkflowStep) -> Optional[usage.Context]:
         from vectorops.runner.api.llm import observability
 
         value = (step.metrics or {}).get("llm")
         if value is None:
-            return usage.Context(step_id=step.id)
+            return None
         return observability.Metrics.model_validate(value).context(step.id)
 
     @staticmethod
     def root_context(
         connection: sqlite3.Connection, root_id: str
     ) -> Optional[usage.Context]:
-        """Use the latest generation on the authoritative root path, not row order."""
+        """Keep the last finalized measurement on the selected root path until replaced."""
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'generation_ancestors'"
         ).fetchone():
@@ -301,6 +316,8 @@ class UsageHistory:
             ).fetchone()
             step = models.WorkflowStep.model_validate_json(row[0])
             if step.operation.kind == "llm.generate":
-                return UsageHistory.context(step)
+                context = UsageHistory.context(step)
+                if context is not None:
+                    return context
             current = step.previous_step_id
         return None

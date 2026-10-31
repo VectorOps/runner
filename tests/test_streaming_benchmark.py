@@ -21,7 +21,7 @@ async def test_benchmark_modes(
     assert result.wall_seconds > 0
     assert result.event_count == (6 if mode == "session" else 0)
     assert result.incoming_delta_bytes == 6 * config.chunk_chars
-    assert result.summary_writes == (0 if mode == "observation" else 1)
+    assert result.summary_writes == 0
 
 
 async def test_profile_includes_worker_threads(tmp_path: Path) -> None:
@@ -32,12 +32,12 @@ async def test_profile_includes_worker_threads(tmp_path: Path) -> None:
     baseline = await benchmark.measure(config)
     result = await benchmark.measure(config, output)
     assert result.verified
-    assert result.summary_writes == baseline.summary_writes == 2
+    assert result.summary_writes == baseline.summary_writes == 0
     assert result.event_bytes == baseline.event_bytes
     assert output.stat().st_size > 0
     report = json.loads(output.with_suffix(".json").read_text())
     assert report["clock"] == "cpu"
-    assert len(report["threads"]) >= 3
+    assert len(report["threads"]) >= 2
     assert all(thread["cpu_seconds"] > 0 for thread in report["threads"])
     assert any(
         "SQLiteWriter._invoke" in row["function"] for row in report["top_inclusive"]

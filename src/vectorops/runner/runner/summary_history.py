@@ -139,9 +139,9 @@ class SummaryHistory:
             description=workflow.description,
             status=execution.status,
             pending_inputs=pending,
-            usage=usage.ExecutionUsage(
-                totals=UsageHistory.snapshot(connection)[1],
-                root_context=UsageHistory.root_context(connection, workflow.id),
+            usage=usage.ExecutionUsage.confirmed(
+                UsageHistory.snapshot(connection)[1],
+                UsageHistory.root_context(connection, workflow.id),
             ),
         )
 
@@ -237,13 +237,13 @@ class WorkingSummary:
             ]
         summary.pending_inputs += changes.pending_delta
         if summary.usage is not None:
-            summary.usage = usage.ExecutionUsage(
-                totals=(
+            summary.usage = usage.ExecutionUsage.confirmed(
+                (
                     changes.accounting.totals
                     if changes.accounting is not None
-                    else summary.usage.totals
+                    else summary.usage.totals or usage.Totals()
                 ),
-                root_context=(
+                (
                     changes.context
                     if changes.context_changed
                     else summary.usage.root_context
