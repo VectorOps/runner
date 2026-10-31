@@ -22,6 +22,10 @@ class Cost(pydantic.BaseModel):
         if not isinstance(value, dict):
             return value
         result = dict(value)
+        for name in ("confirmed_calls", "priced_calls", "all_input_tokens"):
+            result.pop(name, None)
+        if result.get("cost_estimate_usd") is None:
+            result.pop("cost_estimate_usd", None)
         for target, sources in (
             ("estimated_calls", ("estimated_token_calls", "estimated_cost_calls")),
             (
@@ -100,12 +104,33 @@ class Context(pydantic.BaseModel):
     remaining_output_headroom_estimate: Optional[int] = None
     context_overflow_estimate: Optional[int] = None
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def reverted_measurement(cls, value: object) -> object:
+        """Read measurements persisted by the reverted contract using original names."""
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        if "input_tokens" in result:
+            result.setdefault("input_tokens_estimate", result.pop("input_tokens"))
+            result.setdefault("input_tokens_source", "provider_usage")
+        if "output_tokens" in result:
+            result.setdefault("output_tokens_estimate", result.pop("output_tokens"))
+        result.pop("catalog_model", None)
+        return result
+
 
 class ExecutionUsage(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
     totals: Totals = pydantic.Field(default_factory=Totals)
     root_context: Optional[Context] = None
+
+    @pydantic.field_validator("totals", mode="before")
+    @classmethod
+    def reverted_unknown_totals(cls, value: object) -> object:
+        """Restore zero defaults for null totals persisted by the reverted contract."""
+        return {} if value is None else value
 
 
 class RunnerUsage(pydantic.BaseModel):

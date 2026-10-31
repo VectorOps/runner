@@ -1,4 +1,5 @@
 import asyncio
+import json
 from decimal import Decimal
 from pathlib import Path
 import shutil
@@ -188,6 +189,50 @@ async def test_replacement_streaming_and_reset_baseline(tmp_path: Path) -> None:
     restarted = UsageStore(WorkspaceDatabase(tmp_path))
     assert (await restarted.read()).totals == totals
     assert (await restarted.read(reset=True)).totals == usage.Totals()
+
+
+async def test_cached_summary_reads_reverted_context_and_totals(tmp_path: Path) -> None:
+    store = SummaryStore(WorkspaceDatabase(tmp_path / "workspace"))
+    history = SQLiteHistory(tmp_path / "history.sqlite3", summary_store=store)
+    await seed(history)
+    await history.append_step(generation("call"))
+
+    def reverted(connection: sqlite3.Connection) -> None:
+        with connection:
+            connection.execute(
+                "UPDATE execution_summaries SET payload = json_set(payload, '$.usage', json(?))",
+                (
+                    json.dumps(
+                        {
+                            "totals": None,
+                            "root_context": {
+                                "step_id": "call",
+                                "input_tokens": 704000,
+                                "output_tokens": 20,
+                                "catalog_model": "model",
+                                "context_window": 1000000,
+                            },
+                        }
+                    ),
+                ),
+            )
+
+    await store.database.run(reverted)
+    before = await store.database.run(
+        lambda connection: connection.execute(
+            "SELECT payload FROM execution_summaries"
+        ).fetchone()[0]
+    )
+    summary = await store.get("execution")
+    assert summary.usage is not None and summary.usage.totals == usage.Totals()
+    assert summary.usage.root_context is not None
+    assert summary.usage.root_context.input_tokens_estimate == 704000
+    after = await store.database.run(
+        lambda connection: connection.execute(
+            "SELECT payload FROM execution_summaries"
+        ).fetchone()[0]
+    )
+    assert after == before
 
 
 async def test_all_branches_cost_but_only_active_root_context(tmp_path: Path) -> None:
@@ -771,3 +816,151 @@ def test_legacy_usage_preserves_sums_and_reset_baselines() -> None:
     assert workflow.subtree.cost_estimate_usd == Decimal("0.01")
     assert totals.estimated_calls == 2 and totals.incomplete_calls == 1
     assert totals.since(usage.Totals.model_validate(legacy)) == usage.Totals()
+
+
+@pytest.mark.parametrize("cost", [None, "0", "1.25"])
+def test_reverted_usage_records_preserve_original_wire_shape(
+    cost: Optional[str],
+) -> None:
+    recorded = {
+        "input_tokens": 12147289,
+        "output_tokens": 50,
+        "cost_estimate_usd": cost,
+        "confirmed_calls": 133,
+        "priced_calls": 133,
+        "all_input_tokens": 12147289,
+    }
+    before = dict(recorded)
+    totals = usage.Totals.model_validate(recorded)
+    assert recorded == before
+    assert totals.input_tokens == 12147289 and totals.output_tokens == 50
+    assert totals.cost_estimate_usd == Decimal(cost or "0")
+    assert (
+        not {"confirmed_calls", "priced_calls", "all_input_tokens"}
+        & totals.model_dump().keys()
+    )
+    workflow = usage.WorkflowUsage.model_validate(
+        {"own": recorded, "subtree": recorded}
+    )
+    assert workflow.own == totals
+    assert workflow.subtree.cost_estimate_usd == totals.cost_estimate_usd
+    with pytest.raises(pydantic.ValidationError, match="unrelated"):
+        usage.Totals.model_validate({**recorded, "unrelated": 1})
+
+
+def test_reverted_context_and_null_totals_use_original_fields() -> None:
+    recorded = {
+        "totals": None,
+        "root_context": {
+            "step_id": "measured",
+            "input_tokens": 704000,
+            "output_tokens": 20,
+            "catalog_model": "model",
+            "context_window": 1000000,
+        },
+    }
+    snapshot = usage.ExecutionUsage.model_validate(recorded)
+    assert snapshot.totals == usage.Totals()
+    assert snapshot.root_context is not None
+    assert snapshot.root_context.input_tokens_estimate == 704000
+    assert snapshot.root_context.output_tokens_estimate == 20
+    assert snapshot.root_context.input_tokens_source == "provider_usage"
+    assert recorded["totals"] is None
+    assert (
+        not {"input_tokens", "output_tokens", "catalog_model"}
+        & snapshot.root_context.model_dump().keys()
+    )
+
+
+async def test_startup_reads_reverted_records_without_changing_history(
+    tmp_path: Path,
+) -> None:
+    runner = WorkflowRunner(tmp_path)
+    project = await runner.project()
+    history = SQLiteHistory(project.data_path / "executions/execution/history.sqlite3")
+    await seed(history)
+    await history.append_step(generation("call"))
+    recorded = {
+        "input_tokens": 12147289,
+        "output_tokens": 50,
+        "calls": 133,
+        "cost_estimate_usd": "1.25",
+        "confirmed_calls": 133,
+        "priced_calls": 133,
+        "all_input_tokens": 12147289,
+    }
+    payload = json.dumps(recorded)
+    with closing(sqlite3.connect(history.path)) as connection, connection:
+        connection.execute("UPDATE usage_state SET payload = ?", (payload,))
+        connection.execute(
+            "UPDATE workflows SET payload = json_set(payload, '$.usage', json(?))",
+            (json.dumps({"own": recorded, "subtree": recorded}),),
+        )
+        before = connection.execute("SELECT payload FROM workflows").fetchall()
+        schema = connection.execute(
+            "SELECT name, sql FROM sqlite_master ORDER BY name"
+        ).fetchall()
+    await runner.initialize_usage()
+    assert (await runner.runner_usage()).totals.input_tokens == 12147289
+    summary = await runner.execution_summary("execution")
+    assert summary.usage is not None
+    assert summary.usage.totals.cost_estimate_usd == Decimal("1.25")
+    workflow = await runner.workflow_state("execution", "root")
+    assert workflow.usage is not None and workflow.usage.own.input_tokens == 12147289
+    with closing(sqlite3.connect(history.path)) as connection:
+        assert (
+            connection.execute("SELECT payload FROM usage_state").fetchone()[0]
+            == payload
+        )
+        assert connection.execute("SELECT payload FROM workflows").fetchall() == before
+        assert (
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master ORDER BY name"
+            ).fetchall()
+            == schema
+        )
+    await runner.aclose()
+
+
+async def test_workspace_reads_reverted_entry_total_and_baseline(
+    tmp_path: Path,
+) -> None:
+    workspace = WorkspaceDatabase(tmp_path)
+    store = UsageStore(workspace)
+    await store.record("execution", 1, contribution(generation("call")))
+
+    def reverted(connection: sqlite3.Connection) -> None:
+        with connection:
+            recorded = {
+                "input_tokens": 100,
+                "confirmed_calls": 1,
+                "priced_calls": 1,
+                "all_input_tokens": 100,
+                "cost_estimate_usd": "0.01",
+                "calls": 1,
+            }
+            entry = {
+                "revision": 1,
+                "total": recorded,
+                "baseline": {
+                    "confirmed_calls": 0,
+                    "priced_calls": 0,
+                    "all_input_tokens": 0,
+                    "cost_estimate_usd": None,
+                },
+            }
+            connection.execute(
+                "UPDATE usage_executions SET payload = ?", (json.dumps(entry),)
+            )
+            WorkspaceDatabase.put_document(
+                connection, "usage", json.dumps({"totals": recorded})
+            )
+
+    await workspace.run(reverted)
+    restarted = UsageStore(workspace)
+    assert (await restarted.read()).totals.input_tokens == 100
+    await restarted.record(
+        "execution", 2, contribution(generation("next", incoming=200))
+    )
+    assert (await restarted.read()).totals.input_tokens == 200
+    assert (await restarted.read(reset=True)).totals == usage.Totals()
