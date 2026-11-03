@@ -24,6 +24,7 @@ class ExecutionSummary(pydantic.BaseModel):
     execution_id: str
     reference: typing.Optional[str] = None
     root_workflow_id: typing.Optional[str] = None
+    worktree_id: typing.Optional[str] = None
     name: typing.Optional[str] = None
     description: typing.Optional[str] = None
     status: typing.Literal[

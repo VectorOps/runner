@@ -25,6 +25,7 @@ async def test_root_child_inheritance_replay_and_reuse(
         == expected
     )
     execution_id = str(runner.last_execution_id)
+    assert (await runner.execution_summary(execution_id)).worktree_id is None
     assert len(execution_probe.contexts) == 4
     assert (
         execution_probe.contexts[1].environment
@@ -47,6 +48,14 @@ async def test_root_child_inheritance_replay_and_reuse(
     root_record = await runner.execution_state(str(runner.last_execution_id))
     assert (
         root_record.target is not None and root_record.target.worktree_id == record.id
+    )
+    summary = await runner.execution_summary(root_record.id)
+    assert summary.worktree_id == str(record.id)
+    assert summary.model_dump(mode="json")["worktree_id"] == str(record.id)
+    reopened = WorkflowRunner(workspace)
+    await reopened.initialize_usage()
+    assert (await reopened.execution_summary(root_record.id)).worktree_id == str(
+        record.id
     )
     assert await project.worktrees.delete(m.Delete(worktree_id=record.id))
 

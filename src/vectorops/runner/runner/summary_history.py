@@ -135,6 +135,12 @@ class SummaryHistory:
             execution_id=execution.id,
             reference=workflow.definition_ref,
             root_workflow_id=workflow.id,
+            worktree_id=(
+                str(execution.target.worktree_id)
+                if execution.target is not None
+                and execution.target.worktree_id is not None
+                else None
+            ),
             name=workflow.name,
             description=workflow.description,
             status=execution.status,
