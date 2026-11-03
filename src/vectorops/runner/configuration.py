@@ -141,6 +141,21 @@ def overlaps(left: str, right: str) -> bool:
     return left == right or left.startswith(right + ".") or right.startswith(left + ".")
 
 
+def merge_defaults(
+    base: dict[str, pydantic.JsonValue], override: dict[str, pydantic.JsonValue]
+) -> dict[str, pydantic.JsonValue]:
+    """Merge startup mappings recursively, replacing scalars and lists."""
+    result = deepcopy(base)
+    for key, value in override.items():
+        previous = result.get(key)
+        result[key] = (
+            merge_defaults(previous, value)
+            if isinstance(previous, dict) and isinstance(value, dict)
+            else deepcopy(value)
+        )
+    return result
+
+
 def effective(
     defaults: dict[str, pydantic.JsonValue], overrides: dict[str, Override]
 ) -> dict[str, pydantic.JsonValue]:

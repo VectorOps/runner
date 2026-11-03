@@ -66,6 +66,31 @@ def test_start_status_resume_and_export(
     assert "execution already exists" in capsys.readouterr().err
 
 
+def test_start_with_explicit_user_defaults(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = workspace / "selected-global"
+    directory.mkdir()
+    (directory / "config.toml").write_text(
+        '[components.llm]\nmodel = "openai/gpt-4.1"\n'
+    )
+    assert (
+        cli.main(
+            [
+                "--project",
+                str(workspace),
+                "--config-dir",
+                str(directory),
+                "start",
+                "configuration:main",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["result"]["model"] == "openai/gpt-4.1"
+    assert not (workspace / "config.toml").exists()
+
+
 @pytest.mark.parametrize(
     "value", ["[]", "null", "1", "bad", '{"x": NaN}', '{"x": Infinity}']
 )

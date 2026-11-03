@@ -62,7 +62,7 @@ uv run vops-runner --project /path/to/existing-workspace --workspace-directory '
 | --- | --- | --- |
 | `--project PATH` | Current directory | Existing project directory |
 | `--workspace-directory PATH` | `VOPS_RUNNER_WORKSPACE_DIRECTORY`, then `.voc` | Relative runner directory; an empty value uses the project directory directly |
-| `--config-dir PATH` | Runner-global configuration location | Select global configuration and credentials; see [daemon setup](daemon.md) |
+| `--config-dir PATH` | `VOPS_RUNNER_CONFIG_DIR`, then `~/.config/vops-runner` | Select user component defaults and credentials; see [user defaults](../config/components.md#user-level-defaults-and-precedence) |
 
 Startup creates missing runner directories, but does not generate `config.toml`
 or move configuration from another location. Workflow and data directory overrides

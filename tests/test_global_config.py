@@ -11,6 +11,59 @@ from vectorops.runner.authentication import models as m
 from vectorops.runner.authentication.store import CredentialStore
 
 
+def test_missing_defaults_do_not_initialize_global_storage(tmp_path: Path) -> None:
+    configuration = g.GlobalConfiguration(tmp_path / "missing")
+    assert configuration.read_defaults().components == {}
+    assert not configuration.path.exists()
+
+
+def test_defaults_directory_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VOPS_RUNNER_CONFIG_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default = tmp_path / ".config/vops-runner"
+    environment = tmp_path / "environment"
+    explicit = tmp_path / "explicit"
+    for path in (default, environment, explicit):
+        path.mkdir(parents=True)
+        (path / "config.toml").write_text(f'[components]\nname = "{path.name}"\n')
+    assert g.GlobalConfiguration().read_defaults().components == {"name": "vops-runner"}
+    monkeypatch.setenv("VOPS_RUNNER_CONFIG_DIR", str(environment))
+    assert g.GlobalConfiguration().read_defaults().components == {"name": "environment"}
+    assert g.GlobalConfiguration(explicit).read_defaults().components == {
+        "name": "explicit"
+    }
+    assert not (explicit / "secrets.json").exists()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "invalid TOML [",
+        'data_directory = "private-invalid-value"',
+        '[environment]\nkind = "local"',
+        '[mcp.servers.example]\ncommand = "private-invalid-value"',
+        'components = "private-invalid-value"',
+        "[components]\nvalue = 2026-01-01",
+        "[components]\nvalue = nan",
+    ],
+)
+def test_invalid_defaults_report_path_without_values(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    with pytest.raises(g.ConfigurationError) as error:
+        g.GlobalConfiguration(tmp_path).read_defaults()
+    assert str(path) in str(error.value)
+    assert "private-invalid-value" not in str(error.value)
+
+
+def test_unreadable_defaults_are_not_treated_as_missing(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").mkdir()
+    with pytest.raises(g.ConfigurationError):
+        g.GlobalConfiguration(tmp_path).read_defaults()
+
+
 async def test_configuration_initialization_is_private_and_stable(
     tmp_path: Path,
 ) -> None:

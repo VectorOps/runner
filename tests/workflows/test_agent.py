@@ -12,7 +12,7 @@ from tests.api.test_llm import FakeProvider, answer
 from tests.control.test_client_commands import pending, settled
 from tests.fixtures import sources
 from tests.fixtures.user_input import reply
-from vectorops.runner import skills
+from vectorops.runner import global_config, skills
 from vectorops.runner.api import tools
 from vectorops.runner.api.llm import provider
 from vectorops.runner.control import client, protocol
@@ -293,8 +293,9 @@ async def test_agent_without_config_reaches_user_input(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("use_profile", [False, True])
+@pytest.mark.parametrize("user_defaults", [False, True])
 async def test_agent_uses_strong_profile_or_shared_model(
-    tmp_path: Path, use_profile: bool
+    tmp_path: Path, use_profile: bool, user_defaults: bool
 ) -> None:
     config = (
         '[components.llm]\nmodel = "shared"\n'
@@ -302,7 +303,9 @@ async def test_agent_uses_strong_profile_or_shared_model(
     )
     if use_profile:
         config += '[components.llm.profiles.strong]\nmodel = "profile"\n'
-    (tmp_path / "config.toml").write_text(config)
+    directory = global_config.directory() if user_defaults else tmp_path
+    directory.mkdir(exist_ok=True)
+    (directory / "config.toml").write_text(config)
     backend = FakeProvider([answer("done")])
     with patch.object(provider, "ConnectProvider", return_value=backend):
         async with client.embedded(tmp_path) as connection:
@@ -321,6 +324,8 @@ async def test_agent_uses_strong_profile_or_shared_model(
             assert backend.settings[0].model == ("profile" if use_profile else "shared")
             await connection.stop(accepted.execution_id)
             await settled(connection, accepted.execution_id)
+    if user_defaults:
+        assert not (tmp_path / "config.toml").exists()
 
 
 async def test_helper_uses_default_project_context(tmp_path: Path) -> None:

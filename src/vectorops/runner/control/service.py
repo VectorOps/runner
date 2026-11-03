@@ -69,7 +69,9 @@ class RunnerService:
     async def __aenter__(self) -> typing.Self:
         await self.configuration.load()
         project = await RunnerProject.open(
-            self.path, workspace_directory=self.workspace_directory
+            self.path,
+            workspace_directory=self.workspace_directory,
+            config_dir=self.configuration.path,
         )
         self.path = project.root
         self._mcp = mcp_management.Management(project.configuration, self.mcp_pool)
@@ -88,6 +90,7 @@ class RunnerService:
         self._runner = WorkflowRunner(
             project.root,
             workspace_directory=self.workspace_directory,
+            config_dir=self.configuration.path,
             event_sink=self._step,
             state_store=self._store,
             mailbox_sink=self._emit,

@@ -14,7 +14,7 @@ import typing
 
 import pydantic
 
-from vectorops.runner import configuration as overrides, diagnostics
+from vectorops.runner import configuration as overrides, diagnostics, global_config
 from vectorops.runner.environment.configuration import (
     EnvironmentConfig,
     LocalEnvironmentConfig,
@@ -124,7 +124,7 @@ def json_value(value: pydantic.JsonValue) -> pydantic.JsonValue:
 
 
 class Configuration:
-    """Startup TOML snapshot with workspace-owned runtime overrides.
+    """Merged user/project TOML snapshot with workspace-owned runtime overrides.
 
     Getters only access memory and have no workflow or history dependencies.
     Runner-level settings remain fixed for the lifetime of the project.
@@ -254,12 +254,18 @@ class Configuration:
             raise ValueError("component configuration is invalid") from None
 
     @staticmethod
-    def read(path: Path, *, root: typing.Optional[Path] = None) -> RunnerConfig:
+    def read(
+        path: Path,
+        *,
+        root: typing.Optional[Path] = None,
+        config_dir: typing.Optional[Path] = None,
+    ) -> RunnerConfig:
+        defaults = global_config.GlobalConfiguration(config_dir).read_defaults()
         try:
             with path.open("rb") as stream:
                 values = tomllib.load(stream)
         except FileNotFoundError:
-            return RunnerConfig()
+            values = {}
         environment = values.get("environment")
         if (
             root is not None
@@ -268,7 +274,14 @@ class Configuration:
             and "base_project_path" not in environment
         ):
             environment["base_project_path"] = str(root.expanduser().absolute())
-        return RunnerConfig.model_validate(values)
+        config = RunnerConfig.model_validate(values)
+        return config.model_copy(
+            update={
+                "components": overrides.merge_defaults(
+                    defaults.components, config.components
+                )
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -346,13 +359,19 @@ class RunnerProject:
         path: typing.Union[str, Path],
         *,
         workspace_directory: typing.Optional[str] = None,
+        config_dir: typing.Optional[Path] = None,
     ) -> typing.Self:
         """Read configuration and prepare workspace directories off the event loop."""
-        return await asyncio.to_thread(cls._open, Path(path), workspace_directory)
+        return await asyncio.to_thread(
+            cls._open, Path(path), workspace_directory, config_dir
+        )
 
     @classmethod
     def _open(
-        cls, path: Path, workspace_directory: typing.Optional[str]
+        cls,
+        path: Path,
+        workspace_directory: typing.Optional[str],
+        config_dir: typing.Optional[Path],
     ) -> typing.Self:
         root = path.expanduser().resolve()
         if not root.is_dir():
@@ -369,7 +388,7 @@ class RunnerProject:
             raise ValueError("workspace directory must remain inside the project root")
         workspace.mkdir(parents=True, exist_ok=True)
         config_path = workspace / "config.toml"
-        config = Configuration.read(config_path, root=root)
+        config = Configuration.read(config_path, root=root, config_dir=config_dir)
         project = cls(root=root, config=config, workspace_directory=selected)
         for directory in (project.workflows_path, project.data_path):
             if not directory.resolve().is_relative_to(workspace.resolve()):

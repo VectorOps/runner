@@ -1,4 +1,4 @@
-"""User-owned runner secrets and private, crash-safe filesystem operations."""
+"""User-owned runner defaults, secrets, and private filesystem operations."""
 
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+import tomllib
 from typing import AsyncIterator, Iterator, Optional
 
 import pydantic
@@ -14,6 +15,14 @@ import pydantic
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+class Defaults(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(
+        extra="forbid", frozen=True, hide_input_in_errors=True, allow_inf_nan=False
+    )
+
+    components: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
 
 
 class Secrets(pydantic.BaseModel):
@@ -97,6 +106,20 @@ async def async_file_lock(path: Path, *, shared: bool = False) -> AsyncIterator[
 class GlobalConfiguration:
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = directory(path)
+
+    def read_defaults(self) -> Defaults:
+        """Read optional component defaults without creating files or loading secrets."""
+        path = self.path / "config.toml"
+        try:
+            with path.open("rb") as stream:
+                return Defaults.model_validate(tomllib.load(stream))
+        except FileNotFoundError:
+            return Defaults()
+        except (OSError, ValueError):
+            raise ConfigurationError(
+                f"cannot load runner user defaults: {path}; "
+                "expected TOML with only a [components] table"
+            ) from None
 
     async def load(self) -> Secrets:
         return await asyncio.to_thread(self._load)

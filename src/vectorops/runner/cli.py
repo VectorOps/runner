@@ -211,6 +211,7 @@ async def dispatch(args: Arguments) -> None:
         args.project,
         authentication=AuthenticationService(configuration),
         workspace_directory=args.workspace_directory,
+        config_dir=configuration.path,
     )
     try:
         if args.command == "start":

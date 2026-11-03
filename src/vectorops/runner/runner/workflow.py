@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import pydantic
 
 from vectorops.runner import models, usage, presentation as presentation_models
-from vectorops.runner import diagnostics
+from vectorops.runner import diagnostics, global_config
 from vectorops.runner import tool_authorization, tool_authorization_store, tool_policy
 from vectorops.runner import tool_rule_api
 from vectorops.runner.references import WorkflowReference
@@ -66,19 +66,23 @@ class WorkflowRunner:
         mcp_pool: typing.Optional[SharedPool] = None,
         project: typing.Optional[RunnerProject] = None,
         workspace_directory: typing.Optional[str] = None,
+        config_dir: typing.Optional[Path] = None,
         change_sink: typing.Optional[events.ExecutionChangeSink] = None,
         publication_sink: typing.Optional[events.ExecutionPublicationSink] = None,
         tool_policy: typing.Optional[tool_policy.ToolPolicy] = None,
     ) -> None:
         self.path = Path(path)
         self.workspace_directory = workspace_directory
+        self.config_dir = global_config.directory(config_dir)
         self.history = history
         self.event_sink = event_sink
         self.change_sink = change_sink
         self.publication_sink = publication_sink
         self._state_store = state_store
         self._diagnostic_log = diagnostic_log
-        self.authentication = authentication or AuthenticationService()
+        self.authentication = authentication or AuthenticationService(
+            global_config.GlobalConfiguration(self.config_dir)
+        )
         self.mcp_pool = mcp_pool
         self.mailbox_sink = mailbox_sink
         self._mailboxes: dict[str, mailbox.Mailbox] = {}
@@ -102,7 +106,9 @@ class WorkflowRunner:
         async with self._project_lock:
             if self._project is None:
                 self._project = await RunnerProject.open(
-                    self.path, workspace_directory=self.workspace_directory
+                    self.path,
+                    workspace_directory=self.workspace_directory,
+                    config_dir=self.config_dir,
                 )
             return self._project
 

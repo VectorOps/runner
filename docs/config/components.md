@@ -1,14 +1,17 @@
 # Component configuration
 
-Set workspace defaults for LLMs and reusable workflow components in `config.toml`.
-The default location is `<project>/.voc/config.toml`; the
+Set user-level defaults for LLMs and reusable workflow components in
+`~/.config/vops-runner/config.toml`. Override them per project in
+`<project>/.voc/config.toml`; the
 [workspace directory](../usage/cli.md#workspace-location) is configurable at startup.
 Workflows read arbitrary nested values with `await get_config(ctx, name, default)`.
 Each workflow read is an activity: replay returns its recorded value, while a new
-read uses the workspace's shared in-memory configuration. The runner parses the
-file once at startup. There is no central component schema or global digest.
+read uses the workspace's shared in-memory configuration. The runner parses both
+optional files once at startup. There is no central component schema or global digest.
 
 ## Quick start
+
+Create `~/.config/vops-runner/config.toml` with:
 
 ```toml
 [components.llm]
@@ -51,6 +54,53 @@ summary = "auto"
 Model/provider support for reasoning options is checked by the provider, not by
 the configuration manager.
 
+## User-level defaults and precedence
+
+User defaults apply to every project opened with the same global configuration
+directory. Select that directory in this order:
+
+1. Explicit `--config-dir PATH` (or Python `config_dir=Path(...)`).
+2. `VOPS_RUNNER_CONFIG_DIR`.
+3. `~/.config/vops-runner`.
+
+The runner reads `config.toml` in that directory, separately from `secrets.json`
+and the authentication store. Only the top-level `components` table is accepted;
+project-specific directory, environment, logging, retention, and worktree settings
+remain in project configuration. For user-level MCP defaults, use
+`[components.mcp]`, not the project-only `[mcp]` shorthand.
+
+Configuration precedence, from lowest to highest, is:
+
+1. Built-in defaults.
+2. User component defaults.
+3. Project component settings.
+4. Workspace runtime overrides.
+
+User and project tables merge recursively. Scalars and lists in project settings
+replace user values, including `false`, `0`, and empty lists. An empty table does
+not clear inherited keys. For example, a project can override only the strong
+model while retaining the user's shared model and other profiles:
+
+```toml
+[components.llm.profiles.strong]
+model = "openai/o3"
+```
+
+The LLM then applies its selected profile and explicit call options as described
+below. A project shared model does not override a model in an inherited selected
+profile; override that profile's model when needed.
+
+Neither file is required or generated automatically. With user LLM defaults and
+[provider credentials](authentication.md) configured, a fresh project needs no
+local `config.toml`. Startup still creates `.voc` runtime directories. It does
+not search parent directories for configuration.
+
+Invalid user TOML or unsupported top-level settings fail startup. Component
+schemas are validated by their consumers. User defaults are read-only at runtime:
+configuration set/reset operations affect only the current workspace and never
+write either TOML file. Restart to pick up file edits; recorded workflow reads
+retain their original values during replay.
+
 ## Read a configuration value
 
 ```python
@@ -81,8 +131,8 @@ Without `model=`, the getter returns the selected value as-is; it does not merge
 mappings or infer types from the default. Pass a Pydantic model to validate and
 normalize the selected value before persistence.
 
-Getters access memory only. There is no environment interpolation or additional
-configuration search path. Selected values and defaults must be finite
+Getters access memory only. There is no environment interpolation or configuration
+search beyond the selected user and project files. Selected values and defaults must be finite
 JSON-compatible values. File parsing and I/O errors fail startup;
 invalid selected values become recorded activity failures.
 
@@ -113,7 +163,7 @@ the activity machinery owns persistence and replay.
 
 TOML is parsed only at runner startup, off the event loop. There is no file watcher,
 polling, or runtime reload API. Getters never stat or read the file. TOML edits
-take effect after restart; a missing file supplies empty component settings.
+take effect after restart; a missing file contributes no component settings.
 Component-specific validation still happens at consumption. Runner-level directory,
 logging, retention, and environment settings also require restart. Use runtime
 overrides below to change component settings without restarting.
@@ -146,7 +196,7 @@ override; unrelated sibling keys remain unaffected.
 Permanent overrides are stored in the `configuration` document in
 `data/workspace.sqlite3`, following the configured `data_directory`.
 Each override includes a fingerprint of the
-canonical TOML value for its key. At startup,
+merged user/project TOML value for its key. At startup,
 a changed value, type, presence, or selected subtree invalidates that override.
 Formatting-only edits and changes to unrelated keys do not. Invalidated overrides
 are removed from disk and do not reappear if TOML later reverts. Invalid TOML edits
@@ -190,7 +240,7 @@ Only `components` and its descendants are editable. Root replacement/reset and
 edits to startup directories, logging, retention, environment, or other root keys
 return `read_only`. Component values can be arbitrary finite JSON, including
 invalid or incomplete settings; validation happens when consumers read them.
-Reset removes runtime overrides and restores startup TOML, not necessarily shared
+Reset removes runtime overrides and restores merged startup TOML, not necessarily shared
 inheritance. If absent there, the consumer supplies its own default.
 
 Model suggestions use qualified `<provider>/<model>` references, including for
