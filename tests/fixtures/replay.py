@@ -40,6 +40,7 @@ async def run(
     mailbox: Optional[Mailbox] = None,
     workspace: Optional[Path] = None,
     tool_policy_version: Optional[Literal[1]] = None,
+    compaction_version: Optional[Literal[1]] = None,
     policy: Optional[tool_policy.ToolPolicy] = None,
     event_sink: Optional[StepEventSink] = None,
     project: Optional[RunnerProject] = None,
@@ -58,6 +59,7 @@ async def run(
         id="test",
         definition_ref="test:workflow",
         tool_policy_version=tool_policy_version,
+        compaction_version=compaction_version,
     )
     await history.save_workflow(workflow)
     session = ExecutionSession(

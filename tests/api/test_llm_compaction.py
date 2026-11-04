@@ -64,7 +64,12 @@ class Backend:
 
 def policy(**values: object) -> llm.Compaction:
     return llm.Compaction.model_validate(
-        {"context_window": 1000, "keep_recent_tokens": 200, **values}
+        {
+            "context_window": 1000,
+            "keep_recent_tokens": 200,
+            "trigger_threshold_ratio": 0.7,
+            **values,
+        }
     )
 
 

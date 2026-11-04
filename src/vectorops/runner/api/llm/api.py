@@ -16,7 +16,7 @@ import pydantic
 from vectorops.runner.api import composition as c
 from vectorops.runner.api import inbox as inbox_api
 from vectorops.runner.api.llm import models, provider, tools as tool_api
-from vectorops.runner.api.llm import invocation
+from vectorops.runner.api.llm import compaction_context, invocation, observability
 from vectorops.runner.api.llm import choice as choice_api
 from vectorops.runner.api.llm import compaction as compaction_api
 from vectorops.runner.api.llm.configuration import (
@@ -73,6 +73,7 @@ class LLM:
         self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
         self._compaction_history = compaction_api.History()
+        self._modern_compaction = context.workflow.compaction_version == 1
         self._usage = connect.Usage()
         self._busy = False
         self._inbox = inbox
@@ -106,7 +107,11 @@ class LLM:
     async def _configure(self) -> models.Configuration:
         resolved = await resolve_configuration(self._overrides, profile=self._profile)
         self._settings = resolved.generation_settings()
-        self._compaction = resolved.compaction
+        self._compaction = (
+            None
+            if resolved.compaction is None
+            else resolved.compaction.for_execution(self._modern_compaction)
+        )
         self._retry = resolved.retry
         return resolved
 
@@ -278,6 +283,11 @@ class LLM:
                     self._settings, self._compaction
                 ),
             )
+            if self._modern_compaction:
+                assert item.metrics is not None
+                result.output_budget = observability.Metrics.model_validate(
+                    item.metrics["llm"]
+                ).output_budget
             return streaming.ActivityFinal(result.model_dump(mode="json"), item.metrics)
 
         generation = models.Generation.model_validate(
@@ -307,6 +317,11 @@ class LLM:
             if exc.error.type != "ContextLengthError" or anchor is None:
                 raise
             if not await self._compact_at(anchor, definitions, force=True):
+                if self._modern_compaction:
+                    raise models.CompactionCapacityError(
+                        "Generation exceeded context capacity, but no measured prefix "
+                        "satisfies recent-message, token, and complete-exchange retention."
+                    ) from exc
                 raise
             response = await self._generate_measured(definitions)
         anchor = self._compaction_history.latest_anchor(len(self._messages) - 1)
@@ -534,11 +549,55 @@ class LLM:
             self._compaction,
             self._signature(definitions),
             force=force,
+            modern=self._modern_compaction,
         )
         if selection is None:
             return False
-        await self._compact_measured(selection, definitions)
+        if self._modern_compaction:
+            await self._compact_context(selection, definitions)
+        else:
+            await self._compact_measured(selection, definitions)
         return True
+
+    @c.activity_wrapper(kind="llm.compact", name="_compact", version=3)
+    async def _compact_context(
+        self,
+        call: c.ActivityCall,
+        selection: compaction_api.Selection,
+        definitions: Sequence[connect.ToolSpec],
+    ) -> None:
+        """Summarize one readable prefix, then atomically replace it on success."""
+        assert self._settings is not None and self._compaction is not None
+        settings = compaction_context.settings(self._settings, self._compaction)
+        prepared: Optional[compaction_context.Summary] = None
+
+        def prepare() -> compaction_context.Summary:
+            nonlocal prepared
+            if prepared is None:
+                assert self._settings is not None and self._compaction is not None
+                prepared = compaction_context.prepare(
+                    self._request(definitions, snapshot=True),
+                    selection.cut,
+                    self._compaction,
+                    self._settings,
+                    self._compaction_history.has_summary,
+                )
+            return prepared
+
+        response = connect.AssistantMessage.model_validate(
+            await self._invoke(
+                call,
+                lambda: prepare().request,
+                settings=settings,
+                finalize=lambda item, ctx: prepare().finalize(item, ctx),
+            )
+        )
+        text = compaction_api.summary_text(response)
+        self._messages = compaction_context.replacement(
+            self._messages, selection.cut, text
+        )
+        self._compaction_history.commit(selection, None)
+        self._account(response)
 
     @c.activity_wrapper(kind="llm.compact", name="_compact", version=2)
     async def _compact_measured(

@@ -80,15 +80,19 @@ class Compaction(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     max_context_characters: Optional[int] = pydantic.Field(default=None, gt=0)
-    keep_recent_messages: int = pydantic.Field(default=4, ge=1)
+    keep_recent_messages: int = pydantic.Field(default=8, ge=1)
     context_window: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
-    trigger_threshold_ratio: float = pydantic.Field(default=0.7, gt=0, le=1)
+    trigger_threshold_ratio: float = pydantic.Field(default=0.8, gt=0, le=1)
     keep_recent_tokens: Optional[int] = pydantic.Field(default=None, gt=0, strict=True)
     keep_recent_ratio: float = pydantic.Field(default=0.25, gt=0, lt=1)
     summary_settings: SettingsOverrides = pydantic.Field(
         default_factory=SettingsOverrides
     )
-    summary_max_output_tokens: int = pydantic.Field(default=4096, gt=0, strict=True)
+    summary_target_ratio: float = pydantic.Field(default=0.1, gt=0, lt=1)
+    summary_max_output_tokens: Optional[int] = pydantic.Field(
+        default=None, gt=0, strict=True
+    )
+    additional_instructions: Optional[str] = pydantic.Field(default=None, min_length=1)
     instruction: str = pydantic.Field(
         default=(
             "Summarize this conversation for continuation. Preserve decisions, "
@@ -100,10 +104,6 @@ class Compaction(pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def validate_policy(self) -> typing.Self:
-        if self.max_context_characters is None and self.keep_recent_messages != 4:
-            raise ValueError(
-                "keep_recent_messages requires legacy character compaction"
-            )
         if (
             self.max_context_characters is None
             and self.keep_recent_tokens is None
@@ -111,6 +111,17 @@ class Compaction(pydantic.BaseModel):
         ):
             raise ValueError("keep_recent_ratio must be below trigger_threshold_ratio")
         return self
+
+    def for_execution(self, modern: bool) -> "Compaction":
+        """Preserve omitted defaults for workflows predating bounded compaction."""
+        if modern:
+            return self
+        updates: dict[str, object] = {}
+        if "trigger_threshold_ratio" not in self.model_fields_set:
+            updates["trigger_threshold_ratio"] = 0.7
+        if "keep_recent_messages" not in self.model_fields_set:
+            updates["keep_recent_messages"] = 4
+        return self.model_copy(update=updates)
 
 
 class RetryPolicy(pydantic.BaseModel):
@@ -142,6 +153,7 @@ class Generation(pydantic.BaseModel):
     response: connect.AssistantMessage
     message_id: str
     context_window: Optional[int] = None
+    output_budget: Optional[int] = None
 
 
 class Unset(Enum):
@@ -154,3 +166,7 @@ class LLMResponseError(RuntimeError):
 
 class RoundLimitError(RuntimeError):
     """The agent exhausted its configured model-round budget."""
+
+
+class CompactionCapacityError(LLMResponseError):
+    """Conversation retention or summarizer capacity prevents safe compaction."""

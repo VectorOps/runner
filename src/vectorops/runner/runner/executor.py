@@ -70,6 +70,7 @@ class WorkflowExecutor:
                 "tool_policy_version": 1,
                 "inbox_version": 1,
                 "child_cancellation_version": 1,
+                "compaction_version": 1,
                 "created_at": configuration.created_at or timestamp(),
             }
         )

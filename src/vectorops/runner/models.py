@@ -40,6 +40,7 @@ class Workflow(_JsonModel):
     tool_policy_version: typing.Optional[typing.Literal[1]] = None
     inbox_version: typing.Optional[typing.Literal[1]] = None
     child_cancellation_version: typing.Optional[typing.Literal[1]] = None
+    compaction_version: typing.Optional[typing.Literal[1]] = None
     created_at: typing.Optional[str] = None
     name: typing.Optional[str] = pydantic.Field(default=None, min_length=1)
     description: typing.Optional[str] = pydantic.Field(

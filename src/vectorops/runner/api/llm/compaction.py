@@ -138,6 +138,7 @@ class Checkpoint(pydantic.BaseModel):
     output_tokens: int
     context_tokens: int
     context_window: Optional[int] = None
+    output_budget: Optional[int] = None
 
 
 class Selection(pydantic.BaseModel):
@@ -200,12 +201,12 @@ class History:
         before: connect.GenerateRequest,
     ) -> Summary:
         values = generation.model_dump(mode="json")
-        values["max_output_tokens"] = policy.summary_max_output_tokens
+        values["max_output_tokens"] = policy.summary_max_output_tokens or 4096
         values = configuration.merge_settings(
             values, policy.summary_settings.model_dump(mode="json", exclude_unset=True)
         )
         if values["max_output_tokens"] is None:
-            values["max_output_tokens"] = policy.summary_max_output_tokens
+            values["max_output_tokens"] = policy.summary_max_output_tokens or 4096
         settings = models.Settings.model_validate(values)
         start = int(self.has_summary)
         previous = messages[0].model_dump(mode="json") if start else None
@@ -254,6 +255,7 @@ class History:
                 output_tokens=usage.output_tokens,
                 context_tokens=tokens,
                 context_window=generation.context_window,
+                output_budget=generation.output_budget,
             )
         )
 
@@ -265,6 +267,7 @@ class History:
         signature: str,
         *,
         force: bool = False,
+        modern: bool = False,
     ) -> Optional[Selection]:
         """Retain at least the target at measured, complete-exchange boundaries.
 
@@ -282,9 +285,16 @@ class History:
         ):
             return None
         window = anchor.context_window
+        threshold = None if window is None else window * policy.trigger_threshold_ratio
+        if (
+            modern
+            and window is not None
+            and threshold is not None
+            and anchor.output_budget is not None
+        ):
+            threshold = min(threshold, window - anchor.output_budget)
         if not force and (
-            window is None
-            or anchor.input_tokens < window * policy.trigger_threshold_ratio
+            window is None or threshold is None or anchor.input_tokens < threshold
         ):
             return None
         budget = policy.keep_recent_tokens
@@ -293,6 +303,15 @@ class History:
                 return None
             budget = max(1, int(window * policy.keep_recent_ratio))
         safe = safe_boundaries(messages[: anchor.index + 1])
+        limit = len(messages)
+        if modern:
+            limit -= policy.keep_recent_messages
+            for index, message in enumerate(messages):
+                if not isinstance(message.content, str) and any(
+                    block.type == "image" for block in message.content
+                ):
+                    limit = min(limit, index)
+                    break
         for point in reversed(self.checkpoints):
             if point.index > anchor.index:
                 continue
@@ -303,7 +322,7 @@ class History:
             retained = (
                 anchor.context_tokens + anchor.output_tokens - point.context_tokens
             )
-            if retained >= budget and point.index in safe:
+            if retained >= budget and point.index in safe and point.index <= limit:
                 return Selection(
                     anchor_id=message_id,
                     cut=point.index,

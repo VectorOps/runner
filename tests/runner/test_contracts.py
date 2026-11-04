@@ -33,6 +33,7 @@ def test_old_records_default_to_version_one() -> None:
         {"id": "w", "definition_ref": "file:workflow"}
     )
     assert (workflow.kind, workflow.version) == ("workflow", 1)
+    assert workflow.compaction_version is None
 
 
 def test_decorator_contracts_are_independent_of_display_names() -> None:
@@ -73,6 +74,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
         2,
     )
     child = next(w for w in history.workflows.values() if w.id != "root")
+    assert history.workflows["root"].compaction_version == child.compaction_version == 1
     assert (child.kind, child.version) == ("customer.acme.support.chat.turn", 4)
     invocation = [e for e in events if e.step.operation.kind == "vocode.llm.invoke"]
     assert len({e.step.id for e in invocation}) == 1

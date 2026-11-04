@@ -389,9 +389,9 @@ round cap of its own: it inherits the LLM configuration unless
 
 ```toml
 [components.llm.compaction]
-trigger_threshold_ratio = 0.7
+trigger_threshold_ratio = 0.8
 keep_recent_ratio = 0.25
-summary_max_output_tokens = 4096
+summary_target_ratio = 0.1
 ```
 
 ### Named LLM profiles
@@ -465,24 +465,46 @@ retain their existing configuration-read and generation contracts.
 Compaction is opt-in. An empty compaction table or `llm.Compaction()` enables the
 token policy. After a successful response with final provider usage, the runner
 compares measured input tokens (including normalized cache categories) with the
-configured fraction of the model context window. It does not predict the size of
-the next request or reserve output headroom for this trigger.
+configured fraction of the model context window. For new workflows, the default
+is 80%. The trigger also respects the generation output reservation: it uses the
+lower of the configured fraction and the context window minus the output budget.
+It does not predict the size of the next user message or tool result; provider
+overflow recovery handles those additions.
 
 | Compaction field | Default | Meaning |
 | --- | --- | --- |
-| `trigger_threshold_ratio` | 0.7 | Trigger fraction, greater than 0 and at most 1 |
+| `trigger_threshold_ratio` | 0.8 | Trigger fraction, greater than 0 and at most 1 |
 | `context_window` | Connect catalog | Optional positive override; unknown limits disable the normal trigger |
+| `keep_recent_messages` | 8 | Minimum recent messages, expanded to preserve complete tool exchanges |
 | `keep_recent_tokens` | None | Positive recent-tail token target; takes precedence over the ratio |
 | `keep_recent_ratio` | 0.25 | Recent-tail target as a fraction of context; below the trigger when no absolute target is set |
-| `summary_max_output_tokens` | 4096 | Positive summary output cap, independent of generation's output cap |
-| `summary_settings` | Inherit generation | Partial generation settings, including qualified model, reasoning, temperature, timeouts, and output cap |
-| `instruction` | Built-in continuation instructions | Summary instructions; structured update instructions are appended |
+| `summary_target_ratio` | 0.1 | Soft summary length target relative to the projected older conversation, greater than 0 and below 1 |
+| `summary_max_output_tokens` | None | Optional positive technical output cap, independent of generation's output cap |
+| `summary_settings` | Inherit generation | Partial generation settings, including qualified model, reasoning, temperature, and timeouts |
+| `additional_instructions` | None | Optional preservation guidance appended to the built-in rules |
+| `instruction` | Built-in continuation instructions | Existing customization field; new workflows always include the core preservation rules |
 
 For a dedicated summarizer, add `[components.llm.compaction.summary_settings]`
 with `model = "openai/gpt-4.1-mini"`. A qualified summary model replaces the
-generation provider selection. Set `keep_recent_tokens = 16000` to
-retain a fixed target rather than a fraction. A null summary output override falls
-back to `summary_max_output_tokens`; it never disables the cap.
+generation provider selection. Register its context and output limits in Connect
+to check capacity before the call.
+When using the generation model, an explicit `context_window` also applies to the
+summarizer. Set `keep_recent_tokens = 16000` to retain a fixed token target rather
+than a fraction. Both the message minimum and token target must be satisfied.
+`summary_max_output_tokens` is authoritative; `summary_settings.max_output_tokens`
+does not override it in new workflows. Compaction remains opt-in:
+
+```python
+conversation = llm.LLM(
+    "worker",
+    system_prompt="Complete the user's request without weakening its constraints.",
+    compaction=llm.Compaction(
+        trigger_threshold_ratio=0.8,
+        keep_recent_messages=8,
+        summary_target_ratio=0.1,
+    ),
+)
+```
 
 The successful response's activity ID anchors compaction. Input usage measures the
 prefix before that response. The response itself, complete recent tool exchanges,
@@ -490,42 +512,75 @@ and everything appended after the anchor remain unchanged. Selection walks backw
 through measured checkpoints and stops at the previous summary. Retention is a
 target, not a hard cap: whole exchanges and measured boundaries can retain more.
 If there is no eligible boundary that satisfies the target, compaction is skipped.
-The latest response is always retained, including pending tool calls.
+The latest response is always retained, including pending tool calls. Text
+compaction does not consume images: selection stops before the first image so its
+exchange remains intact. This can prevent further compaction; an image is never
+silently replaced with a placeholder or serialized as base64 prose.
 
-One summary call updates the previous summary with the newly excluded prefix.
-The continuation is the new summary followed by the unchanged tail and newer
-messages. Original provider usage is never rewritten. Separate derived context
-coordinates subtract the selected prefix and add summary output usage, not the
-configured retention target. These coordinates are approximate replay costs, not
-new provider measurements. Unknown summary usage or a different summary model
-discards those coordinates until fresh measured checkpoints become available.
-Missing/partial generation usage and changed model/system/tool/reasoning signatures
-are not bridged with character estimates.
+The summarizer receives readable message roles, text, tool calls, and results,
+plus the original system instructions and tool definitions as reference context.
+It has no executable tools. Opaque reasoning signatures, encrypted payloads,
+provider metadata, usage counters, and transport identifiers are excluded from
+summary input, not removed from original messages. Tool arguments and results
+retain their business fields, even fields named `signature` or `usage`.
+
+Built-in instructions prioritize user requests, constraints, corrections, and
+unresolved questions. They preserve attribution and distinguish proposed work,
+reported outcomes, and verified evidence. User inputs can be condensed, but exact
+requirements and identifiers should survive. Summary fidelity is best-effort, not
+a guarantee that every historical detail survives.
+
+One rolling summary replaces the selected prefix as the first user message, with
+a fixed envelope identifying generated historical context rather than a new user
+request. The system prompt, current tools, and retained messages remain unchanged.
+Recent readable messages are supplied as optional continuity context; this excerpt
+is omitted when it does not fit or contains images. The actual retained suffix is
+never truncated. Previous summaries are separate from newly evicted messages.
+
+New compactions discard derived token coordinates after replacement and rebuild
+them from subsequent provider measurements. Original usage is never rewritten.
+Missing/partial usage and changed model/system/tool/reasoning signatures are not
+bridged with character estimates.
 
 On a provider context-length error, the runner forces the same operation at the
 last measured successful response and retries generation once. New input and tool
 results survive unchanged; tools are never reexecuted. No eligible prefix, an
-already-compacted anchor, summary failure, or another overflow surfaces an error.
+already-compacted anchor, summary failure, or another generation overflow surfaces an error.
 Recovery does not consume another tool-loop round. Transient retries remain bounded
 within each generation or summary activity; there is no measurement roundtrip.
 
-Summary validation precedes history replacement. Empty, tool-calling, truncated,
-or failed summaries leave the active history intact. Comparable final summary
-output usage that is at least the selected prefix size is also rejected. This is
-not a guarantee that the rebuilt request fits: tokenizers, framing, and reasoning
-can differ, particularly with a dedicated summary model. No automatic second summary
-call or silent shrinking of the protected tail is performed.
+Each compaction sends one projected payload in one recorded summarization call.
+`summary_target_ratio` supplies prompt guidance, not an API output limit. The
+technical output limit uses the model's catalog ceiling and estimated remaining
+context, optionally constrained by `summary_max_output_tokens`; it does not inherit
+the generation's output cap or impose a fixed 4,096-token default. Unknown limits
+are left to the provider. An input that exceeds the known summarizer window raises
+`CompactionCapacityError`; a provider overflow surfaces without chunking or another
+summary call. Neither failure replaces history.
 
-Token-mode `llm.generate` and `llm.compact` use activity version 2. Generation
-results contain the response, stable message ID, and resolved context limit so
-replay decisions do not depend on a later catalog. Request inputs remain digests,
-not transcripts. Completed summaries reconstruct state outside the activity callback;
-interrupted summaries restart under their existing activity identity.
+Summary validation precedes history replacement. Empty, tool-calling, truncated,
+over-cap, or failed summaries leave the active history intact. The final framed
+summary must reduce the selected conversational prefix under consistent
+before/after estimates; token counts from different models are not compared.
+These checks are not proof that the rebuilt request fits the provider tokenizer.
+The protected tail is never silently shrunk.
+
+New workflows persist `compaction_version=1`. Generation results record the
+output budget. Summaries use `llm.compact` activity version 3 with name `_compact`.
+Completed summaries are reused without consulting the current catalog;
+interrupted summaries restart under their existing identity. History is replaced
+only after the summary succeeds. Request inputs remain digests, not transcripts.
+
+Workflows created before this marker keep the previous measured flow, defaults
+(70% trigger and no measured message-count floor), summary framing, and version-2
+operation sequence. They do not automatically gain these changes on resume.
+Explicit thresholds such as 80% remain explicit. Start a new workflow to use the
+new flow; no history migration or automatic restart is performed.
 
 Existing policies with `max_context_characters` retain version-1 pre-request
 character triggering and `keep_recent_messages` behavior for replay compatibility.
 They continue to use generation settings and do not gain overflow recovery.
-Remove those legacy fields to opt into measured compaction for new executions;
+Remove `max_context_characters` to opt into measured compaction for new executions;
 do not change explicit policy or activity order while replaying existing history.
 
 ## Stalled LLM calls
@@ -639,7 +694,7 @@ custom activity authors must not put secrets in them.
 | `cost_estimate_usd` | Decimal string using Connect catalog prices and accounting, or null when the model/pricing or a used token category's rate is unknown |
 | `cost_basis` | `provider_usage` or `token_estimate`; null when no cost estimate is available |
 | `attempt`, `retries` | One-based current attempt and preceding retries in this invocation |
-| `compaction` | Successful summary's before/after input token estimates and signed `saved_tokens_estimate`; null on ordinary generation or unusable summaries |
+| `compaction` | Final summary's before/after input token estimates and signed `saved_tokens_estimate`; null on ordinary generations |
 
 Cost is always an estimate, even when calculated from final provider-reported
 usage. It is not a provider invoice or a total billed execution cost. Partial
@@ -651,14 +706,17 @@ charges for earlier failed attempts are not accounted for. The requested catalog
 model supplies pricing; custom providers must use a matching catalog identity for
 meaningful estimates.
 
-Estimates do not enforce context limits, change output settings, or trigger
-compaction. Provider framing, tokenization, and hidden reasoning can differ from
+Generation estimates do not enforce context limits, change output settings, or trigger
+compaction. The summarizer uses estimates to check its projected input and leave
+output headroom. Provider framing, tokenization, and hidden reasoning can differ from
 the heuristic. Images make input/output estimates for that content unknown rather
 than treating base64 length as token usage. Headroom based only on an output cap is
 an upper bound when context capacity is unknown. Null means unavailable, not zero.
 Compaction savings compare the full continuation request before and after summary
-replacement, including unchanged system/tools/recent messages. Negative savings
-expose summaries that increased context; no automatic corrective compaction is added.
+replacement, including unchanged system/tools/recent messages. Legacy summaries
+can report negative savings. New compactions reject a final summary that does not
+reduce the selected conversational prefix. Ordinary generations have null
+`compaction` metrics.
 
 Each retry clears attempt-local usage, cost, and output estimates while retaining
 the activity identity. The latest metrics remain attached on failure or
