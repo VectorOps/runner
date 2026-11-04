@@ -220,7 +220,7 @@ class GitBackend:
 
     async def delete(self, record: m.Record, *, force: bool) -> None:
         if not await self._registered(record):
-            if await asyncio.to_thread(Path(record.path).exists):
+            if await asyncio.to_thread(os.path.lexists, record.path):
                 raise m.WorktreeError("refusing to delete an unregistered directory")
             return
         inspection = await self.inspect(record)
@@ -228,7 +228,13 @@ class GitBackend:
             raise m.WorktreeError(
                 "worktree has modified or untracked files; force is required"
             )
-        flags = ("--force",) if force else ()
+        flags = ("--force", "--force") if force else ()
         await self._run(
             record.repository.root, "worktree", "remove", *flags, "--", record.path
         )
+        if await self._registered(record) or await asyncio.to_thread(
+            os.path.lexists, record.path
+        ):
+            raise m.WorktreeError(
+                "Git worktree removal incomplete; checkout path or Git registration still exists"
+            )
