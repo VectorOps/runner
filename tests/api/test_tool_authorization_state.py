@@ -79,7 +79,10 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
         )
         return (
             await tool_execution.invoke_tool(
-                binding, connect.ToolCallBlock(id="call", name="test", arguments={})
+                binding,
+                connect.ToolCallBlock(
+                    id="call", name="test", arguments={"mode": "success"}
+                ),
             )
         ).model_dump(mode="json")
 
@@ -102,9 +105,13 @@ async def test_authorized_pending_call_resumes_without_reauthorization(
     assert isinstance(step.operation, models.StepOperation)
     assert step.operation.name == "invoke_tool"
     assert step.operation.input["tool_name"] == "test"
+    assert step.operation.input["call"] == connect.ToolCallBlock(
+        id="call", name="test", arguments={"mode": "success"}
+    ).model_dump(mode="json")
     if legacy_input:
         recorded_input = dict(step.operation.input)
         del recorded_input["tool_name"]
+        del recorded_input["call"]
         history.steps[step.id] = step.model_copy(
             update={
                 "operation": step.operation.model_copy(update={"input": recorded_input})

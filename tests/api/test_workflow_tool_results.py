@@ -285,6 +285,11 @@ async def test_tool_result_protocol_parity(
     lifecycle = [event for event in events if event.step.id == step.id]
     assert lifecycle[0].kind == "step.created"
     assert lifecycle[0].step.outcome.kind == "pending"
+    operation = lifecycle[0].step.operation
+    assert isinstance(operation, models.StepOperation)
+    assert operation.input["call"] == connect.ToolCallBlock(
+        id="call", name="test", arguments={"mode": mode}
+    ).model_dump(mode="json")
     assert lifecycle[-1].kind == (
         "step.failed" if strict and mode == "exception" else "step.completed"
     )
