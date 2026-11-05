@@ -23,6 +23,7 @@ class Metrics(pydantic.BaseModel):
 
     version: Literal[1] = 1
     token_estimation: Literal["json_characters_div_4"] = "json_characters_div_4"
+    requested_model: Optional[str] = None
     catalog_model: Optional[str] = None
     catalog_provider: Optional[str] = None
     input_tokens_estimate: Optional[int] = None
@@ -151,7 +152,10 @@ class Observation:
             )
         except connect.RegistryError:
             self.model = None
-        self.base = Metrics(input_tokens_estimate=input_tokens(request))
+        self.base = Metrics(
+            requested_model=settings.model,
+            input_tokens_estimate=input_tokens(request),
+        )
         limits = [request.max_output_tokens]
         if self.model is not None:
             self.base.catalog_model = self.model.model

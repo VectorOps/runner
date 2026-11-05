@@ -47,6 +47,24 @@ def metrics(step: models.WorkflowStep) -> obs.Metrics:
     return obs.Metrics.model_validate(step.metrics["llm"])
 
 
+@pytest.mark.parametrize("reference", ["small", "test/small", "test/small:fast"])
+def test_requested_model_preserves_full_reference(
+    catalog: connect.ModelSpec, reference: str
+) -> None:
+    observation = obs.Observation(llm.Settings(model=reference), request())
+    result = obs.Metrics.model_validate(observation.snapshot({"content": []}, 1)["llm"])
+    assert result.requested_model == reference
+    assert result.catalog_model == catalog.model
+    assert result.catalog_provider == catalog.provider
+
+
+def test_legacy_metrics_without_requested_model() -> None:
+    result = obs.Metrics.model_validate(
+        {"catalog_model": "small", "catalog_provider": "test"}
+    )
+    assert result.requested_model is None
+
+
 def test_budget_cost_and_usage_are_separate(catalog: connect.ModelSpec) -> None:
     generation = request().model_copy(update={"max_output_tokens": 100})
     observation = obs.Observation(llm.Settings(model="test/small"), generation)
@@ -142,6 +160,7 @@ def test_unknown_models_missing_rates_and_usage(
     assert estimate.output_budget == 200
     unknown = obs.Observation(llm.Settings(model="missing"), request())
     result = obs.Metrics.model_validate(unknown.snapshot(value, 1)["llm"])
+    assert result.requested_model == "missing"
     assert result.context_window is None and result.cost_estimate_usd is None
     assert result.remaining_output_headroom_estimate is None
     known.model = catalog.model_copy(
@@ -241,7 +260,7 @@ async def test_retry_events_persistence_and_replay(
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM(
             "chat",
-            model="test/small",
+            model="test/small:fast",
             backend=backend,
             retry=llm.RetryPolicy(max_retries=2, initial_delay=0),
         )
@@ -262,6 +281,7 @@ async def test_retry_events_persistence_and_replay(
         if event.step.id == step.id and event.step.metrics is not None
     ]
     assert streamed[-1].metrics == step.metrics
+    assert all(metrics(item).requested_model == "test/small:fast" for item in streamed)
     assert {metrics(item).attempt for item in streamed} == set(
         range(1, metrics(step).attempt + 1)
     )
