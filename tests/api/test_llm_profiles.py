@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Optional
 
 import connect
 import pydantic
@@ -104,6 +105,70 @@ async def test_profile_runtime_policies(history: MemoryHistory, tmp_path: Path) 
 
     result = await replay.run(history, workflow, workspace=tmp_path)
     assert result.outcome.kind == "completed", result.outcome
+
+
+@pytest.mark.parametrize(
+    "configured,supplied,ratio,recent",
+    [
+        ({}, {}, 0.8, None),
+        ({"compaction": None}, {}, None, None),
+        ({"compaction": {"trigger_threshold_ratio": 0.6}}, {}, 0.6, None),
+        (
+            {
+                "compaction": {"keep_recent_tokens": 1234},
+                "profiles": {
+                    "strong": {"compaction": {"trigger_threshold_ratio": 0.9}}
+                },
+            },
+            {},
+            0.9,
+            1234,
+        ),
+        (
+            {
+                "compaction": {"trigger_threshold_ratio": 0.6},
+                "profiles": {"strong": {"compaction": None}},
+            },
+            {},
+            None,
+            None,
+        ),
+        (
+            {"compaction": None, "profiles": {"strong": {"compaction": {}}}},
+            {},
+            0.8,
+            None,
+        ),
+        ({}, {"compaction": None}, None, None),
+        (
+            {"compaction": {"trigger_threshold_ratio": 0.6}},
+            {"compaction": {"trigger_threshold_ratio": 0.95}},
+            0.95,
+            None,
+        ),
+    ],
+)
+def test_compaction_fallback_preserves_configuration_precedence(
+    configured: dict[str, pydantic.JsonValue],
+    supplied: dict[str, pydantic.JsonValue],
+    ratio: Optional[float],
+    recent: Optional[int],
+) -> None:
+    selected = configuration.interpret_configuration(
+        {"model": "test", **configured},
+        supplied,
+        profile="strong",
+        default_compaction=llm.Compaction(),
+    )
+    if ratio is None:
+        assert selected.compaction is None
+    else:
+        assert selected.compaction is not None
+        assert selected.compaction.trigger_threshold_ratio == ratio
+        assert selected.compaction.keep_recent_tokens == recent
+    assert (
+        configuration.interpret_configuration({"model": "test"}, {}).compaction is None
+    )
 
 
 @pytest.mark.parametrize(

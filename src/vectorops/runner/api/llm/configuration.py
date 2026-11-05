@@ -67,12 +67,17 @@ async def resolve_configuration(
     supplied: dict[str, pydantic.JsonValue],
     *,
     profile: typing.Optional[str] = None,
+    default_compaction: typing.Optional[models.Compaction] = None,
 ) -> models.Configuration:
     """Read one recorded snapshot before interpreting LLM-specific policy."""
     context = composition.workflow_context()
     values = await get_config(context, "llm", {})
     return interpret_configuration(
-        values, supplied, profile=profile, source_path=context.project.config_path
+        values,
+        supplied,
+        profile=profile,
+        source_path=context.project.config_path,
+        default_compaction=default_compaction,
     )
 
 
@@ -82,6 +87,7 @@ def interpret_configuration(
     *,
     profile: typing.Optional[str] = None,
     source_path: typing.Optional[Path] = None,
+    default_compaction: typing.Optional[models.Compaction] = None,
 ) -> models.Configuration:
     """Interpret a configuration snapshot independently of activity recording."""
     context = errors.ErrorContext(
@@ -121,6 +127,11 @@ def interpret_configuration(
     try:
         if profile is not None:
             defaults = merge_settings(defaults, profiles.get(profile, {}))
+        if default_compaction is not None:
+            defaults.setdefault(
+                "compaction",
+                default_compaction.model_dump(mode="json", exclude_unset=True),
+            )
         return models.Configuration.model_validate(merge_settings(defaults, supplied))
     except pydantic.ValidationError as exc:
         if any(

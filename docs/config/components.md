@@ -336,6 +336,10 @@ async def main(ctx):
 `Settings` still requires a model. Use `SettingsOverrides` for a partial override
 that inherits the workspace model. `reasoning=None` disables workspace reasoning;
 `compaction=None` disables workspace compaction. Omitted compaction inherits it.
+`default_compaction=llm.Compaction()` supplies a fallback only when neither the
+workspace nor the selected profile specifies a compaction policy. Configured
+policies and explicit null values take precedence over this fallback; explicit
+constructor overrides still take precedence over configuration.
 `LLM.settings` returns a detached snapshot of the last resolved generation options.
 Before the first generation it raises `RuntimeError`; construction is synchronous
 and cannot perform a recorded read.
@@ -462,8 +466,13 @@ retain their existing configuration-read and generation contracts.
 
 ### Measured compaction
 
-Compaction is opt-in. An empty compaction table or `llm.Compaction()` enables the
-token policy. After a successful response with final provider usage, the runner
+Compaction is enabled by default for new built-in coding-agent executions
+(`builtin.agent` version 5), using the standard 80% threshold. Workspace and
+`strong` profile policies override this fallback, including explicit null to
+disable it. Existing agent versions 1–4 retain their opt-in behavior on resume;
+start a new execution to receive the default. Helpers and generic `llm.LLM`
+callers remain opt-in. An empty compaction table or `llm.Compaction()` enables the
+token policy explicitly. After a successful response with final provider usage, the runner
 compares measured input tokens (including normalized cache categories) with the
 configured fraction of the model context window. For new workflows, the default
 is 80%. The trigger also respects the generation output reservation: it uses the

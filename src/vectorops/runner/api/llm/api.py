@@ -50,6 +50,7 @@ class LLM:
         compaction: typing.Union[
             models.Compaction, None, models.Unset
         ] = models.Unset.VALUE,
+        default_compaction: Optional[models.Compaction] = None,
         retry: Optional[models.RetryPolicy] = None,
         raise_tool_errors: bool = False,
         inbox: Optional[inbox_api.Inbox] = None,
@@ -62,6 +63,11 @@ class LLM:
         self._identity = identity
         self._session_id = uuid4().hex
         self._profile = profile
+        self._default_compaction = (
+            None
+            if default_compaction is None
+            else default_compaction.model_copy(deep=True)
+        )
         self._overrides = explicit_options(settings, compaction=compaction, **overrides)
         if retry is not None:
             self._overrides["retry"] = retry.model_dump(mode="json", exclude_unset=True)
@@ -105,7 +111,11 @@ class LLM:
         return self._settings.model_copy(deep=True)
 
     async def _configure(self) -> models.Configuration:
-        resolved = await resolve_configuration(self._overrides, profile=self._profile)
+        resolved = await resolve_configuration(
+            self._overrides,
+            profile=self._profile,
+            default_compaction=self._default_compaction,
+        )
         self._settings = resolved.generation_settings()
         self._compaction = (
             None

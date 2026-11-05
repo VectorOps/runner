@@ -14,7 +14,7 @@ from vectorops.runner.workflows.tools import default_collections
     name="Coding agent",
     description="Plan, investigate, edit, and test with explicit helper delegation.",
     kind="builtin.agent",
-    version=4,
+    version=5,
 )
 async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     """Retain one conversation and plan, refreshing model settings each turn."""
@@ -38,6 +38,7 @@ async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     conversation = llm.LLM(
         "agent",
         profile="strong",
+        default_compaction=llm.Compaction() if ctx.version >= 5 else None,
         system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
         inbox=inbox.Inbox("steer", workflow_id=ctx.workflow.id),
     )

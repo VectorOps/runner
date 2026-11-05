@@ -380,7 +380,7 @@ def test_helper_overrides_and_tool_boundaries() -> None:
     assert tools.apply_patch_tool().definition.name == "apply_patch"
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
 async def test_agent_web_fetch_defaults_and_versioned_resume(
     tmp_path: Path, version: int
 ) -> None:
@@ -421,3 +421,100 @@ def test_web_fetch_is_agent_only_by_default() -> None:
     collections = workflow_tools.default_collections([])
     assert "web_fetch" in collections["agent"].tools
     assert "web_fetch" not in collections["helper"].tools
+
+
+@pytest.mark.parametrize(
+    "version,policy,compacts",
+    [
+        (4, "omitted", False),
+        (5, "omitted", True),
+        (5, "custom", False),
+        (5, "disabled", False),
+    ],
+)
+async def test_agent_default_compaction_threshold_and_versioned_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
+    policy: str,
+    compacts: bool,
+) -> None:
+    configure(tmp_path, tmp_path)
+    monkeypatch.setattr(
+        connect,
+        "default_model_registry",
+        connect.ModelRegistry(
+            [
+                connect.ModelSpec(
+                    provider="test",
+                    model="strong",
+                    api_family="test",
+                    context_window=1000000,
+                    max_output_tokens=128000,
+                )
+            ]
+        ),
+    )
+    responses = []
+    for tokens in (100000, 200000, 300000, 500000, 790000, 800000):
+        response = answer("Progress")
+        response.usage = connect.Usage(
+            input_tokens=tokens, output_tokens=10, completeness="final"
+        )
+        responses.append(response)
+    if compacts:
+        responses.append(
+            answer("The user requires verified behavior. Implementation is unfinished.")
+        )
+    responses.append(answer("Continued"))
+    backend = FakeProvider(responses)
+    workflows = {
+        **registry.WORKFLOWS,
+        "agent": replace(registry.agent, version=version),
+    }
+    with patch.object(provider, "ConnectProvider", return_value=backend):
+        with patch.object(registry, "WORKFLOWS", workflows):
+            async with client.embedded(tmp_path) as connection:
+                if policy != "omitted":
+                    await connection.set_configuration(
+                        "components.llm.profiles.strong.compaction",
+                        (
+                            None
+                            if policy == "disabled"
+                            else {"trigger_threshold_ratio": 0.9}
+                        ),
+                    )
+                accepted = await connection.start(
+                    protocol.Start(reference="builtin:agent", idempotency_key="start")
+                )
+                waiting = await pending(connection, accepted.execution_id)
+                for index in range(6):
+                    await reply(
+                        connection,
+                        waiting,
+                        "Preserve the user requirements and verify behavior. " * 200,
+                    )
+                    waiting = await pending(connection, accepted.execution_id)
+                    assert len(backend.requests) == index + 1 + int(
+                        compacts and index == 5
+                    )
+                if compacts:
+                    summary = backend.requests[-1]
+                    assert summary.tools == []
+                    assert str(summary.system_prompt).startswith(
+                        "Summarize this conversation"
+                    )
+                    assert "Preserve the user requirements" in str(summary.messages)
+        async with client.embedded(tmp_path) as connection:
+            restored = await pending(connection, accepted.execution_id)
+            assert restored.request_id == waiting.request_id
+            assert len(backend.requests) == 6 + int(compacts)
+            await reply(connection, restored, "Continue")
+            await pending(connection, accepted.execution_id)
+            assert len(backend.requests) == 7 + int(compacts)
+            if compacts:
+                assert "generated continuation summary" in str(
+                    backend.requests[-1].messages[0].content
+                )
+            await connection.stop(accepted.execution_id)
+            await settled(connection, accepted.execution_id)
