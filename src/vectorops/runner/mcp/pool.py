@@ -79,7 +79,7 @@ class SharedPool:
         connection = self.runtime._connections.get(key)
         return SessionStatus(
             session_id=key,
-            connected=connection is not None and not connection.task.done(),
+            connected=connection is not None and connection.usable,
             leases=len(self._leases.get(key, set())),
             roots=server.roots,
             catalog_stale=connection.catalog_stale if connection else False,
@@ -116,11 +116,7 @@ class SharedPool:
             if next_key != key and next_key in self.runtime._connections:
                 raise MCPError("an MCP session with the requested roots already exists")
             connection = self.runtime._connections.get(key)
-            if (
-                connection is not None
-                and not connection.task.done()
-                and next_key != key
-            ):
+            if connection is not None and connection.usable and next_key != key:
                 connection.server = updated.model_copy(deep=True)
                 try:
                     async with asyncio.timeout(updated.limits.request_seconds):

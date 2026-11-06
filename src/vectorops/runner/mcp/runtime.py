@@ -3,16 +3,20 @@
 import asyncio
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from time import monotonic
 from typing import Literal, Optional, TYPE_CHECKING
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
+import anyio
 import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.context import RequestContext
+from mcp.shared.exceptions import McpError
 from mcp.shared.session import RequestResponder
 import pydantic
 
+from vectorops.runner import diagnostics
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.authentication.mcp_http import MCPHTTPAuth
 from vectorops.runner.authentication import mcp_settings, models as auth_models
@@ -43,11 +47,47 @@ class Connection:
             asyncio.get_running_loop().create_future()
         )
         self.stop = asyncio.Event()
+        self._invalid = False
         self.protocol_version = ""
         self.supports_tools = False
         self.supports_prompts = False
         self.supports_resources = False
         self.task = asyncio.create_task(self._own())
+
+    @property
+    def usable(self) -> bool:
+        return not self._invalid and not self.stop.is_set() and not self.task.done()
+
+    def failure(self, error: Exception) -> str:
+        """Classify only known session failures and retire them in the owner task."""
+        classification = "unknown"
+        if isinstance(error, McpError):
+            if (
+                error.error.code == 32600
+                and error.error.message == "Session terminated"
+            ):
+                classification = "session_terminated"
+            elif (
+                error.error.code == types.CONNECTION_CLOSED
+                and error.error.message == "Connection closed"
+            ):
+                classification = "connection_closed"
+        elif isinstance(
+            error,
+            (anyio.EndOfStream, anyio.BrokenResourceError, anyio.ClosedResourceError),
+        ):
+            classification = "connection_closed"
+        elif isinstance(error, ExceptionGroup):
+            for nested in error.exceptions:
+                classification = self.failure(nested)
+                if classification != "unknown":
+                    break
+        if classification != "unknown":
+            self._invalid = True
+            self.stop.set()
+        elif not self.usable:
+            classification = "connection_closed"
+        return classification
 
     async def _roots(
         self, context: RequestContext[ClientSession, None]
@@ -157,9 +197,25 @@ class Connection:
                 self.ready.set_exception(
                     transport.MCPError("MCP session initialization failed")
                 )
+        finally:
+            self.stop.set()
+
+    async def discovery[T](self, operation: Awaitable[T]) -> T:
+        """Wake pending discovery when another borrower retires this session."""
+        request = asyncio.ensure_future(operation)
+        stopped = asyncio.create_task(self.stop.wait())
+        try:
+            await asyncio.wait((request, stopped), return_when=asyncio.FIRST_COMPLETED)
+            if request.done():
+                return request.result()
+            raise transport.MCPError("MCP session disconnected during discovery")
+        finally:
+            request.cancel()
+            stopped.cancel()
+            await asyncio.gather(request, stopped, return_exceptions=True)
 
     async def session(self) -> ClientSession:
-        if self.task.done():
+        if not self.usable:
             if self.ready.done() and not self.ready.cancelled():
                 error = self.ready.exception()
                 if isinstance(error, auth_models.AuthenticationError):
@@ -231,9 +287,9 @@ class MCPRuntime:
             if self._closed:
                 raise transport.MCPError("MCP runtime is closed")
             connection = self._connections.get(key)
-            if connection is not None and connection.task.done():
+            if connection is not None and not connection.usable:
                 self._connections.pop(key)
-                await connection.close()
+                await finish_cleanup(asyncio.create_task(connection.close()))
                 connection = None
             if connection is None:
                 connection = Connection(server, self.authentication, authorization)
@@ -262,68 +318,109 @@ class MCPRuntime:
         return await self.discover_content(name, effective)
 
     async def discover(self, name: str, server: models.ServerConfig) -> models.Catalog:
-        try:
-            connection = await self._connection(server)
-            revision = connection.catalog_revision
-            session = await connection.session()
-            tools: list[models.Descriptor] = []
-            seen: set[str] = set()
-            cursors: set[str] = set()
-            cursor: Optional[str] = None
-            size = 0
-            if connection.supports_tools:
-                async with asyncio.timeout(server.limits.request_seconds):
-                    for _ in range(server.limits.max_pages):
-                        page = await session.list_tools(cursor=cursor)
-                        size += len(page.model_dump_json().encode())
-                        if size > server.limits.max_bytes:
+        return await self._discovery(
+            server,
+            lambda connection: self._catalog(name, server, connection),
+            event="mcp.discovery_failed",
+            failure="MCP discovery failed",
+        )
+
+    async def _discovery[T](
+        self,
+        server: models.ServerConfig,
+        operation: Callable[[Connection], Awaitable[T]],
+        *,
+        event: str,
+        failure: str,
+    ) -> T:
+        """Retry read-only catalog discovery once after a known session failure."""
+        for attempt in range(2):
+            connection: Optional[Connection] = None
+            started = monotonic()
+            try:
+                connection = await self._connection(server)
+                return await connection.discovery(operation(connection))
+            except auth_models.AuthenticationError:
+                raise
+            except Exception as exc:
+                classification = connection.failure(exc) if connection else "unknown"
+                retry = attempt == 0 and classification != "unknown"
+                diagnostics.log(
+                    event,
+                    level=diagnostics.Level.ERROR,
+                    fields={
+                        "transport": server.kind,
+                        "request_seconds": server.limits.request_seconds,
+                        "elapsed_seconds": monotonic() - started,
+                        "session_error": classification,
+                        "retrying": retry,
+                    },
+                    error=exc,
+                )
+                if retry:
+                    continue
+                if isinstance(exc, transport.MCPError):
+                    raise
+                raise transport.MCPError(failure) from None
+        raise AssertionError("MCP discovery retry exhausted")
+
+    async def _catalog(
+        self, name: str, server: models.ServerConfig, connection: Connection
+    ) -> models.Catalog:
+        revision = connection.catalog_revision
+        session = await connection.session()
+        tools: list[models.Descriptor] = []
+        seen: set[str] = set()
+        cursors: set[str] = set()
+        cursor: Optional[str] = None
+        size = 0
+        if connection.supports_tools:
+            async with asyncio.timeout(server.limits.request_seconds):
+                for _ in range(server.limits.max_pages):
+                    page = await session.list_tools(cursor=cursor)
+                    size += len(page.model_dump_json().encode())
+                    if size > server.limits.max_bytes:
+                        raise transport.MCPError("MCP catalog exceeds the byte limit")
+                    for item in page.tools:
+                        if item.name in seen:
                             raise transport.MCPError(
-                                "MCP catalog exceeds the byte limit"
+                                "MCP catalog contains duplicate tool names"
                             )
-                        for item in page.tools:
-                            if item.name in seen:
-                                raise transport.MCPError(
-                                    "MCP catalog contains duplicate tool names"
-                                )
-                            seen.add(item.name)
-                            schema.validator(item.inputSchema)
-                            if item.outputSchema is not None:
-                                schema.validator(item.outputSchema)
-                            tools.append(
-                                models.Descriptor(
-                                    remote_name=item.name,
-                                    name=models.tool_name(name, server, item.name),
-                                    description=item.description or "",
-                                    input_schema=item.inputSchema,
-                                    output_schema=item.outputSchema,
-                                    title=item.title,
-                                )
+                        seen.add(item.name)
+                        schema.validator(item.inputSchema)
+                        if item.outputSchema is not None:
+                            schema.validator(item.outputSchema)
+                        tools.append(
+                            models.Descriptor(
+                                remote_name=item.name,
+                                name=models.tool_name(name, server, item.name),
+                                description=item.description or "",
+                                input_schema=item.inputSchema,
+                                output_schema=item.outputSchema,
+                                title=item.title,
                             )
-                            if len(tools) > server.limits.max_tools:
-                                raise transport.MCPError(
-                                    "MCP catalog exceeds the tool limit"
-                                )
-                        cursor = page.nextCursor
-                        if not cursor:
-                            break
-                        if cursor in cursors:
+                        )
+                        if len(tools) > server.limits.max_tools:
                             raise transport.MCPError(
-                                "MCP catalog repeated a pagination cursor"
+                                "MCP catalog exceeds the tool limit"
                             )
-                        cursors.add(cursor)
-                    else:
-                        raise transport.MCPError("MCP catalog exceeds the page limit")
-            connection.catalog_stale = connection.catalog_revision != revision
-            return models.Catalog(
-                server_name=name,
-                server=server,
-                protocol_version=connection.protocol_version,
-                tools=sorted(tools, key=lambda item: item.remote_name),
-            )
-        except (transport.MCPError, auth_models.AuthenticationError):
-            raise
-        except Exception:
-            raise transport.MCPError("MCP discovery failed") from None
+                    cursor = page.nextCursor
+                    if not cursor:
+                        break
+                    if cursor in cursors:
+                        raise transport.MCPError(
+                            "MCP catalog repeated a pagination cursor"
+                        )
+                    cursors.add(cursor)
+                else:
+                    raise transport.MCPError("MCP catalog exceeds the page limit")
+        connection.catalog_stale = connection.catalog_revision != revision
+        return models.Catalog(
+            server_name=name,
+            server=server,
+            protocol_version=connection.protocol_version,
+            tools=sorted(tools, key=lambda item: item.remote_name),
+        )
 
     async def call(
         self,
@@ -331,6 +428,8 @@ class MCPRuntime:
         name: str,
         arguments: dict[str, pydantic.JsonValue],
     ) -> types.CallToolResult:
+        started = monotonic()
+        connection: Optional[Connection] = None
         try:
             if (
                 len(
@@ -359,7 +458,20 @@ class MCPRuntime:
             return result
         except (transport.MCPError, auth_models.AuthenticationError):
             raise
-        except Exception:
+        except Exception as exc:
+            classification = connection.failure(exc) if connection else "unknown"
+            diagnostics.log(
+                "mcp.call_failed",
+                level=diagnostics.Level.ERROR,
+                fields={
+                    "transport": server.kind,
+                    "tool": name,
+                    "request_seconds": server.limits.request_seconds,
+                    "elapsed_seconds": monotonic() - started,
+                    "session_error": classification,
+                },
+                error=exc,
+            )
             raise transport.MCPError(
                 "MCP call failed; remote outcome may be unknown"
             ) from None
@@ -367,8 +479,7 @@ class MCPRuntime:
     async def discover_content(
         self, name: str, server: models.ServerConfig
     ) -> content.ContentCatalog:
-        try:
-            connection = await self._connection(server)
+        async def catalog(connection: Connection) -> content.ContentCatalog:
             return await content_runtime.catalog(
                 await connection.session(),
                 name,
@@ -376,10 +487,13 @@ class MCPRuntime:
                 prompts=connection.supports_prompts,
                 resources=connection.supports_resources,
             )
-        except (transport.MCPError, auth_models.AuthenticationError):
-            raise
-        except Exception:
-            raise transport.MCPError("MCP content discovery failed") from None
+
+        return await self._discovery(
+            server,
+            catalog,
+            event="mcp.content_discovery_failed",
+            failure="MCP content discovery failed",
+        )
 
     async def retrieve_content(
         self,
@@ -388,6 +502,7 @@ class MCPRuntime:
         identity: str,
         arguments: dict[str, str],
     ) -> content.PromptResult | content.ResourceResult:
+        connection: Optional[Connection] = None
         try:
             connection = await self._connection(server)
             if not (
@@ -403,7 +518,9 @@ class MCPRuntime:
             )
         except (transport.MCPError, auth_models.AuthenticationError):
             raise
-        except Exception:
+        except Exception as exc:
+            if connection is not None:
+                connection.failure(exc)
             raise transport.MCPError("MCP content retrieval failed") from None
 
     async def close(self) -> None:

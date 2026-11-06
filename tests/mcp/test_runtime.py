@@ -1,10 +1,14 @@
 import asyncio
+import json
 from pathlib import Path
 import os
 import sys
 
 import pytest
 
+from mcp import ClientSession, types
+
+from vectorops.runner import diagnostics
 from vectorops.runner.mcp import models
 from vectorops.runner.mcp.runtime import MCPRuntime
 from vectorops.runner.mcp.transport import MCPError
@@ -130,12 +134,55 @@ async def test_startup_cancellation_rolls_back_and_reaps_process(
     await runtime.close()
 
 
-async def test_request_deadline_does_not_retry_mutation() -> None:
+async def test_request_deadline_does_not_retry_mutation(tmp_path: Path) -> None:
     runtime = MCPRuntime()
     config = server().model_copy(update={"limits": models.Limits(request_seconds=0.1)})
-    try:
-        await runtime.discover("test", config)
-        with pytest.raises(MCPError, match="outcome may be unknown"):
-            await runtime.call(config, "echo", {"value": "wait"})
-    finally:
-        await runtime.close()
+    async with diagnostics.DiagnosticLog(tmp_path) as logs:
+        with logs.activate():
+            try:
+                await runtime.discover("test", config)
+                with pytest.raises(MCPError, match="outcome may be unknown"):
+                    await runtime.call(config, "echo", {"value": "wait"})
+            finally:
+                await runtime.close()
+        await logs.flush()
+    entries = [
+        json.loads(line)
+        for path in (tmp_path / "logs").glob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert len(entries) == 1
+    assert entries[0]["event"] == "mcp.call_failed"
+    fields = entries[0]["fields"]
+    assert fields["error_type"] == "TimeoutError"
+    assert fields["request_seconds"] == 0.1
+    assert fields["elapsed_seconds"] >= 0.1
+    assert fields["frames"]
+
+
+async def test_call_diagnostics_do_not_expose_exception_or_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = MCPRuntime()
+    config = server()
+
+    async def fail(*args: object, **kwargs: object) -> types.CallToolResult:
+        raise RuntimeError("private-exception-payload")
+
+    async with diagnostics.DiagnosticLog(tmp_path) as logs:
+        with logs.activate(), diagnostics.bind(execution_id="execution"):
+            try:
+                await runtime.discover("test", config)
+                monkeypatch.setattr(ClientSession, "send_request", fail)
+                with pytest.raises(MCPError, match="outcome may be unknown") as error:
+                    await runtime.call(config, "echo", {"value": "private-argument"})
+                assert "private-" not in str(error.value)
+            finally:
+                await runtime.close()
+        await logs.flush()
+    text = "".join(path.read_text() for path in (tmp_path / "logs").glob("*.jsonl"))
+    assert "private-" not in text
+    entry = json.loads(text)
+    assert entry["execution_id"] == "execution"
+    assert entry["fields"]["error_type"] == "RuntimeError"
+    assert entry["fields"]["frames"][-1]["function"] == "fail"
