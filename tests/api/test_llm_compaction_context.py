@@ -1,14 +1,16 @@
 import asyncio
 import json
-from typing import Optional
+from typing import Literal, Optional
 
 import connect
 import pydantic
 import pytest
+from connect.providers import AnthropicProvider, OpenAIProvider
 
 from tests.api.test_llm_compaction import Backend, answer, overflow
 from tests.fixtures import replay
 from tests.fixtures.history import MemoryHistory
+from vectorops.runner import models as runner_models
 from vectorops.runner.api import llm
 from vectorops.runner.api.llm import compaction, compaction_context, observability
 from vectorops.runner.api.llm.models import CompactionCapacityError, Generation
@@ -17,6 +19,14 @@ from vectorops.runner.runner.errors import ActivityError
 
 OLD = "User requires a runnable game, verified against original behavior. " * 150
 RECENT = "Keep recent work unchanged."
+
+
+def record(message: connect.UserMessage) -> dict[str, pydantic.JsonValue]:
+    assert isinstance(message.content, list)
+    assert message.content[0].type == "text"
+    return pydantic.TypeAdapter(dict[str, pydantic.JsonValue]).validate_json(
+        message.content[0].text
+    )
 
 
 def policy(**values: object) -> llm.Compaction:
@@ -48,10 +58,10 @@ def reasoning_reply(tokens: int) -> connect.AssistantMessage:
 
 def test_projection_excludes_transport_not_business_data() -> None:
     original = reasoning_reply(2000)
-    projected = json.dumps(compaction_context.project(original))
+    projected = json.dumps(record(compaction_context.project(original)))
     assert "opaque-encrypted-payload" not in projected
     assert "Investigated, not verified." in projected
-    assert "Need original execution evidence." in projected
+    assert "Need original execution evidence." not in projected
     assert len(projected) < 500
     assert original.content[0].type == "reasoning"
     assert original.content[0].signature is not None
@@ -62,21 +72,25 @@ def test_projection_excludes_transport_not_business_data() -> None:
             )
         ]
     )
-    assert '"signature": "business"' in json.dumps(compaction_context.project(call))
+    assert '"signature": "business"' in json.dumps(
+        record(compaction_context.project(call))
+    )
     tool = connect.ToolResultMessage(
         tool_call_id="a",
         tool_name="read",
         is_error=True,
         content=[connect.TextBlock(text='{"protocol_meta": "business"}')],
     )
-    projected_tool = compaction_context.project(tool)
+    projected_tool = record(compaction_context.project(tool))
     assert isinstance(projected_tool, dict)
     assert projected_tool["is_error"] is True
     assert "business" in str(projected_tool)
 
 
+@pytest.mark.parametrize("version", [1, 2])
 async def test_projection_reference_context_injection_and_replay(
     history: MemoryHistory,
+    version: Literal[1, 2],
 ) -> None:
     original = reasoning_reply(2000)
     backend = Backend(
@@ -112,10 +126,10 @@ async def test_projection_reference_context_injection_and_replay(
         await agent.generate(tools=[tool])
         return None
 
-    first = await replay.run(history, workflow, compaction_version=1)
+    first = await replay.run(history, workflow, compaction_version=version)
     assert first.outcome.kind == "completed", first.outcome
     assert (
-        await replay.run(history, workflow, first.id, compaction_version=1)
+        await replay.run(history, workflow, first.id, compaction_version=version)
     ).outcome == first.outcome
     assert snapshots[0] == snapshots[1]
     assert len(backend.requests) == 5
@@ -124,8 +138,9 @@ async def test_projection_reference_context_injection_and_replay(
     assert payload["reference"]["system_prompt"] == backend.requests[0].system_prompt
     assert payload["reference"]["tools"][0]["name"] == "read"
     assert "opaque-encrypted-payload" not in str(summary.messages)
-    assert OLD in str(payload["transcript"])
-    assert RECENT in str(payload["recent_context"])
+    assert OLD in str(summary.messages[1:-1])
+    assert RECENT not in str(summary.messages)
+    assert "Need original execution evidence." not in str(summary.messages)
     assert summary.tools == []
     assert "Keep file paths." in str(summary.system_prompt)
     assert "ALL user requests" in str(summary.system_prompt)
@@ -146,6 +161,16 @@ async def test_projection_reference_context_injection_and_replay(
     assert metric.compaction is not None
     assert metric.compaction.saved_tokens_estimate is not None
     assert metric.compaction.saved_tokens_estimate > 0
+    assert isinstance(compact_steps[0].operation, runner_models.StepOperation)
+    debug = compact_steps[0].operation.input["compaction"]
+    assert isinstance(debug, dict)
+    assert debug["trigger"] == "threshold"
+    assert debug["selected_messages"] == 3
+    assert debug["retained_messages"] == 3
+    assert debug["reasoning_blocks_removed"] == 1
+    assert debug["image_blocks"] == 0
+    assert "opaque-encrypted-payload" not in str(debug)
+    assert OLD not in str(debug)
 
 
 def make_summary(
@@ -280,12 +305,25 @@ async def test_summary_overflow_is_not_retried_and_preserves_history(
     ).outcome == first.outcome
     assert seen[0] == seen[1]
     assert len(backend.requests) == 5
+    failed = next(
+        step for step in history.path(first.id) if step.operation.kind == "llm.compact"
+    )
+    assert isinstance(failed.operation, runner_models.StepOperation)
+    debug = failed.operation.input["compaction"]
+    assert isinstance(debug, dict)
+    counts = compaction_context.Metadata.model_validate(debug)
+    assert counts.selected_messages > 0
+    assert counts.packet_messages == counts.selected_messages + 2
+    assert OLD not in str(debug)
 
 
-@pytest.mark.parametrize("failure", ["empty", "tool", "length", "expanded", "cap"])
+@pytest.mark.parametrize(
+    "failure", ["empty", "tool", "length", "expanded", "escaped_expansion", "cap"]
+)
 async def test_failed_summary_does_not_replace_history(
     history: MemoryHistory, failure: str
 ) -> None:
+    source = '"' * 2000 if failure == "escaped_expansion" else OLD
     result = answer("", output=10)
     if failure == "tool":
         result = connect.AssistantMessage(
@@ -297,19 +335,21 @@ async def test_failed_summary_does_not_replace_history(
         result.finish_reason = "length"
     elif failure == "expanded":
         result = answer(OLD * 2)
+    elif failure == "escaped_expansion":
+        result = answer(source + "extra")
     elif failure == "cap":
         result = answer("summary", output=129)
     backend = Backend([answer("a", 2000), answer("b", 8500), result])
 
     async def workflow() -> pydantic.JsonValue:
         agent = llm.LLM("worker", model="test", compaction=policy(), backend=backend)
-        agent.add_user_message(OLD)
+        agent.add_user_message(source)
         await agent.generate()
         agent.add_user_message(RECENT)
         with pytest.raises(ActivityError):
             await agent.generate()
         assert agent.history == (
-            connect.UserMessage(content=OLD),
+            connect.UserMessage(content=source),
             answer("a", 2000),
             connect.UserMessage(content=RECENT),
             answer("b", 8500),
@@ -400,11 +440,16 @@ def test_retention_threshold_output_headroom_and_images() -> None:
         content=[connect.ImageBlock(mime_type="image/png", data="aGVsbG8=")]
     )
     assert state.select(messages, "2", policy(), "same", modern=True) is None
-    with pytest.raises(CompactionCapacityError, match="image"):
-        compaction_context.project(messages[0])
+    assert (
+        state.select(messages, "2", policy(), "same", modern=True, allow_images=True)
+        is not None
+    )
+    projected = compaction_context.project(messages[0])
+    assert isinstance(projected.content, list)
+    assert projected.content[1].type == "image"
 
 
-def test_chunk_boundaries_keep_parallel_tool_exchanges_together() -> None:
+def test_boundaries_keep_parallel_tool_exchanges_together() -> None:
     messages: list[connect.Message] = [
         connect.UserMessage(content=OLD),
         connect.AssistantMessage(
@@ -419,15 +464,16 @@ def test_chunk_boundaries_keep_parallel_tool_exchanges_together() -> None:
     assert compaction.safe_boundaries(messages) == {0, 1, 4}
 
 
-def test_prior_summary_is_separate_and_framing_is_not_accumulated() -> None:
+def test_prior_summary_is_kept_as_an_original_history_record() -> None:
     previous = compaction_context.replacement([], 0, "The user prohibits commits.")[0]
     summary = make_summary(
         [previous, connect.UserMessage(content=OLD)], has_summary=True
     )
     payload = json.loads(str(summary.request.messages[0].content))
-    assert "prohibits commits" in str(payload["previous_summary"])
-    assert len(payload["transcript"]) == 1
-    assert compaction_context.ENVELOPE not in str(payload["transcript"])
+    assert payload["first_record_is_previous_summary"] is True
+    assert len(summary.request.messages[1:-1]) == 2
+    assert "prohibits commits" in str(summary.request.messages[1].content)
+    assert compaction_context.ENVELOPE not in str(summary.request.messages[2].content)
 
 
 async def test_repeated_compaction_keeps_one_summary_and_user_corrections(
@@ -477,9 +523,9 @@ async def test_repeated_compaction_keeps_one_summary_and_user_corrections(
     assert (
         await replay.run(history, workflow, first.id, compaction_version=1)
     ).outcome == first.outcome
-    second_summary = json.loads(str(backend.requests[5].messages[0].content))
-    assert "prohibits commits" in str(second_summary["previous_summary"])
-    assert "Correction: compare behavior" in str(second_summary["transcript"])
+    second_summary = backend.requests[5]
+    assert "prohibits commits" in str(second_summary.messages[1].content)
+    assert "Correction: compare behavior" in str(second_summary.messages[2:-1])
     assert len(backend.requests) == 9
 
 
@@ -646,3 +692,219 @@ async def test_generation_overflow_retains_tool_results_without_reexecution(
     assert len(executions) == 2
     assert backend.requests[2].messages[1:] == backend.requests[4].messages[1:]
     assert "large result" not in str(backend.requests[3].messages)
+    compact_step = next(
+        step for step in history.path(result.id) if step.operation.kind == "llm.compact"
+    )
+    assert isinstance(compact_step.operation, runner_models.StepOperation)
+    debug = compact_step.operation.input["compaction"]
+    assert isinstance(debug, dict)
+    assert debug["trigger"] == "overflow"
+    assert debug["anchor_id"] == backend.identities[1]
+
+
+@pytest.mark.parametrize("adapter_name", ["openai", "anthropic"])
+def test_multimodal_packet_uses_native_images_and_quoted_tool_history(
+    adapter_name: str,
+) -> None:
+    image = connect.ImageBlock(
+        mime_type="image/png", data="aGVsbG8=", provider_meta={"transport": "private"}
+    )
+    calls = connect.AssistantMessage(
+        content=[
+            connect.ReasoningBlock(
+                text="Thinking must not be copied", signature="secret"
+            ),
+            connect.ToolCallBlock(
+                id="image-read",
+                name="read_file",
+                arguments={"path": "image.png", "usage": 1},
+            ),
+        ]
+    )
+    result = connect.ToolResultMessage(
+        tool_call_id="image-read",
+        tool_name="read_file",
+        content=[
+            connect.TextBlock(text="Before image"),
+            image,
+            connect.TextBlock(text="After image"),
+        ],
+        is_error=False,
+    )
+    summary = make_summary([connect.UserMessage(content=OLD), calls, result])
+    assert summary.request.tools == []
+    records = [
+        record(message)
+        for message in summary.request.messages[1:-1]
+        if isinstance(message, connect.UserMessage)
+    ]
+    assert [message["role"] for message in records] == ["user", "assistant", "tool"]
+    assert records[-1]["tool_call_id"] == "image-read"
+    assert records[-1]["tool_name"] == "read_file"
+    assert records[-1]["content"] == [
+        {"type": "text", "text": "Before image"},
+        {"type": "image"},
+        {"type": "text", "text": "After image"},
+    ]
+    assert "usage" in str(records[1])
+    assert "Thinking must not be copied" not in str(summary.request.messages)
+    assert "secret" not in str(summary.request.messages)
+    assert "transport" not in str(summary.request.messages)
+    assert image.provider_meta == {"transport": "private"}
+    assert summary.metadata.image_blocks == 1
+    assert summary.metadata.reasoning_blocks_removed == 1
+    assert summary.metadata.tool_calls == 1
+    assert summary.metadata.packet_tokens_estimate is None
+    assert summary.metadata.summary_target_tokens is None
+    assert "10%" in str(summary.request.system_prompt)
+    adapter = OpenAIProvider() if adapter_name == "openai" else AnthropicProvider()
+    model = connect.ModelSpec(
+        provider=adapter_name,
+        model="test",
+        api_family=(
+            "openai-responses" if adapter_name == "openai" else "anthropic-messages"
+        ),
+        supports_images=True,
+    )
+    payload = adapter.build_payload(model, summary.request, connect.RequestOptions())
+    assert "tools" not in payload
+    native_messages = (
+        payload["input"] if adapter_name == "openai" else payload["messages"]
+    )
+    native_images = [
+        block
+        for message in native_messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block["type"] in ("image", "input_image")
+    ]
+    assert len(native_images) == 1
+    assert json.dumps(payload).count(image.data) == 1
+
+
+@pytest.mark.parametrize("version", [1, 2])
+async def test_old_image_does_not_block_later_compaction_and_replay(
+    history: MemoryHistory, version: Literal[1, 2]
+) -> None:
+    image = connect.ImageBlock(mime_type="image/png", data="aGVsbG8=")
+    calls = connect.AssistantMessage(
+        content=[
+            connect.ToolCallBlock(
+                id="read", name="read_file", arguments={"path": "diagnostic.png"}
+            )
+        ],
+        finish_reason="tool_call",
+        usage=connect.Usage(input_tokens=2000, output_tokens=20, completeness="final"),
+    )
+    backend = Backend(
+        [
+            calls,
+            answer("Visual observation", 5000),
+            answer("Current work", 8500),
+            answer("The user's request and observations are preserved", output=20),
+            answer("More work", 4000),
+            answer("Latest work", 8500),
+        ]
+    )
+    if version == 2:
+        backend.replies.append(answer("Updated continuation summary", output=20))
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("worker", model="test", compaction=policy(), backend=backend)
+        agent.add_user_message(OLD)
+        await agent.generate()
+        agent.add_message(
+            connect.ToolResultMessage(
+                tool_call_id="read", tool_name="read_file", content=[image]
+            )
+        )
+        for text in ("Inspect the image", RECENT, OLD, "Continue"):
+            agent.add_user_message(text)
+            await agent.generate()
+        images = [
+            block
+            for message in agent.history
+            if not isinstance(message.content, str)
+            for block in message.content
+            if block.type == "image"
+        ]
+        assert len(images) == (1 if version == 1 else 0)
+        return [message.model_dump(mode="json") for message in agent.history]
+
+    first = await replay.run(history, workflow, compaction_version=version)
+    assert first.outcome.kind == "completed", first.outcome
+    assert (
+        await replay.run(history, workflow, first.id, compaction_version=version)
+    ).outcome == first.outcome
+    assert len(backend.requests) == (6 if version == 1 else 7)
+    compact_steps = [
+        step for step in history.path(first.id) if step.operation.kind == "llm.compact"
+    ]
+    assert len(compact_steps) == (1 if version == 1 else 2)
+    if version == 2:
+        first_compact = compact_steps[0]
+        assert isinstance(first_compact.operation, runner_models.StepOperation)
+        debug = first_compact.operation.input["compaction"]
+        assert isinstance(debug, dict)
+        assert debug["image_blocks"] == 1
+        assert debug["selected_messages"] == 4
+        assert debug["source_tokens_estimate"] is None
+        assert image.data not in json.dumps(debug)
+        assert first_compact.metrics is not None
+        metric = observability.Metrics.model_validate(first_compact.metrics["llm"])
+        assert metric.compaction is not None
+        assert metric.compaction.before_input_tokens_estimate is None
+
+
+async def test_image_summary_failure_keeps_history_and_records_metadata(
+    history: MemoryHistory,
+) -> None:
+    image = connect.ImageBlock(mime_type="image/png", data="aGVsbG8=")
+    calls = connect.AssistantMessage(
+        content=[
+            connect.ToolCallBlock(
+                id="read", name="read_file", arguments={"path": "diagnostic.png"}
+            )
+        ],
+        finish_reason="tool_call",
+        usage=connect.Usage(input_tokens=2000, output_tokens=20, completeness="final"),
+    )
+    backend = Backend(
+        [calls, answer("Observed", 5000), answer("Current", 8500), overflow()]
+    )
+
+    async def workflow() -> pydantic.JsonValue:
+        agent = llm.LLM("worker", model="test", compaction=policy(), backend=backend)
+        agent.add_user_message(OLD)
+        await agent.generate()
+        agent.add_message(
+            connect.ToolResultMessage(
+                tool_call_id="read", tool_name="read_file", content=[image]
+            )
+        )
+        agent.add_user_message("Continue")
+        await agent.generate()
+        agent.add_user_message(RECENT)
+        before = agent.history
+        with pytest.raises(ActivityError, match="ContextLengthError"):
+            await agent.generate()
+        assert agent.history == (*before, answer("Current", 8500))
+        return None
+
+    first = await replay.run(history, workflow, compaction_version=2)
+    assert first.outcome.kind == "completed", first.outcome
+    assert (
+        await replay.run(history, workflow, first.id, compaction_version=2)
+    ).outcome == first.outcome
+    assert len(backend.requests) == 4
+    step = next(
+        step for step in history.path(first.id) if step.operation.kind == "llm.compact"
+    )
+    assert step.outcome.kind == "failed"
+    assert isinstance(step.operation, runner_models.StepOperation)
+    debug = step.operation.input["compaction"]
+    assert isinstance(debug, dict)
+    assert debug["image_blocks"] == 1
+    assert debug["packet_tokens_estimate"] is None
+    assert "diagnostic.png" not in str(debug)
+    assert image.data not in str(debug)

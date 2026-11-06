@@ -10,6 +10,7 @@ from vectorops.runner import models
 from vectorops.runner.api import composition as c
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
 from vectorops.runner.runner.events import StepEvent
+from vectorops.runner.runner.executor import WorkflowExecutor
 from vectorops.runner.runner.project import RunnerProject
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner.workflow import WorkflowRunner
@@ -74,7 +75,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
         2,
     )
     child = next(w for w in history.workflows.values() if w.id != "root")
-    assert history.workflows["root"].compaction_version == child.compaction_version == 1
+    assert history.workflows["root"].compaction_version == child.compaction_version == 2
     assert (child.kind, child.version) == ("customer.acme.support.chat.turn", 4)
     invocation = [e for e in events if e.step.operation.kind == "vocode.llm.invoke"]
     assert len({e.step.id for e in invocation}) == 1
@@ -112,6 +113,38 @@ async def test_contracts_survive_sqlite_restart(workspace: Path) -> None:
     assert await WorkflowRunner(workspace).resume(runner.last_execution_id) == {
         "text": "hello"
     }
+
+
+async def test_compaction_upgrade_preserves_root_and_child_markers(
+    workspace: Path, history: MemoryHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace / "workflows" / "contracts.py").write_text(SOURCE)
+    configure = WorkflowExecutor.configure
+
+    async def old_configuration(
+        self: WorkflowExecutor, value: models.Workflow
+    ) -> models.Workflow:
+        return (await configure(self, value)).model_copy(
+            update={"compaction_version": 1}
+        )
+
+    runner = WorkflowRunner(workspace, history)
+    with monkeypatch.context() as patch:
+        patch.setattr(WorkflowExecutor, "configure", old_configuration)
+        assert await runner.run("contracts:workflow", workflow_id="root") == {
+            "text": "hello"
+        }
+    assert len(history.workflows) == 2
+    assert all(
+        workflow.compaction_version == 1 for workflow in history.workflows.values()
+    )
+    assert await runner.run(
+        "contracts:workflow", continue_from_step_id=history.heads["root"]
+    ) == {"text": "hello"}
+    assert len(history.workflows) == 2
+    assert all(
+        workflow.compaction_version == 1 for workflow in history.workflows.values()
+    )
 
 
 @pytest.mark.parametrize("declaration", ["activity", "stream", "workflow", "child"])

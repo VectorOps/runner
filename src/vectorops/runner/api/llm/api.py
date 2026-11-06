@@ -79,7 +79,8 @@ class LLM:
         self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
         self._compaction_history = compaction_api.History()
-        self._modern_compaction = context.workflow.compaction_version == 1
+        self._modern_compaction = context.workflow.compaction_version is not None
+        self._image_compaction = context.workflow.compaction_version == 2
         self._usage = connect.Usage()
         self._busy = False
         self._inbox = inbox
@@ -219,6 +220,7 @@ class LLM:
         *,
         settings: Optional[models.Settings] = None,
         finalize: Optional[invocation.Finalizer] = None,
+        metadata: Optional[Callable[[], pydantic.JsonValue]] = None,
     ) -> pydantic.JsonValue:
         """Prepare requests once for live work, never for terminal generation replay."""
         assert self._settings is not None
@@ -236,9 +238,15 @@ class LLM:
                 update={"session": connect.SessionHints(session_id=self._session_id)}
             )
 
+        def operation_input() -> dict[str, pydantic.JsonValue]:
+            value = self._input(prepare(), selected)
+            if metadata is not None:
+                value["compaction"] = metadata()
+            return value
+
         return await invocation.invoke(
             call,
-            lambda: self._input(prepare(), selected),
+            operation_input,
             self._backend,
             selected,
             provider_request,
@@ -560,11 +568,12 @@ class LLM:
             self._signature(definitions),
             force=force,
             modern=self._modern_compaction,
+            allow_images=self._image_compaction,
         )
         if selection is None:
             return False
         if self._modern_compaction:
-            await self._compact_context(selection, definitions)
+            await self._compact_context(selection, definitions, force=force)
         else:
             await self._compact_measured(selection, definitions)
         return True
@@ -575,6 +584,8 @@ class LLM:
         call: c.ActivityCall,
         selection: compaction_api.Selection,
         definitions: Sequence[connect.ToolSpec],
+        *,
+        force: bool = False,
     ) -> None:
         """Summarize one readable prefix, then atomically replace it on success."""
         assert self._settings is not None and self._compaction is not None
@@ -600,6 +611,12 @@ class LLM:
                 lambda: prepare().request,
                 settings=settings,
                 finalize=lambda item, ctx: prepare().finalize(item, ctx),
+                metadata=lambda: {
+                    "anchor_id": selection.anchor_id,
+                    "trigger": "overflow" if force else "threshold",
+                    "measured_prefix_tokens": selection.prefix_tokens,
+                    **prepare().metadata.model_dump(mode="json"),
+                },
             )
         )
         text = compaction_api.summary_text(response)

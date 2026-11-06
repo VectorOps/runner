@@ -521,17 +521,22 @@ and everything appended after the anchor remain unchanged. Selection walks backw
 through measured checkpoints and stops at the previous summary. Retention is a
 target, not a hard cap: whole exchanges and measured boundaries can retain more.
 If there is no eligible boundary that satisfies the target, compaction is skipped.
-The latest response is always retained, including pending tool calls. Text
-compaction does not consume images: selection stops before the first image so its
-exchange remains intact. This can prevent further compaction; an image is never
-silently replaced with a placeholder or serialized as base64 prose.
+The latest response is always retained, including pending tool calls. New workflows
+select prefixes independently of content type: an old image or file-read result
+does not prevent later compaction. Complete tool exchanges remain the boundary.
 
-The summarizer receives readable message roles, text, tool calls, and results,
-plus the original system instructions and tool definitions as reference context.
-It has no executable tools. Opaque reasoning signatures, encrypted payloads,
-provider metadata, usage counters, and transport identifiers are excluded from
-summary input, not removed from original messages. Tool arguments and results
-retain their business fields, even fields named `signature` or `usage`.
+The compaction packet mechanically quotes each selected message in order, retaining
+its role, visible text, tool-call IDs/names/arguments, and tool-result contents and
+error status. Native image blocks accompany their original message records in order;
+the quoted records mark their positions without copying base64 into text. The
+summarizer must support the content types in that history. There are no generated
+captions, file-specific retention rules, or executable tools. Original system
+instructions and tool definitions are provided as reference context.
+
+Reasoning blocks, signatures, encrypted payloads, provider metadata, usage counters,
+and transport identifiers are excluded from the packet, not removed from original
+messages. Tool arguments and results retain their business fields, even fields
+named `signature` or `usage`.
 
 Built-in instructions prioritize user requests, constraints, corrections, and
 unresolved questions. They preserve attribution and distinguish proposed work,
@@ -542,9 +547,9 @@ a guarantee that every historical detail survives.
 One rolling summary replaces the selected prefix as the first user message, with
 a fixed envelope identifying generated historical context rather than a new user
 request. The system prompt, current tools, and retained messages remain unchanged.
-Recent readable messages are supplied as optional continuity context; this excerpt
-is omitted when it does not fit or contains images. The actual retained suffix is
-never truncated. Previous summaries are separate from newly evicted messages.
+The retained suffix is not copied into the packet or truncated. A previous summary
+is included as its original history message, identified by the packet's reference
+header; no special parsing or rewriting of its content is performed.
 
 New compactions discard derived token coordinates after replacement and rebuild
 them from subsequent provider measurements. Original usage is never rewritten.
@@ -569,18 +574,26 @@ summary call. Neither failure replaces history.
 
 Summary validation precedes history replacement. Empty, tool-calling, truncated,
 over-cap, or failed summaries leave the active history intact. The final framed
-summary must reduce the selected conversational prefix under consistent
-before/after estimates; token counts from different models are not compared.
+summary must reduce the selected conversational prefix when its size can be
+estimated. For image-bearing packets, size estimates and the numeric summary
+target are unknown; the percentage target still applies. Image base64 length is
+never used as a token estimate. Token counts from different models are not compared.
 These checks are not proof that the rebuilt request fits the provider tokenizer.
 The protected tail is never silently shrunk.
 
-New workflows persist `compaction_version=1`. Generation results record the
+New workflows persist `compaction_version=2`. Generation results record the
 output budget. Summaries use `llm.compact` activity version 3 with name `_compact`.
 Completed summaries are reused without consulting the current catalog;
 interrupted summaries restart under their existing identity. History is replaced
-only after the summary succeeds. Request inputs remain digests, not transcripts.
+only after the summary succeeds. Request inputs contain a digest and payload-free
+compaction diagnostics, not transcripts or image bytes.
 
-Workflows created before this marker keep the previous measured flow, defaults
+Workflows with `compaction_version=1` retain the historical image barrier during
+selection, including on resume. Changing an old cut would apply its recorded
+summary to different messages. Start a new execution for image-independent selection;
+existing histories are not migrated or restarted automatically.
+
+Workflows without a compaction marker keep the previous measured flow, defaults
 (70% trigger and no measured message-count floor), summary framing, and version-2
 operation sequence. They do not automatically gain these changes on resume.
 Explicit thresholds such as 80% remain explicit. Start a new workflow to use the
@@ -668,6 +681,23 @@ Exhaustion propagates as the ordinary recorded `ActivityError`.
 
 ## LLM observability
 
+Compaction steps include `operation.input.compaction` alongside their request
+digest. These diagnostics are recorded before the provider call, so they remain
+available if that call fails:
+
+| Field | Meaning |
+| --- | --- |
+| `anchor_id`, `trigger` | Successful generation anchoring the cut; `threshold` or `overflow` |
+| `measured_prefix_tokens` | Original prefix checkpoint measurement, including original request overhead; not a measurement of the projected packet |
+| `selected_messages`, `retained_messages`, `packet_messages` | Original prefix/suffix counts and summarizer request message count |
+| `image_blocks`, `tool_calls`, `reasoning_blocks_removed` | Selected history's image and tool-call counts, and discarded reasoning-block count |
+| `source_tokens_estimate`, `packet_tokens_estimate` | Projected history and full summary-request estimates; null with images |
+| `summary_target_ratio`, `summary_target_tokens` | Soft compression target; numeric target is null when size is unknown |
+
+The diagnostics contain no message contents, tool arguments, paths, image bytes,
+or opaque provider payloads. They describe a selected compaction, not skipped
+selection checks that never create a compaction activity.
+
 Generation and compaction activities attach a versioned `metrics.llm` object to
 their existing step snapshots. Live `step.updated`, `step.completed`, and
 `step.failed` events carry the same metrics as persisted history. Inspect them
@@ -724,7 +754,8 @@ an upper bound when context capacity is unknown. Null means unavailable, not zer
 Compaction savings compare the full continuation request before and after summary
 replacement, including unchanged system/tools/recent messages. Legacy summaries
 can report negative savings. New compactions reject a final summary that does not
-reduce the selected conversational prefix. Ordinary generations have null
+reduce a size-estimable conversational prefix; multimodal savings remain unknown.
+Ordinary generations have null
 `compaction` metrics.
 
 Each retry clears attempt-local usage, cost, and output estimates while retaining

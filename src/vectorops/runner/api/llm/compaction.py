@@ -268,6 +268,7 @@ class History:
         *,
         force: bool = False,
         modern: bool = False,
+        allow_images: bool = False,
     ) -> Optional[Selection]:
         """Retain at least the target at measured, complete-exchange boundaries.
 
@@ -306,6 +307,7 @@ class History:
         limit = len(messages)
         if modern:
             limit -= policy.keep_recent_messages
+        if modern and not allow_images:
             for index, message in enumerate(messages):
                 if not isinstance(message.content, str) and any(
                     block.type == "image" for block in message.content
