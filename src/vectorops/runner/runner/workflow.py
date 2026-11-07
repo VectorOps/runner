@@ -1093,9 +1093,14 @@ class WorkflowRunner:
             return await project.usage.read(reset=reset)
 
     async def query_history(
-        self, query: history_query.HistoryQuery
+        self,
+        query: history_query.HistoryQuery,
+        *,
+        page_fits: typing.Optional[Callable[[history_query.HistoryPage], bool]] = None,
     ) -> history_query.HistoryPage:
-        return await (await self._selected_database(query.execution_id)).query(query)
+        return await (await self._selected_database(query.execution_id)).query(
+            query, page_fits=page_fits
+        )
 
     async def execution_ids(
         self,

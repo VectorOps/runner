@@ -309,7 +309,7 @@ event journal. Changes made by external database writers are not observed.
 
 Responses contain `execution_id`, `items` (`position`, `step`), and nullable `next_cursor`. Items are always ascending by position. Tail continuation loads older records; head continuation loads newer records. Iterate until the cursor is null to download the complete selection.
 
-Cursors freeze the insertion boundary of a selection, not mutable record values. New inserts do not shift pages; newer revisions may appear on subsequent reads. All filters except `limit` must remain unchanged when continuing. SQLite applies filtering and limits before records are decoded, so a last-100 query does not load all steps into Python. A response exceeding the frame limit fails with `frame_too_large`; reduce the page size. A single oversized step requires a future chunked-content extension.
+Cursors freeze the insertion boundary of a selection, not mutable record values. New inserts do not shift pages; newer revisions may appear on subsequent reads. All filters except `limit` must remain unchanged when continuing. SQLite applies filtering and limits before records are decoded, so a last-100 query does not load all steps into Python. History responses also stop at the frame-size budget, so a page can contain fewer items than `limit` even when more history exists. Follow `next_cursor` until it is null; a short page does not mean the history is exhausted. Step contents are not truncated. A single step that cannot fit in a response still fails with `frame_too_large` and requires a future chunked-content extension.
 
 For a frontend retaining a moving window, use its oldest retained step ID as an exclusive anchor:
 

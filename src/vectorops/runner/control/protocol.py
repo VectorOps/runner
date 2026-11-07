@@ -1,5 +1,6 @@
 """Version-two packets and request parameters for bearer-authenticated control."""
 
+import json
 import typing
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from vectorops.runner.runner.branching import (
 
 VERSION: typing.Final = 2
 MAX_FRAME: typing.Final = 8 * 1024 * 1024
+MAX_REQUEST_ID: typing.Final = 128
 HANDSHAKE_TIMEOUT: typing.Final = 10.0
 
 
@@ -43,7 +45,7 @@ class Authenticated(Model):
 
 class Request(Model):
     kind: typing.Literal["request"] = "request"
-    id: str = pydantic.Field(min_length=1, max_length=128)
+    id: str = pydantic.Field(min_length=1, max_length=MAX_REQUEST_ID)
     method: str = pydantic.Field(min_length=1, max_length=128)
     params: dict[str, pydantic.JsonValue] = pydantic.Field(default_factory=dict)
 
@@ -222,3 +224,19 @@ class RemoteError(Exception):
 
 def json_value(model: pydantic.BaseModel) -> pydantic.JsonValue:
     return JSON.validate_json(model.model_dump_json())
+
+
+def encode_packet(packet: Packet) -> bytes:
+    return json.dumps(
+        packet.model_dump(mode="json"), allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def response_fits(result: pydantic.BaseModel) -> bool:
+    """Reserve the response envelope with a maximally escaped request ID."""
+    return (
+        len(
+            encode_packet(Response(id="\0" * MAX_REQUEST_ID, result=json_value(result)))
+        )
+        <= MAX_FRAME
+    )

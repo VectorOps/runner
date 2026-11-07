@@ -107,9 +107,7 @@ class Connection:
         raise ValueError("nonfinite JSON number")
 
     async def send(self, packet: p.Packet) -> None:
-        raw = json.dumps(
-            packet.model_dump(mode="json"), allow_nan=False, separators=(",", ":")
-        ).encode("utf-8")
+        raw = p.encode_packet(packet)
         if len(raw) > p.MAX_FRAME:
             raise p.RemoteError("frame_too_large", "packet exceeds frame limit")
         async with self._write_lock:

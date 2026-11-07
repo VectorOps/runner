@@ -1040,8 +1040,17 @@ class SQLiteHistory:
 
         await _offload(export)
 
-    async def query(self, query: queries.HistoryQuery) -> queries.HistoryPage:
-        """Read a bounded window; cursors freeze membership, not mutable snapshots."""
+    async def query(
+        self,
+        query: queries.HistoryQuery,
+        *,
+        page_fits: typing.Optional[Callable[[queries.HistoryPage], bool]] = None,
+    ) -> queries.HistoryPage:
+        """Bound a snapshot window by count and an optional monotone size predicate.
+
+        Keep at least one item so callers can report an oversized record instead
+        of returning an empty page that cannot advance.
+        """
 
         def read() -> queries.HistoryPage:
             with closing(self._connect_readonly()) as connection:
@@ -1115,11 +1124,6 @@ class SQLiteHistory:
                     ),
                 ).fetchall()
                 selected = rows[: query.limit]
-                next_cursor = None
-                if len(rows) > query.limit:
-                    next_cursor = queries.HistoryCursor(
-                        scope=query.scope(), boundary=boundary, position=selected[-1][0]
-                    ).encode()
                 items = [
                     queries.HistoryItem(
                         position=row[0],
@@ -1127,10 +1131,32 @@ class SQLiteHistory:
                     )
                     for row in selected
                 ]
-                items.sort(key=lambda item: item.position)
-                return queries.HistoryPage(
-                    execution_id=execution.id, items=items, next_cursor=next_cursor
-                )
+
+                def page_for(count: int) -> queries.HistoryPage:
+                    next_cursor = None
+                    if count and len(rows) > count:
+                        next_cursor = queries.HistoryCursor(
+                            scope=query.scope(),
+                            boundary=boundary,
+                            position=items[count - 1].position,
+                        ).encode()
+                    return queries.HistoryPage(
+                        execution_id=execution.id,
+                        items=sorted(items[:count], key=lambda item: item.position),
+                        next_cursor=next_cursor,
+                    )
+
+                page = page_for(len(items))
+                if page_fits is None or len(items) < 2 or page_fits(page):
+                    return page
+                low, high = 1, len(items) - 1
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if page_fits(page_for(middle)):
+                        low = middle
+                    else:
+                        high = middle - 1
+                return page_for(low)
 
         return await _offload(read)
 

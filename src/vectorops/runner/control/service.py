@@ -854,7 +854,9 @@ class RunnerService:
             }
         if method == "history.query":
             query = history_query.HistoryQuery.model_validate(params)
-            return p.json_value(await self.runner.query_history(query))
+            return p.json_value(
+                await self.runner.query_history(query, page_fits=p.response_fits)
+            )
         if method == "mailbox.list":
             return p.json_value(
                 await self.runner.pending_inputs(
