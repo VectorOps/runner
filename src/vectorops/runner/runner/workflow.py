@@ -38,7 +38,7 @@ from vectorops.runner.runner.retention import ExecutionRetention
 from vectorops.runner.runner.sqlite_history import SQLiteHistory
 from vectorops.runner.runner import state
 from vectorops.runner.runner import execution_state as execution_models
-from vectorops.runner.runner import inspection, summary_history
+from vectorops.runner.runner import disk_usage, inspection, summary_history
 from vectorops.runner.runner.summary_runtime import SummaryRuntime
 from vectorops.runner.runner import history_query
 from vectorops.runner.runner import mailbox
@@ -1091,6 +1091,12 @@ class WorkflowRunner:
         project = await self.project()
         async with project.usage.lock:
             return await project.usage.read(reset=reset)
+
+    async def runner_disk_usage(self, query: disk_usage.Query) -> disk_usage.Report:
+        project = await self.project()
+        return await disk_usage.measure(
+            project.workspace_path, project.data_path, query
+        )
 
     async def query_history(
         self,

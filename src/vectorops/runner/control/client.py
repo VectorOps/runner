@@ -21,7 +21,7 @@ from vectorops.runner.control import auth, protocol as p, transport
 from vectorops.runner.control.server import RunnerServer
 from vectorops.runner.control.service import RunnerService
 from vectorops.runner.runner import execution_state, history_query, mailbox
-from vectorops.runner.runner import inspection
+from vectorops.runner.runner import disk_usage, inspection
 from vectorops.runner.runner import inbox
 from vectorops.runner.worktrees import models as worktrees
 
@@ -202,6 +202,12 @@ class RunnerClient:
 
     async def runner_usage(self) -> usage.RunnerUsage:
         return usage.RunnerUsage.model_validate(await self.request("runner.usage"))
+
+    async def runner_disk_usage(self, *, top: int = 10) -> disk_usage.Report:
+        query = disk_usage.Query(top=top)
+        return disk_usage.Report.model_validate(
+            await self.request("runner.disk_usage", query.model_dump(mode="json"))
+        )
 
     async def reset_runner_usage(self) -> usage.RunnerUsage:
         return usage.RunnerUsage.model_validate(

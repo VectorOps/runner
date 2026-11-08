@@ -21,7 +21,7 @@ from vectorops.runner.control import protocol as p
 from vectorops.runner.control.request_store import RequestStore
 from vectorops.runner.control.updates import SnapshotPublisher
 from vectorops.runner.runner import events, history_query, mailbox
-from vectorops.runner.runner import inspection
+from vectorops.runner.runner import disk_usage, inspection
 from vectorops.runner.runner import inbox
 from vectorops.runner.runner import branching
 from vectorops.runner.runner.project import RunnerProject
@@ -730,6 +730,12 @@ class RunnerService:
             return p.json_value(
                 await self.runner.workflow_state(
                     workflow_state.execution_id, workflow_state.workflow_id
+                )
+            )
+        if method == "runner.disk_usage":
+            return p.json_value(
+                await self.runner.runner_disk_usage(
+                    disk_usage.Query.model_validate(params)
                 )
             )
         if method in ("runner.usage", "runner.usage.reset"):

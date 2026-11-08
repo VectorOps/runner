@@ -83,6 +83,7 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `runner.info` | None | Identity, workspace, protocol version, limits |
+| `runner.disk_usage` | `top`: integer, default 10, range 0–500 | Workspace file bytes, workflow count, and largest workflow execution directories |
 | `runner.shutdown` | `mode`: `cancel` (default) or `drain` | Shutdown accepted |
 | `workflows.list` | `after`, `limit` (default 100, maximum 500) | Decorated workspace descriptors, active execution/input/auth counts, discovery errors, and `next_after` |
 | `workflows.describe` | `reference` | Workflow descriptor including input schema |
@@ -140,6 +141,42 @@ and views can change between requests. The `executions.list` response is unchang
 Start and resume receipts are persisted before launch. Repeating the same idempotency key and arguments returns the original acceptance, even after restart; different arguments produce `idempotency_conflict`. Acceptance is not proof of successful execution. A crash between receipt persistence and launch can leave an accepted ID without execution history; retries do not automatically execute it. Retention can also remove history without removing its receipt. Use a new key only for an intentional new attempt.
 
 Stop is cooperative and addresses the specific active execution. It returns before cleanup; wait for `execution.cancelled`, `execution.completed`, or `execution.failed`. Workflows that block the event loop or suppress cancellation can delay shutdown. Forced termination is not supported.
+
+### Workspace disk usage
+
+Use `runner.disk_usage` to measure the configured workspace directory (`.voc` by
+default), including workflow definitions, execution databases and their SQLite
+sidecars, artifacts, logs, and shared runner state. The typed client exposes
+`await client.runner_disk_usage(top=5)`.
+
+```json
+{"kind":"request","id":"disk-1","method":"runner.disk_usage","params":{"top":5}}
+```
+
+```json
+{"kind":"response","id":"disk-1","result":{"total_bytes":8192,"workflow_count":2,"top_workflows":[{"execution_id":"exec-large","size_bytes":4096},{"execution_id":"exec-small","size_bytes":1024}]}}
+```
+
+| Result field | Type | Meaning |
+| --- | --- | --- |
+| `total_bytes` | Nonnegative integer | Sum of regular-file sizes throughout the workspace |
+| `workflow_count` | Nonnegative integer | Number of execution directories under the configured data directory, before applying `top` |
+| `top_workflows` | Array | At most `top` entries, sorted by descending `size_bytes`, then ascending `execution_id` for ties |
+| `top_workflows[].execution_id` | String | Execution ID; use `executions.summary` to look up its workflow identity |
+| `top_workflows[].size_bytes` | Nonnegative integer | Recursive file sizes for this execution, including its root workflow and children |
+
+Root and child workflows share an execution database, so usage is attributed to
+the execution rather than individual child workflows. Execution directories are
+counted even when empty or partially created; they need not have a readable
+history record. Shared runner files and workflow definitions contribute to
+`total_bytes`, not individual workflow entries. `top: 0` returns totals without
+ranked entries. Unknown parameters and non-integer or out-of-range limits are rejected.
+
+Sizes are logical file bytes, not allocated filesystem blocks; hard-linked files
+are counted per path. Symlinks and special files are excluded. Scanning runs off
+the event loop and does not read database contents. Results are a live estimate,
+not an atomic snapshot: files removed during scanning are skipped, and other I/O
+errors fail the request rather than returning an unmarked partial total.
 
 ### Execution target override
 
