@@ -209,6 +209,12 @@ class RunnerClient:
             await self.request("runner.disk_usage", query.model_dump(mode="json"))
         )
 
+    async def execution_disk_usage(self, execution_id: str) -> disk_usage.WorkflowUsage:
+        query = p.Execution(execution_id=execution_id)
+        return disk_usage.WorkflowUsage.model_validate(
+            await self.request("executions.disk_usage", query.model_dump(mode="json"))
+        )
+
     async def reset_runner_usage(self) -> usage.RunnerUsage:
         return usage.RunnerUsage.model_validate(
             await self.request("runner.usage.reset")

@@ -1098,6 +1098,12 @@ class WorkflowRunner:
             project.workspace_path, project.data_path, query
         )
 
+    async def execution_disk_usage(self, execution_id: str) -> disk_usage.WorkflowUsage:
+        project = await self.project()
+        return await disk_usage.measure_execution(
+            project.workspace_path, project.data_path, execution_id
+        )
+
     async def query_history(
         self,
         query: history_query.HistoryQuery,

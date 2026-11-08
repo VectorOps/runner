@@ -38,11 +38,53 @@ async def measure(workspace: Path, data: Path, query: Query) -> Report:
     return await asyncio.to_thread(_measure, workspace, data / "executions", query)
 
 
+async def measure_execution(
+    workspace: Path, data: Path, execution_id: str
+) -> WorkflowUsage:
+    return await asyncio.to_thread(_measure_execution, workspace, data, execution_id)
+
+
+def _measure_execution(workspace: Path, data: Path, execution_id: str) -> WorkflowUsage:
+    """Measure only the selected directory, rejecting links along its workspace path."""
+    if (
+        not execution_id
+        or execution_id in (".", "..")
+        or Path(execution_id).name != execution_id
+    ):
+        raise ValueError("execution ID must be a single directory name")
+    relative = (data / "executions" / execution_id).relative_to(workspace)
+    directory = workspace
+    for part in relative.parts:
+        directory /= part
+        if not stat.S_ISDIR(directory.stat(follow_symlinks=False).st_mode):
+            raise FileNotFoundError("execution directory is missing")
+    total, _ = _scan(directory, missing_root_ok=False)
+    return WorkflowUsage(execution_id=execution_id, size_bytes=total)
+
+
 def _measure(workspace: Path, executions: Path, query: Query) -> Report:
+    total, workflows = _scan(workspace, executions)
+    ranked = sorted(workflows.items(), key=lambda item: (-item[1], item[0]))
+    return Report(
+        total_bytes=total,
+        workflow_count=len(workflows),
+        top_workflows=[
+            WorkflowUsage(execution_id=identifier, size_bytes=size)
+            for identifier, size in ranked[: query.top]
+        ],
+    )
+
+
+def _scan(
+    root: Path,
+    executions: typing.Optional[Path] = None,
+    *,
+    missing_root_ok: bool = True,
+) -> tuple[int, dict[str, int]]:
     """Scan once without following links; tolerate files removed during the scan."""
     total = 0
     workflows: dict[str, int] = {}
-    pending: list[tuple[Path, typing.Optional[str]]] = [(workspace, None)]
+    pending: list[tuple[Path, typing.Optional[str]]] = [(root, None)]
     while pending:
         directory, execution_id = pending.pop()
         try:
@@ -63,13 +105,7 @@ def _measure(workspace: Path, executions: Path, query: Query) -> Report:
                         if execution_id is not None:
                             workflows[execution_id] += info.st_size
         except FileNotFoundError:
+            if directory == root and not missing_root_ok:
+                raise
             continue
-    ranked = sorted(workflows.items(), key=lambda item: (-item[1], item[0]))
-    return Report(
-        total_bytes=total,
-        workflow_count=len(workflows),
-        top_workflows=[
-            WorkflowUsage(execution_id=identifier, size_bytes=size)
-            for identifier, size in ranked[: query.top]
-        ],
-    )
+    return total, workflows

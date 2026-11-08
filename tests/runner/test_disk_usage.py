@@ -1,4 +1,8 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+import os
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -46,6 +50,11 @@ async def test_workspace_sizes_and_ranking(tmp_path: Path) -> None:
     assert totals.total_bytes == report.total_bytes
     assert totals.workflow_count == 4
     assert totals.top_workflows == []
+    for item in all_workflows.top_workflows:
+        assert (
+            await disk_usage.measure_execution(workspace, data, item.execution_id)
+            == item
+        )
 
 
 async def test_symlinks_are_not_followed(tmp_path: Path) -> None:
@@ -70,6 +79,12 @@ async def test_symlinks_are_not_followed(tmp_path: Path) -> None:
     assert report.top_workflows == [
         disk_usage.WorkflowUsage(execution_id="one", size_bytes=3)
     ]
+    assert (
+        await disk_usage.measure_execution(workspace, data, "one")
+        == report.top_workflows[0]
+    )
+    with pytest.raises(FileNotFoundError):
+        await disk_usage.measure_execution(workspace, data, "alias")
 
 
 async def test_missing_or_empty_workspace(tmp_path: Path) -> None:
@@ -92,3 +107,62 @@ async def test_unreadable_directory_fails_instead_of_undercounting(
     monkeypatch.setattr(disk_usage.os, "scandir", denied)
     with pytest.raises(PermissionError):
         await disk_usage.measure(tmp_path, tmp_path / "data", disk_usage.Query())
+
+
+async def test_execution_scan_is_targeted_and_off_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    directory = data / "executions/one"
+    (directory / "artifacts").mkdir(parents=True)
+    (directory / "artifacts/output").write_bytes(b"123")
+    (data / "executions/other").mkdir()
+    scandir = os.scandir
+    event_loop_thread = threading.get_ident()
+    visited: list[Path] = []
+
+    @contextmanager
+    def guarded(path: Path) -> Iterator[Iterator[os.DirEntry[str]]]:
+        assert path.is_relative_to(directory)
+        assert threading.get_ident() != event_loop_thread
+        visited.append(path)
+        with scandir(path) as entries:
+            yield entries
+
+    monkeypatch.setattr(disk_usage.os, "scandir", guarded)
+    report = await disk_usage.measure_execution(tmp_path, data, "one")
+    assert report == disk_usage.WorkflowUsage(execution_id="one", size_bytes=3)
+    assert visited == [directory, directory / "artifacts"]
+
+
+@pytest.mark.parametrize("path", ["data", "data/executions", "data/executions/one"])
+async def test_execution_rejects_symlinked_ancestors(tmp_path: Path, path: str) -> None:
+    workspace = tmp_path / ".voc"
+    link = workspace / path
+    link.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(FileNotFoundError):
+        await disk_usage.measure_execution(workspace, workspace / "data", "one")
+
+
+@pytest.mark.parametrize("execution_id", ["", ".", "..", "../other", "/other"])
+async def test_execution_rejects_path_ids(tmp_path: Path, execution_id: str) -> None:
+    with pytest.raises(ValueError):
+        await disk_usage.measure_execution(tmp_path, tmp_path / "data", execution_id)
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+async def test_execution_root_scan_errors_are_not_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[OSError]
+) -> None:
+    data = tmp_path / "data"
+    (data / "executions/one").mkdir(parents=True)
+
+    def failed(path: Path) -> None:
+        raise error(str(path))
+
+    monkeypatch.setattr(disk_usage.os, "scandir", failed)
+    with pytest.raises(error):
+        await disk_usage.measure_execution(tmp_path, data, "one")

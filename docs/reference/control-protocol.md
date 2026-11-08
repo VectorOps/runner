@@ -84,6 +84,7 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | --- | --- | --- |
 | `runner.info` | None | Identity, workspace, protocol version, limits |
 | `runner.disk_usage` | `top`: integer, default 10, range 0–500 | Workspace file bytes, workflow count, and largest workflow execution directories |
+| `executions.disk_usage` | Required `execution_id` | Selected execution's `execution_id` and `size_bytes` |
 | `runner.shutdown` | `mode`: `cancel` (default) or `drain` | Shutdown accepted |
 | `workflows.list` | `after`, `limit` (default 100, maximum 500) | Decorated workspace descriptors, active execution/input/auth counts, discovery errors, and `next_after` |
 | `workflows.describe` | `reference` | Workflow descriptor including input schema |
@@ -177,6 +178,32 @@ are counted per path. Symlinks and special files are excluded. Scanning runs off
 the event loop and does not read database contents. Results are a live estimate,
 not an atomic snapshot: files removed during scanning are skipped, and other I/O
 errors fail the request rather than returning an unmarked partial total.
+
+### Execution disk usage
+
+Use `executions.disk_usage` to measure one execution without scanning the rest of
+the workspace or relying on the top-workflow ranking. The typed client exposes
+`await client.execution_disk_usage("exec-large")`.
+
+```json
+{"kind":"request","id":"disk-2","method":"executions.disk_usage","params":{"execution_id":"exec-large"}}
+```
+
+```json
+{"kind":"response","id":"disk-2","result":{"execution_id":"exec-large","size_bytes":4096}}
+```
+
+The required `execution_id` uses the existing execution-ID contract: 1–128 letters,
+digits, underscores, or hyphens. Invalid IDs and extra parameters return
+`invalid_argument`. Missing directories, non-directory entries, and symlinked
+paths below the workspace return `not_found`; an existing empty directory returns
+zero bytes. No history database or execution record is required.
+
+`size_bytes` follows the same accounting rules as `top_workflows[].size_bytes`,
+including the root workflow and its children but excluding shared runner files.
+The scan runs off the event loop. If the selected directory disappears before
+scanning begins, the request returns `not_found`; files removed during scanning
+are skipped as with workspace disk usage.
 
 ### Execution target override
 

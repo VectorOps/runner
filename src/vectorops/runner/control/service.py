@@ -732,6 +732,12 @@ class RunnerService:
                     workflow_state.execution_id, workflow_state.workflow_id
                 )
             )
+        if method == "executions.disk_usage":
+            return p.json_value(
+                await self.runner.execution_disk_usage(
+                    p.Execution.model_validate(params).execution_id
+                )
+            )
         if method == "runner.disk_usage":
             return p.json_value(
                 await self.runner.runner_disk_usage(
