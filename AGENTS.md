@@ -1,12 +1,13 @@
-# # Agents Guide
+# Agent guide
 
-This repository implements a configurable, graph-driven workflow runner with LLM-backed executors, tools, and a terminal UI. It uses Pydantic v2 for schema, strong typing, and discriminated unions.
+This repository implements durable Python workflows and LLM agents, with a CLI, daemon, and control API. It uses Pydantic v2 for schemas, strong typing, and discriminated unions.
 
 ## Stack and assumptions
-- Python 3.11+ recommended.
-- Core libs: pydantic v2, litellm, PyYAML, json5, asyncio.
+- Python 3.13 is required by project metadata.
+- Core libraries: Pydantic v2, VectorOps Connect, asyncio, SQLite, and MCP.
 - Testing: pytest.
-- Config: YAML with includes and variable interpolation.
+- Configuration: TOML. Workflow definitions: async Python functions.
+- Project skills: `.voc/skills/`. Runtime data: `.voc/data/`, excluded from Git.
 
 ## High-level style and patterns
 - Pydantic v2 BaseModel is the canonical schema:
@@ -16,13 +17,13 @@ This repository implements a configurable, graph-driven workflow runner with LLM
   - Use `field_validator` and `model_validator` for coercion/invariants.
 - Typing:
   - Prefer precise types (`dict[str, Any]`, `list[Message]`), `Final`, `ClassVar`, `Literal`.
-  - Do not use getattr or hasattr, prefer strong typing and
+  - Do not use getattr or hasattr on strongly typed objects.
   - Never use `X | None` composite type, use `Optional[X]`
 - Protocols and packets:
   - Include a stable `kind` field; treat enum values and field names as contracts.
-- Graph runtime:
-  - Separate config-time models (Node/Edge/Graph) from runtime wrappers.
-  - Use type-name registration for node dispatch.
+- Workflow runtime:
+  - Keep external effects in recorded activities and orchestration deterministic.
+  - Preserve operation identities and saved-execution compatibility.
 - Commands and tools:
   - Async-first handlers; avoid blocking I/O; keep dataclass command defs minimal.
 
@@ -60,8 +61,8 @@ This repository implements a configurable, graph-driven workflow runner with LLM
 - Add tests for:
   - New models or validators (invalid/valid cases).
   - Packet shape changes and discriminators.
-  - Executor behaviors and preprocessors.
-  - Graph validation and traversal.
+  - Executor behavior, cancellation, and interrupted recovery.
+  - Fresh execution and replay without repeated completed effects.
 
 ## Python best practices for this repo
 - You must never add any comments unless explicitly requested. If comment already exists - do not remove it.
@@ -73,7 +74,7 @@ This repository implements a configurable, graph-driven workflow runner with LLM
   - Use `@field_validator(..., mode="after")` for derived checks (e.g., uniqueness).
 - Serialization:
   - JSON-safe types; `str` enums; explicit `Optional[...] = None`.
-  - When changing runtime state models in `src/vocode/state.py`, update persistence DTOs and conversion logic in `src/vocode/persistence/` accordingly.
+  - When changing runtime state in `src/vectorops/runner/runner/`, check the corresponding SQLite storage, summary projections, and replay tests.
 - API stability:
   - New fields should be backward compatible and optional.
   - Keep `kind` and enum values stable.
@@ -87,36 +88,41 @@ This repository implements a configurable, graph-driven workflow runner with LLM
 - Use `black` to format files after changing them.
 - Run `mypy` together with `black` after changing Python files.
 - Do not import a single symbol per line from a single module when multiple symbols are imported. This is not allowed:
-```
-from vectorops.runner.runner import state_replay
-from vectorops.runner.runner import state_runtime
-from vectorops.runner.runner import state_tracker
+```python
+from vectorops.runner.runner import state
+from vectorops.runner.runner import state_store
+from vectorops.runner.runner import workspace_database
 ```
 
 Instead do:
-```
-from vectorops.runner.runner import state_replay, state_runtime, state_tracker
+```python
+from vectorops.runner.runner import state, state_store, workspace_database
 ```
 
-- Never import more than a three symbols. This is allowed:
-```
-from .proto import UIPacket, UIPacketEnvelope, UIPacketRunEvent
+- Never import more than three symbols from one module. This is allowed:
+```python
+from vectorops.runner.control.protocol import Start, Resume, Execution
 ```
 
 This is not allowed:
 
-```
-from .proto import (
-    UIPacket,
-    UIPacketEnvelope,
-    UIPacketRunEvent,
-    UIPacketUIReset,
-    UIPacketStatus,
-    UIPacketRunInput,
+```python
+from vectorops.runner.control.protocol import (
+    Start,
+    Resume,
+    Execution,
+    ExecutionList,
 )
 ```
 
 Instead, import a module and reference symbols via the module name or alias.
+
+## Documentation
+
+- Follow `.voc/skills/documentation-standards/SKILL.md`.
+- Write for users and contributors, not as an implementation log.
+- Keep README focused on installation, first use, and documentation links.
+- Use sentence-case headings and do not use em dashes.
 
 ## Shell tools
 - If you need to run python-based tools, always run them via `uv run`.

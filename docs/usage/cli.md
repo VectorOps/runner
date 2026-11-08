@@ -4,9 +4,24 @@ Use `vops-runner` to run workflows, connect to a running daemon, answer requests
 and inspect or export executions. `uv run python -m vectorops.runner` accepts the
 same commands.
 
+Install the runner using the [README](../../README.md#install). Examples using
+`uv run` assume you are in its checkout. Use `--project PATH` to operate on another
+project without changing directories.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Workspace location](#workspace-location)
+- [Start and resume](#start-and-resume)
+- [Connect to a daemon](#connect-to-an-existing-runner)
+- [Send input](#send-input)
+- [Coding agent and helper](#coding-agent-and-helper)
+- [Connected shell](#connected-shell)
+- [Status](#inspect-status-and-statistics) and [exports](#export-jsonl)
+
 ## Quick start
 
-Create `.voc/workflows/example.py` in an existing project directory:
+Create `.voc/workflows/`, then save `.voc/workflows/example.py` in the project:
 
 ```python
 async def workflow(ctx, value: int = 0) -> int:
@@ -210,8 +225,8 @@ model = "openai/gpt-5-nano"
 model = "openai/gpt-5"
 ```
 
-Choose models supported by your provider. See [named LLM profiles](../config/components.md#named-llm-profiles)
-for settings and [daemon setup](daemon.md) for credentials.
+Choose models supported by your provider. See [named LLM profiles](../config/llm.md#named-llm-profiles)
+for settings and [provider authentication](../config/authentication.md) for credentials.
 
 Against a running daemon:
 
@@ -236,8 +251,9 @@ loop:
 uv run vops-runner client --port 8765 execution start builtin:helper --input '{"task":"Locate the parser tests and report relevant paths. Do not change files."}'
 ```
 
-The helper can still request tool approval or authentication. Its read-only role
-is an instruction, not a sandbox: review execution commands before approving them.
+The helper can request tool approval. Configure authentication before starting it;
+missing credentials fail rather than opening an interactive login. Its read-only
+role is an instruction, not a sandbox: review commands before approving them.
 For capability configuration, see [named tool collections](../config/tool-collections.md).
 
 ## Connected shell
@@ -249,6 +265,9 @@ uv run vops-runner client --port 8765 shell
 At the prompt, enter the same commands used after `client --port PORT`, for example
 `workflow list`, `execution list`, or `input list EXECUTION_ID`. Use `help` for
 commands and `exit` to disconnect. Quoting works as in the one-shot examples.
+
+The shell also accepts a leading slash, such as `/help` or `/execution list`.
+One-shot CLI commands do not use that prefix.
 
 There is no implicit selected execution. `execution watch` occupies the shell;
 use another client to answer input while watching. Exiting or disconnecting the

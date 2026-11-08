@@ -1,13 +1,15 @@
 [project]
 name = "vectorops-runner"
 version = "0.1.0"
-description = "VectorOps Runner"
+description = "Durable Python workflows and LLM agents"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "aiohttp>=3.13.4",
     "beautifulsoup4>=4.13,<5",
-    "connect",
+    "connect @ git+https://github.com/vectorops/connect.git@4756d7308f68905a35cb5500d3ba1c3284cbfff5",
     "cryptography>=44.0.0",
     "keyring>=25.0.0",
     "jsonschema>=4.23.0",
@@ -17,7 +19,7 @@ dependencies = [
     "anyio>=4.5",
     "referencing>=0.36",
     "pydantic>=2.12.0",
-    "pypika",
+    "pypika @ git+https://github.com/vectorops/pypika.git@v0.49.4-dev",
     "pathspec>=0.12.1,<2",
     "PyYAML>=6.0.2",
 ]
@@ -25,9 +27,9 @@ dependencies = [
 [project.scripts]
 vops-runner = "vectorops.runner.cli:main"
 
-[tool.uv.sources]
-connect = { path = "../connect", editable = true }
-pypika = { git = "https://github.com/VectorOps/pypika.git", rev = "v0.49.4-dev" }
+[project.urls]
+Repository = "https://github.com/vectorops/runner"
+Documentation = "https://github.com/vectorops/runner/blob/HEAD/docs/index.md"
 
 [build-system]
 requires = ["setuptools>=80"]

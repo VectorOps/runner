@@ -1,6 +1,8 @@
 # MCP servers and workflow tools
 
-Connect workflows to Model Context Protocol (MCP) servers over POSIX stdio or Streamable HTTP. The runner records discovery and results, applies existing tool approval, and owns session cleanup. Completed operations replay without contacting servers or resolving credentials.
+Connect agents and workflows to Model Context Protocol (MCP) servers over local
+stdio or Streamable HTTP. The runner records discovery and results and applies
+tool approval. Completed operations replay without contacting the server again.
 
 ## Contents
 
@@ -35,13 +37,20 @@ approve_all = false
 
 Start a new `builtin:agent` execution through your host or the [runner CLI](../usage/cli.md). Its default collection includes MCP: no collection edits or custom workflow are needed. Without configured servers it adds no MCP tools and opens no MCP connections. The helper's default tools are unchanged.
 
-By default the agent discovers the catalog but exposes only a search tool initially. Matching concrete tools become available on subsequent rounds. With the default approval policy, search and concrete tool calls wait for host confirmation; launching a bare CLI does not supply an approval UI. Inspect pending requests through the [control protocol](../reference/control-protocol.md#workflow-scoped-tool-approval).
+By default, all selected tool schemas are exposed to the agent. Set `mode="dynamic"`
+under `[mcp]` for search-first discovery. Tool calls require approval unless a policy
+grants it. Use the [CLI input commands](../usage/cli.md#send-input) or a connected
+client to answer requests; a foreground workflow has no approval interface.
 
 Discovery opens the configured server and records its tool catalog. An approved call validates its arguments and checks that the remote descriptor still matches the snapshot before invoking the tool.
 
 ## Server configuration
 
-Servers live under `mcp.servers.<name>`. Names contain 1-64 ASCII letters, digits, underscores, or hyphens. Unknown configuration fields are rejected. The legacy `[components.mcp]` form remains supported, but using both root `[mcp]` and `[components.mcp]` in one file is rejected. Root configuration normalizes into the existing `components.mcp` namespace, so management APIs and configuration overrides such as `mcp.mode` continue to address the same settings. `component="other.path"` on discovery APIs selects an alternate component subtree with the same shape.
+Servers live under `mcp.servers.<name>`. Names contain 1-64 ASCII letters, digits,
+underscores, or hyphens. Unknown fields are rejected. Project files accept either
+`[mcp]` or `[components.mcp]`, but not both. User defaults require `[components.mcp]`.
+Both forms address the same component for runtime overrides. Discovery APIs can
+select another subtree with `component="other.path"`.
 
 ### Tool exposure
 
@@ -73,9 +82,15 @@ Server filters bound explicit workflow/collection tool selections too. They do n
 
 All selected schemas are exposed immediately by default. To opt into search-first exposure, set `mode = "dynamic"` under `[mcp]`, as in the example above. Dynamic mode still connects and records catalogs up front; it limits model context, not server startup. If no tools remain after selection, the configured collection exposes no MCP search tool either.
 
-The built-in agent loads its collection once per execution. Start a new execution to apply changes. Dynamic activation starts search-only on each user turn; the catalog remains the recorded snapshot. Existing version-2 agent executions keep their original static collection behavior when resumed. Explicit collection `tools` lists still replace defaults: include `"mcp"` if you customize the agent's list.
+The built-in agent loads its collection once per execution. Start a new execution
+to apply changes. Dynamic activation starts search-only on each user turn; the
+catalog remains the recorded snapshot. Explicit collection lists replace defaults,
+so include `"mcp"` if you customize the agent's tools. Older execution behavior is
+covered in [compatibility notes](../reference/compatibility.md).
 
-For custom workflows, use `tools.load_tool_set(...)` and `LLM.run(tool_set=...)` to honor the mode toggle. The existing `tools.load_collection(...)` API remains static. See [tool collections](tool-collections.md).
+For custom workflows, use `tools.load_tool_set(...)` and `LLM.run(tool_set=...)` to
+honor the mode setting. `tools.load_collection(...)` is always static. See
+[tool collections](tool-collections.md).
 
 MCP uses a validated configuration read: only accepted, normalized settings enter history. Validation failures have payload-free messages. This is not a secret scanner: values in accepted command arguments, paths, names, or descriptions are still recorded. Never put secrets in them.
 
@@ -125,7 +140,7 @@ Header names are case-insensitive for collision checks. Protocol-owned headers (
 
 ### Provisioned API keys
 
-Import an MCP credential using the existing credential command:
+Import an MCP credential:
 
 ```bash
 uv run vops-runner credentials-import < /protected/mcp-credential.json
@@ -170,7 +185,13 @@ profile = "work"
 
 `issuer`, `resource`, `client_id`, and `redirect_uri` are required. `resource` must exactly equal the MCP endpoint URL. `scopes` defaults to an empty list and is normalized to sorted unique tokens; at most 64 tokens are accepted. `profile` defaults to `default` and uses the same 1-64-character profile syntax as API keys. The callback requires loopback HTTP, an explicit nonzero port, and a path. There is no client secret setting.
 
-The runner discovers protected-resource metadata at `/.well-known/oauth-protected-resource` followed by the resource path, and issuer metadata at `/.well-known/oauth-authorization-server` followed by the issuer path. It requires exact resource/issuer matches, an authorized configured issuer, PKCE S256, and authorization/token endpoints on the issuer's origin. Metadata and token redirects are rejected. Challenge-provided metadata URLs do not replace configured trust. Arbitrary query-bearing endpoints and alternative metadata discovery layouts are not supported by this implementation.
+The server must publish protected-resource metadata at
+`/.well-known/oauth-protected-resource` followed by the resource path, and issuer
+metadata at `/.well-known/oauth-authorization-server` followed by the issuer path.
+Resource and issuer must match exactly. PKCE S256 and same-origin authorization/token
+endpoints are required. Metadata and token redirects, query-bearing endpoints, and
+alternative discovery layouts are unsupported. A server challenge cannot replace
+the configured trusted issuer.
 
 Complete login explicitly before starting a workflow:
 
@@ -271,7 +292,11 @@ All server-targeted RPCs accept `server` and optional `component` (default `mcp`
 | `mcp.roots.set` | `mcp_roots(server, roots)` | Updated session status; null roots restores configuration defaults |
 | `mcp.logout` | `mcp_logout(server)` | Delete the selected local token after closing idle pooled connections |
 
-The corresponding owner API is `RunnerService.mcp` (`Management`), with typed `Query`, `RootUpdate`, and result models in `vectorops.runner.mcp.management`. Management is not a recorded workflow API and has no durable idempotency receipts. Repeated connect reuses a session; repeated discovery refreshes it. MCP failures return `mcp_error`, malformed parameters return payload-free `invalid_argument`, and new operations are rejected during shutdown. Oversized catalogs are rejected before control transmission rather than silently truncated.
+Management operations are not recorded workflow activities and have no durable
+idempotency receipts. Repeated connect reuses a session; repeated discovery refreshes
+it. MCP failures return `mcp_error`, malformed parameters return `invalid_argument`,
+and oversized catalogs fail rather than silently truncate. New operations are
+rejected during shutdown.
 
 Logout currently requires **all pool leases** to be released and closes all pooled connections, because profiles can be reused across configurations. It removes the selected OAuth/client-credentials access-token cache, or the selected ordinary Bearer/header API-key profile. It does not delete client-secret references or arbitrary environment/header credential references, revoke tokens remotely, or remove tokens held by another daemon. Cancel pending interactive authentication using existing `auth.cancel` before logout.
 
@@ -338,7 +363,11 @@ async def main(ctx):
 
 The workflow still discovers and records the permitted catalog up front. Only a search tool is initially exposed to the model. Search runs against this local snapshot, not against a live server. Its arguments are `query` (default empty, at most 512 characters) and `limit` (default 5, range 1-20). Search ranks case-insensitive keyword matches in exposed names and descriptions, with tool-name ordering for ties. It returns bounded names/descriptions; concrete schemas appear when activated on the next round.
 
-For richer search, pass `ranking=mcp.Ranking()` to `dynamic`. This opt-in version preserves existing simple-search replay contracts. It scores original remote names, titles, descriptions, and serialized schemas with weights 4, 2, 1, and 0.5 respectively. `min_score` defaults to 0; all weights and thresholds are finite nonnegative values. The search tool additionally accepts exact `source` filtering. Only the already-selected catalog is searched; source filters cannot broaden permissions. Custom ranking values and catalog metadata participate in the discovery identity.
+For richer search, pass `ranking=mcp.Ranking()` to `dynamic`. It scores original
+names, titles, descriptions, and schemas with weights 4, 2, 1, and 0.5 respectively.
+`min_score` defaults to 0; weights and thresholds must be finite and nonnegative.
+The search tool also accepts exact `source` filtering within the selected catalog.
+Changing ranking settings can affect replay identity.
 
 Successful recorded search results advance an immutable tool set only after all calls in that round settle. A newly found tool called in the same round is still unknown. Error or rejected search results do not activate tools; strict round failures and cancellation do not advance the set. Parallel results are applied in model-call order, not completion order.
 
@@ -380,11 +409,19 @@ For common workflow operations, shorter recorded helpers are available: `await m
 
 ## Approval and trust
 
-MCP tools, dynamic search, and prompt/resource tool bindings use the [existing tool policy](components.md#tool-approval). Selection controls what is available, not whether it is approved. Read-only annotations do not auto-approve tools. Workflow-scoped grants match exact exposed names, do not inherit into children, and do not grant search matches merely because search was approved.
+MCP tools, dynamic search, and prompt/resource tool bindings use the
+[tool approval policy](tool-approval.md). Selection controls availability, not
+approval. Read-only annotations do not auto-approve tools. Workflow grants match
+exact names, do not inherit into children, and do not approve search matches just
+because search was approved.
 
 Server launch, metadata access, and catalog discovery run as trusted workflow configuration before tool-call approval. Tool approval is not permission to install or launch an arbitrary server supplied by model arguments. Review workspace configuration and server binaries separately.
 
-Arguments and results enter workflow history, exports, and potentially the model conversation. Do not send secrets as prompt arguments, tool arguments, URI query parameters, or command arguments. Server responses can themselves contain sensitive data; the runner does not redact legitimate tool output before recording it. OAuth credentials and designated secret references are handled separately from saga history.
+Arguments and results enter workflow history, exports, and potentially the model
+conversation. Do not put secrets in prompt arguments, tool arguments, URIs, or
+command arguments. Server responses can contain sensitive data; tool output is not
+automatically redacted. OAuth credentials and designated secret references are
+handled separately from execution history.
 
 ## Replay and lifecycle
 
@@ -425,7 +462,8 @@ The integration uses a pinned MCP SDK and supports the subset described here. It
 
 ## Related
 
-- [Component configuration and tool approval](components.md)
+- [Component configuration](components.md)
+- [Tool approval](tool-approval.md)
 - [Runner secrets and authentication RPCs](authentication.md)
 - [Workflow authoring](../development/workflows.md)
 - [Target environments](../development/target-environments.md)

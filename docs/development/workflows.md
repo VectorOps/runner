@@ -1,7 +1,38 @@
-# Workflow composition
+# Write and compose workflows
 
-Await decorated async functions to execute durable child workflows and receive their final results.
-Use ordinary async helpers when execution should remain inside the caller's workflow scope.
+Write workflows as async Python functions. Use recorded activities for external
+work and decorated child workflows for independent units of orchestration.
+Completed operations replay saved results instead of repeating their effects.
+
+## Start with a function
+
+Save `.voc/workflows/greeting.py` in your project:
+
+```python
+async def main(ctx, name: str = "world") -> str:
+    return f"Hello, {name}!"
+```
+
+From an [installed checkout](../../README.md#install), run:
+
+```bash
+uv run vops-runner start greeting:main --input '{"name":"Ada"}'
+```
+
+The runner injects `ctx`; callers supply only business arguments. Inputs and results
+must be JSON-compatible. Keep filesystem access, network requests, randomness, and
+current time inside [activities](activities.md). Ordinary helpers do not create
+recorded boundaries just because they are async.
+
+## Contents
+
+- [Direct child calls](#direct-child-calls)
+- [References and discovery](#references-and-discovery)
+- [LLM tools](#llm-tools)
+- [Validated workflow choices](#answer-with-a-workflow-choice)
+- [Workflow contracts](#workflow-contracts)
+- [Concurrent children](#concurrent-activities-and-children)
+- [Streaming events](#streaming-step-events)
 
 ## Direct child calls
 
@@ -84,14 +115,14 @@ Import `llm` for conversations and `tools` for tool factories and contracts:
 from vectorops.runner.api import llm, tools
 ```
 
-The `tools` module re-exports the existing implementations; importing it does not
-create environments, register tools, or grant permissions. Pass selected bindings
-explicitly to `LLM.run(tools=[...])`. Existing imports through `api.llm` and the
-individual implementation modules remain supported.
+The `tools` module exposes factories and contracts. Importing it registers built-in
+factories, but does not create resources or grant permissions. Pass selected bindings
+to `LLM.run(tools=[...])`, or load a [named collection](../config/tool-collections.md).
+Configure [model settings](../config/llm.md) and credentials before running LLM code.
 
 | Entry point | Purpose |
 | --- | --- |
-| `tools.apply_patch_tool(service, format="v4a", approval=None)` | Synchronous factory for patch application; accepts `v4a` or `patch` (SEARCH/REPLACE). |
+| `tools.apply_patch_tool(service=None, format="v4a", approval=None)` | Patch binding; defaults to the activity's target. Formats are `v4a` or `patch` (SEARCH/REPLACE). |
 | `await tools.subworkflow_tool(references, name="subworkflow", approval=None)` | Async factory exposing an explicit set of child workflows. |
 | `tools.Tool` | Construct a custom tool from a Pydantic argument model and async callback. |
 | `tools.ToolBinding`, `tools.WorkflowToolBinding` | Contracts for activity-backed and workflow-composed tools. |
@@ -99,19 +130,19 @@ individual implementation modules remain supported.
 | `tools.ToolApproval`, `tools.ToolApprovalResponse` | Approval configuration and response schema. |
 | `tools.invoke_tool` | Invoke a binding through the existing recorded approval/execution machinery. |
 
-Patch tools require a `PatchService` from `vectorops.runner.patch`, constructed
-with an existing target environment. The facade does not own its lifecycle; see
-[target environments](target-environments.md). Given an existing service and
-conversation, select the patch binding explicitly:
+The default patch binding uses the workflow's target. Create it once and reuse it
+within that target; do not share a binding across different target environments:
 
 ```python
 from vectorops.runner.api import llm, tools
-from vectorops.runner.patch import PatchService
 
 
-async def edit(conversation: llm.LLM, service: PatchService):
-    return await conversation.run(tools=[tools.apply_patch_tool(service)])
+async def edit(conversation: llm.LLM):
+    return await conversation.run(tools=[tools.apply_patch_tool()])
 ```
+
+Trusted integrations can explicitly supply `PatchService(root: Path)` from
+`vectorops.runner.patch`. See [local targets and patching](target-environments.md).
 
 ### Subworkflow tools
 
@@ -219,30 +250,65 @@ Refreshing a step snapshot updates its existing entry rather than appending anot
 
 ```python
 import asyncio
+from vectorops.runner.api.composition import workflow
+from vectorops.runner.runner.context import WorkflowExecutionContext
 
 
+@workflow()
+async def child(ctx: WorkflowExecutionContext, text: str) -> str:
+    return text.upper()
+
+
+@workflow()
 async def parent(ctx: WorkflowExecutionContext) -> list[str]:
     return list(await asyncio.gather(child("alpha"), child("beta")))
 ```
 
-Use standard `asyncio.gather`, `create_task`, `wait`, and `TaskGroup` to coordinate activities, streaming activities, and child calls, including mixed calls.
-Child workflows can fan out recursively; the single root workflow per execution does not limit concurrent descendants.
-Requests reserve durable invocation records in submission order, then execute independently without blocking acceptance of other requests.
-Completion updates the invocation record without moving the history head backward.
-Before returning a result or raising a recorded error, the dispatcher appends a `workflow.resume` record referencing the invocation.
-Replay uses these records to deliver results in the original order, so concurrent branches can schedule further work after each await.
-Asyncio owns result aggregation and exception handling, including `gather(..., return_exceptions=True)`.
-Parent shutdown cancels owned activities, children, and pending waits; unfinished invocations remain recoverable in history.
-Cancelling a child-call waiter cancels that wait, not the underlying child; the child remains owned by the parent until parent shutdown.
-There are no custom start or gather helpers; decorated workflow calls are ordinary awaitables.
-Keep external I/O, nondeterministic values, and wall-clock timing inside activities.
-Only engine-managed invocation results have durable delivery ordering; raw asyncio timers, external events, and arbitrary background tasks are not durable workflow primitives.
-Interrupted activities may execute again with the same step identity, so side effects must use implementation-owned idempotency.
+Use decorated children for independently progressing parallel workers. Each child
+owns its history and replay position. A plain helper, even one that creates an LLM,
+stays in the caller's history. Do not rely on ordinary concurrent helper scheduling
+to reproduce subsequent operation order on replay.
 
-One persistent dispatcher owns request acceptance and replay consumption.
-Deferred activities and joins resolve independently, while a session supervisor treats storage and replay failures as fatal rather than catchable operation outcomes.
-History remains streamed during replay, with only active invocations and one lookahead record retained in memory.
-Older records without `deferred_delivery` retain their original immediate-delivery replay behavior; new records set it to `true` for activities and joins.
+Use `asyncio.gather` or `TaskGroup` with decorated child calls. Create children in a
+deterministic input order and avoid shared mutable orchestration state. External
+I/O and wall-clock decisions still belong in activities. Raw timers and unrecorded
+first-completed races are not durable workflow decisions.
+
+For explicit references and recorded completion-order selection:
+
+```python
+async def collect(ctx: WorkflowExecutionContext):
+    handles = [
+        await ctx.spawn_workflow("worker:main", input={"text": text})
+        for text in ["alpha", "beta"]
+    ]
+    results = []
+    while handles:
+        completion = await ctx.next_completed(handles)
+        handles.remove(completion.handle)
+        if completion.outcome.kind == "completed":
+            results.append(completion.outcome.result)
+    return results
+```
+
+This example assumes a `worker:main` workflow accepting `text`. `next_completed`
+records selection by committed completion order and returns failed or cancelled
+outcomes too. Handle those according to your application instead of silently
+treating them as successes. Remove a selected handle before the next call.
+
+`await handle` returns an outcome from one explicitly spawned child;
+`ctx.join_workflows(handles)` joins a batch. Cancelling these observers does not
+cancel their children. Use `ctx.cancel_workflows(handles, reason="...")` and await
+cleanup to cancel them explicitly.
+
+For new workflow instances, cancelling a task that owns a decorated child call
+requests durable child cancellation and waits for cleanup. Older instances without
+`child_cancellation_version=1` retain wait-only cancellation. Cancellation is
+cooperative, cannot undo completed effects, and can be delayed by child code.
+Runner shutdown suspension preserves resumable waits rather than cancelling them.
+
+Version-gate changes that move inline work into children. Recorded result-delivery
+order does not make arbitrary asyncio scheduling or external side effects replay-safe.
 
 ## Streaming step events
 
@@ -260,3 +326,10 @@ Sink exceptions are logged without changing workflow execution; callbacks should
 Workflows await only final results, not progress events.
 Completed replay does not re-emit historical updates.
 There is no subscription queue or progress iterator in the workflow authoring API.
+
+## Related
+
+- [Activity context and idempotency](activities.md)
+- [Configuration reads](configuration.md)
+- [Control protocol](../reference/control-protocol.md)
+- [Saved-execution compatibility](../reference/compatibility.md)

@@ -1,35 +1,39 @@
 # Git worktrees
 
 Use managed worktrees to run workflows against separate Git checkouts without
-changing the workspace's default target. Humans and LLMs use the same workspace
-manager; provenance differs, but permissions and retention rules do not.
+changing the workspace's default target. A checkout separates project files, but
+does not sandbox commands or prevent concurrent writers from editing the same worktree.
 
 ## Create and use a worktree
 
-The configured `environment.base_project_path` must point into a Git repository
-with a commit. Worktree APIs fail if it does not. Worktrees are stored inside the
+The default target, or an explicitly configured `environment.base_project_path`,
+must point into a Git repository with a commit. Git must be installed. Worktrees are stored inside the
 runner's data directory, normally `<project>/.voc/data/worktrees/<uuid>/`, even
 when the configured repository is elsewhere. A custom `data_directory` also
 controls worktree storage. Keep the entire data directory Git-ignored: checkouts,
 locks, logs, and execution state are runtime data, not project source files.
 
-With a connected `RunnerClient`:
+With a [daemon running](daemon.md) on port 8765 and a `review:main` workflow available:
 
 ```python
 from vectorops.runner.control import protocol
+from vectorops.runner.control.client import RunnerClient
 from vectorops.runner.worktrees import models
 
-worktree = await connection.create_worktree(
-    models.CreateRequest(name="Parser cleanup", idempotency_key="parser-cleanup-1")
-)
-execution = await connection.start(
-    protocol.Start(
-        reference="review:main",
-        input={},
-        idempotency_key="parser-review-1",
-        worktree_id=worktree.id,
-    )
-)
+
+async def start_review():
+    async with await RunnerClient.tcp(8765) as connection:
+        worktree = await connection.create_worktree(
+            models.CreateRequest(name="Parser cleanup", idempotency_key="parser-cleanup-1")
+        )
+        return await connection.start(
+            protocol.Start(
+                reference="review:main",
+                input={},
+                idempotency_key="parser-review-1",
+                worktree_id=worktree.id,
+            )
+        )
 ```
 
 The UUID is the stable identity in SQLite, paths, and requests. Names are descriptive
@@ -71,7 +75,7 @@ A raw `base_project_path` inside a registered worktree also acquires that worktr
 usage lease. Selecting a subdirectory preserves that subdirectory as the target;
 the lease protects the whole checkout from deletion.
 
-For child workflows:
+Inside a parent workflow, given a ready worktree UUID:
 
 ```python
 handle = await ctx.spawn_workflow("review:main", worktree_id=worktree_id)
@@ -170,13 +174,6 @@ recorded status. Paused bindings are checked even after restart when their tasks
 are unloaded. Cancellation uses the existing root-execution scope: stopping an
 execution using a worktree through a child also stops its other children.
 
-Execution history is authoritative. A rebuildable workspace index scopes deletion
-checks to executions referencing the requested worktree; their current status and
-references are rechecked in history before cancellation. Runtime worktree references
-are recorded before using files or starting processes and survive checkpoint writes
-and branching. Older process-only associations whose leases have already been
-released cannot be reconstructed from tool-call digests.
-
 Deletion blocks new attachments and execution activation while checking users and
 waiting for cleanup. Resuming an unfinished execution path requires its historical
 worktrees to remain ready. Replaying an already-completed root can still reuse
@@ -192,18 +189,14 @@ processes without a runner-owned execution cannot be cancelled by this API;
 operators must coordinate them separately. Low-level manager calls without an
 execution-control capability continue to reject live leases even with `force`.
 
-Git and SQLite are not one transaction. The manager reserves `creating`/`deleting`
-state before effects. Retrying an interrupted operation reconciles the same UUID
-and path rather than allocating another checkout. Unregistered directories are
-never recursively deleted as a fallback.
+Git changes and database updates are not one transaction. Retry an interrupted
+operation with the same identity so the runner can reconcile it rather than create
+another checkout. Unregistered directories are not recursively deleted as a fallback.
 
-Usage leases combine SQLite records with OS file locks. They protect physical
-attachments and cleanup, not logical workflow ownership: an abandoned lease does
-not make a completed execution active. After a crash or unconfirmed
-process cleanup, an abandoned lease blocks normal deletion. Inspect and stop any
-orphaned processes before using force to acknowledge that lease. The harness does
-not recover process handles after a crash. Worktree creation does not implement
-filesystem snapshots, automatic merges, cherry-picks, or branch deletion.
+After a crash or unconfirmed cleanup, an abandoned usage lease can block normal
+deletion. Inspect and stop orphaned processes before using force. Process handles
+are not recovered after a crash. Worktrees do not provide filesystem snapshots,
+automatic merges, cherry-picks, or branch deletion.
 
 ## Related
 

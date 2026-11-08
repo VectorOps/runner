@@ -2,6 +2,19 @@
 
 The host controls one workspace runner through authenticated JSON packets. A runner owns multiple concurrent top-level executions, each with its own history and resources; children run within their root execution. One daemon retains exclusive workspace writer ownership. Workflow code remains on the runner's filesystem.
 
+Use this reference when building a client or integration. For terminal usage, start
+with the [CLI guide](../usage/cli.md) and [daemon setup](../usage/daemon.md).
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Framing and authentication](#framing-and-authentication)
+- [Packet families](#packet-families)
+- [Methods](#methods)
+- [History and live reconciliation](#history-and-live-reconciliation)
+- [Tool approval](#workflow-scoped-tool-approval)
+- [Conversation inboxes and steering](#conversation-inboxes-and-llm-steering)
+
 ## Quick start
 
 ```python
@@ -52,9 +65,10 @@ The default token is generated once using 32 random bytes and reused across rest
 
 The token is transmitted to the endpoint. Bearer authentication does not independently authenticate the runner, prevent replay of a stolen token, encrypt traffic, or sandbox workflow code. Trust the harness-provided local endpoint or a host-key-verified SSH tunnel. Loopback TCP assumes a trusted local machine; privileged local processes and compromised same-user processes are outside this security boundary. Direct remote connections would require TLS and are not supported.
 
-### Migration from the initial handshake
-
-Version 2 replaces version 1's HMAC hello/challenge exchange. Old handshake packets are rejected; update clients and daemons together. Pass a text token to `RunnerClient.tcp(port, token)` or `RunnerClient.connect(stream, token)` instead of secret bytes, or omit the TCP token for local global-config lookup. Existing `~/.vectorops-runner/` files are ignored. New global secrets live in `~/.config/vops-runner`; endpoint discovery still uses daemon readiness output. Operational request/event shapes are unchanged.
+Pass a text token to `RunnerClient.tcp(port, token)` or
+`RunnerClient.connect(stream, token)`, or omit the TCP token for local global-config
+lookup. See [compatibility](compatibility.md#storage-and-control-clients) when
+upgrading clients using the earlier handshake.
 
 ## Packet families
 
@@ -108,7 +122,12 @@ Error codes include `invalid_argument`, `not_found`, `runner_busy`, `execution_c
 | `configuration.reset` | String `name` | Null acknowledgment after removing overlapping overrides |
 | `configuration.suggest` | String `name`, optional string `prefix` (default empty) | Advisory `values` array |
 
-There is no static workflow catalog. `reference` is an explicit `path:callable` relative to the configured workflows directory, without `.py`, or `python:package.module:callable` for an importable library workflow. Paths must remain inside the workflows directory after symlink resolution. The callable must be an async workflow entry point. Resolution failures reject the request before acceptance; execution failures are reported through lifecycle events. The former `file` and `callable` fields are rejected. Discovery imports trusted Python code and is not a sandbox.
+Workflow references are `path:callable` relative to the workflows directory,
+`python:package.module:callable` for library workflows, or registered built-ins such
+as `builtin:agent`. Local references omit `.py` and must remain inside the workflows
+directory after symlink resolution. The callable must be async. Resolution failures
+reject the request before acceptance; execution failures arrive as lifecycle events.
+Discovery imports trusted Python code and is not a sandbox.
 
 `workflows.list` dynamically scans Python files under the configured workflows
 directory and returns only locally defined `@workflow` bindings. Hidden paths and
@@ -254,7 +273,7 @@ null returns `exists: true`. Snapshots contain raw effective values, not resolve
 consumer settings or built-in LLM profiles. Arrays are whole values, not indexed.
 
 ```json
-{"kind":"request","id":"config-1","method":"configuration.set","params":{"name":"components.llm.model","value":"o3","permanent":true}}
+{"kind":"request","id":"config-1","method":"configuration.set","params":{"name":"components.llm.model","value":"openai/o3","permanent":true}}
 ```
 
 Only `components` and descendants are editable. Root writes/resets and startup
@@ -301,7 +320,12 @@ async def manage(host):
 
 Shutdown rejects new start/resume requests. Cancel mode stops all roots, but suspends each execution waiting for mailbox input instead of cancelling its durable wait. Explicit stops remain cancellations. Drain mode waits for every active execution and continues accepting input responses and connections; it can wait indefinitely for mailbox input, but never for login. Shutdown waits for owned cleanup before releasing workspace ownership.
 
-Workspace `runner-state.json` retains `last_execution_id` and adds `active_execution_ids`. Updates are serialized; legacy manifests default to an empty active list. Per-execution databases remain authoritative for status and recovery heads. Startup reconciles the manifest with retained histories and recovers every record still marked `running`, including histories missed by a crash during manifest publication. Completed, failed, and cancelled histories do not auto-resume. Runtime process sessions are not restored.
+Workspace `data/workspace.sqlite3` stores the last and active execution IDs,
+configuration overrides, request receipts, and discovery state. Execution databases
+remain authoritative for status and recovery heads. Startup reconciles workspace
+state with retained histories and recovers executions still marked `running`.
+Completed, failed, and cancelled histories do not auto-resume. Runtime process
+sessions are not restored.
 
 Independent roots can target the same source directory. This does not serialize their file edits or isolate their working trees; use separate Git worktrees when filesystem isolation is required.
 
@@ -437,7 +461,7 @@ grant. Ordinary mailbox inputs and legacy binding-local approval do not create
 workflow grants. Ordinary tools keep their gate and implementation in one activity;
 workflow-side tools record a gate activity before durable child operations.
 
-See [Tool approval configuration](../config/components.md#tool-approval) for
+See [Tool approval configuration](../config/tool-approval.md) for
 workspace defaults, extension points, and history compatibility.
 
 ## Conversation inboxes and LLM steering

@@ -1,6 +1,8 @@
 # Run and connect to a daemon
 
-Run a workspace daemon with persistent runner-owned authentication. The host needs its loopback endpoint and bearer token, directly or through an SSH tunnel.
+Use a daemon for interactive agents or concurrent executions. Local clients reuse
+the runner's control token automatically; remote clients connect through an SSH tunnel.
+Install the runner first using the [README](../../README.md#install).
 
 ## Start and inspect
 
@@ -26,11 +28,16 @@ The runner creates and reuses a persistent control token in its [global configur
 
 `status` authenticates and prints the endpoint, runner information, and an `active` execution page as JSON. The compatibility `current` field contains the sole active execution, or null when there are zero or multiple executions. `connect` prints runner information, an active-execution page, and then live events as JSONL; it does not backfill history. These pages include `next_after` for continuation through `executions.active`. It is an observational CLI attachment, not an interactive command shell or stdio relay.
 
-`stop --mode cancel` requests cancellation and shutdown of all executions, preserving executions waiting for mailbox input or authentication for restart. `stop --mode drain` waits for all active executions to finish and allows hosts to reconnect and answer pending requests. The command acknowledges the request; it does not wait for daemon exit. Closing a host connection leaves the daemon and workflows running.
+`stop --mode cancel` requests shutdown of all executions, preserving executions
+waiting for mailbox input for restart and cancelling other active work. Authentication
+is separate and never suspends a workflow. `stop --mode drain` waits for active
+executions to finish and allows clients to reconnect and answer pending requests.
+The command acknowledges the request; it does not wait for daemon exit. Closing a
+client connection leaves the daemon and workflows running.
 
 Use one daemon for multiple independent agents sharing a workspace. Start, inspect, stop, and resume each by execution ID through the [control API](../reference/control-protocol.md#concurrent-execution-lifecycle). Each root has separate history and environment resources. The exclusive workspace writer lock protects persistence; it does not limit the daemon to one execution or prevent concurrent edits to a shared source directory.
 
-## Provision from a Python harness
+## Start a daemon from Python
 
 For an isolated per-process override, generate a token from 32 random bytes and pass it over the child's stdin pipe. Normal startup needs no override. Do not put tokens in environment variables, arguments, or logs.
 
@@ -96,4 +103,4 @@ Tunnel failure disconnects the client but leaves execution running. Reconnect, s
 
 - [Provider authentication and global secrets](../config/authentication.md)
 - [Control protocol and Python client](../reference/control-protocol.md)
-- [Existing local CLI](cli.md)
+- [CLI and connected shell](cli.md)

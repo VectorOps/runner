@@ -122,7 +122,7 @@ async def discover_skills(
             return Skill.from_document(display_path, stream.read(SKILL_BYTES))
 
     root = await asyncio.to_thread(root.resolve)
-    sources = [".vocode/skills", *directories]
+    sources = [".voc/skills", *directories]
     if include_builtin:
         sources.append(str(BUNDLED_SKILLS))
     catalog = SkillCatalog()

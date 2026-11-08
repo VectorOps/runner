@@ -1,85 +1,24 @@
-# Tool registration and named collections
+# Tool registration and collections
 
-Named collections select and configure tools independently of workflow code.
-Use `load_tool_set` with `LLM.run(tool_set=...)` for static and dynamic tools, or
-`load_collection` with `LLM.run(tools=...)` for static bindings only.
-
-The default agent already includes MCP. Configure servers under root
-`[mcp.servers.<name>]`; no collection edits are needed. MCP defaults to static
-exposure of all selected schemas; set `mcp.mode = "dynamic"` for search-first discovery.
-An empty server configuration adds no tools. See [MCP configuration](mcp.md).
-
-New agent executions also include `web_fetch` for ordinary HTTP retrieval and prefer
-it over shelling out to `curl`. Requests originate on the runner host, not the target.
-Saved agent executions from before version 4 keep their previous tool defaults on
-resume; start a new execution to pick up `web_fetch`. The helper's defaults are unchanged.
-
-### Fetch pages and continue reading
-
-`web_fetch` follows up to 10 HTTP redirects by default and converts HTML to Markdown
-with headings, links, code blocks, lists, and tables. It prefers `main` or `article`
-content and removes navigation, sidebars, footers, scripts, styles, and elements
-marked `hidden` or `aria-hidden="true"`. This is HTML parsing, not browser rendering; JavaScript-only content
-is not loaded. Plain text, including Markdown and JSON responses, is not converted.
-
-```json
-{"url": "https://example.com/docs", "max_bytes": 32000}
-```
-
-`max_bytes` limits returned content **after conversion**, before base64 encoding for
-binary content. It defaults to 65,536 bytes and accepts 1–1,048,576 bytes. A separate
-16 MiB decompressed download limit rejects oversized responses rather than silently
-converting partial HTML. The timeout defaults to 30 seconds (maximum 120) and covers
-the entire redirect chain, download, and conversion wait.
-
-To continue, pass the previous result's `next_offset` as `offset`, keeping the URL,
-format, headers, and selection options unchanged:
-
-```json
-{"url": "https://example.com/docs", "max_bytes": 32000, "offset": 32000}
-```
-
-The example assumes the first result's `next_offset` is 32000. Always use the actual
-value: UTF-8 output can end slightly before the requested limit to avoid splitting a
-character. Arbitrary offsets inside a UTF-8 character fail; a limit too small to fit
-the next character also fails. Offsets beyond the end return empty content with `eof: true`.
-
-Each call performs a fresh request, not a cached read or an HTTP Range request.
-Compare `content_sha256` across ranges; if it changes, discard the combined result
-and restart. Repeating a non-GET request also repeats its method and body, so do not
-blindly paginate requests with side effects.
-
-| Argument | Default | Meaning |
-| --- | --- | --- |
-| `offset` | `0` | Byte offset in the complete converted UTF-8 text or original binary content |
-| `format` | `"markdown"` | HTML output: `"markdown"`, `"text"`, or `"raw"`; other text is unchanged |
-| `main_content_only` | `true` | Select main/article content and remove navigation; `false` disables those two steps; ignored for raw HTML |
-| `follow_redirects` | `true` | Follow up to 10 redirects; `false` returns the redirect response and `location` |
-
-Results retain `status`, original `content_type`, and `bytes_read` (downloaded,
-decompressed bytes). `content_format` identifies the output representation.
-`output_bytes` counts bytes in this range, `total_bytes` counts the complete
-representation, and `offset`/`next_offset` delimit the returned range. `truncated`
-means more content follows; `eof` is its inverse. `content_sha256` hashes the complete
-representation, not just this range. `url` is the final URL; `requested_url` and
-`redirects` describe how it was reached. Complete supported images return image
-blocks; partial images and other binary formats return base64, without text extraction.
-
-Approval covers the redirect chain. HTTPS-to-HTTP redirects and cross-origin
-redirects that would forward a request body fail. On cross-origin redirects, caller
-headers are dropped except `Accept`, `Accept-Language`, and `User-Agent`; cookies
-from responses are not retained. Standard HTTP redirect method rules apply: 303
-changes non-HEAD requests to GET, 301/302 change POST to GET, and 307/308 preserve
-method and body. Redirects can reach private addresses on the runner host's network;
-this tool is not a network sandbox. HTTP statuses of 400 or higher set `is_error`.
-
-This is tool version 2. Earlier calls limited raw response bytes, returned plain
-text for HTML, and did not follow redirects. Completed calls still replay their
-recorded results without network access; new calls use the updated behavior.
+Named collections select tools independently of workflow code. Use them to give
+an agent the capabilities it needs without changing its implementation. Selecting
+a tool does not approve its execution; see [tool approval](tool-approval.md).
 
 ## Configure a collection
 
-In the runner workspace's `config.toml`:
+To remove process execution from the built-in helper, add this to `config.toml`:
+
+```toml
+[components.tools.collections.helper]
+tools = ["read_file", "list_files"]
+```
+
+The helper normally includes `read_file`, `list_files`, `exec`, and `poll_process`.
+The agent also includes stdin/process controls, patching, planning, delegation,
+MCP, and [web fetching](../usage/web-fetch.md). Worktree management tools are opt-in.
+Start a new execution to pick up collection changes.
+
+To create a named collection with an MCP entry:
 
 ```toml
 [components.tools.collections.research]
@@ -93,77 +32,61 @@ selections = [{ server = "repository", tools = ["search", "read_file"] }]
 tool_collection = "research"
 ```
 
-Configure the `repository` server separately under
-`mcp.servers.repository`; see [MCP configuration](mcp.md).
-Collection keys are independent of workflow names. The agent defaults to collection
-`agent`; the helper defaults to `helper`. Their code supplies default collections,
-so existing installations need no new configuration.
-
-`repository` above is a collection-entry name, not an exposed tool name. Its
-`factory` chooses the registered implementation. Without `factory`, an entry uses
-the registration with the same name. MCP retains its existing namespaced tool names.
+Configure `mcp.servers.repository` separately using the [MCP guide](mcp.md).
+`repository` is a collection-entry name; its `factory` selects the registered
+implementation. Without `factory`, the entry uses the registration of the same name.
 
 ## Defaults and overrides
 
-- A missing collection uses its caller-supplied default. Without a default it fails.
-- Omitting `tools` retains the default list. An explicit list replaces it, including `[]`.
-- `config.<entry>` overlays the selected default entry's options by top-level field.
-  Nested objects and lists replace, rather than merge recursively.
-- Changing an entry's `factory` discards that entry's inherited options.
-- Options for explicitly unselected entries, duplicate entries, unknown factories,
-  invalid factory options, and duplicate exposed tool names fail.
-- Entry names are Python identifiers. Collection keys use letters, digits,
+- A missing collection uses its caller-supplied default, or fails if none exists.
+- Omitting `tools` keeps the default list. An explicit list replaces it, including `[]`.
+- `config.<entry>` overlays default options by top-level field. Nested objects and
+  lists replace, rather than recursively merge.
+- Changing `factory` discards inherited options for that entry.
+- Duplicate entries, unknown factories, invalid options, unselected-entry options,
+  and duplicate exposed tool names fail.
+- Entry names are Python identifiers. Collection names use letters, digits,
   underscores, and hyphens, beginning with a letter or underscore.
 
-For example, retain the agent's default tools but change patch format:
+Keep the agent's tools but change patch format:
 
 ```toml
 [components.tools.collections.agent.config.apply_patch]
 format = "patch"
 ```
 
-Replace the helper's tools to remove process execution:
-
-```toml
-[components.tools.collections.helper]
-tools = ["read_file", "list_files"]
-```
-
-Configure delegation through the collection:
+Configure delegation:
 
 ```toml
 [components.tools.collections.agent.config.run_agent]
 references = ["builtin:helper", "research:main"]
 ```
 
-The existing `components.workflows.agent.agents` remains the source of default
-`run_agent` references; explicit collection options take precedence. Setting
-`agents = []` removes delegation from the default collection, not from an explicitly
-configured replacement. Parent and helper collections are independent.
+`components.workflows.agent.agents` supplies default delegation references;
+explicit collection options take precedence. Setting `agents=[]` removes delegation
+from the default collection, not an explicitly configured replacement. Parent and
+helper collections are independent.
 
 ## Registered factories
 
-Importing `vectorops.runner.api.tools` imports internal implementations and runs
-their registration decorators. It does not create bindings, launch processes, or
-contact MCP servers. `list_files_tool` is exported through this shared facade;
-the old workflow-module import forwards to the same factory.
-
-| Factory names | Configuration |
+| Factory | Options |
 | --- | --- |
-| `read_file`, `list_files`, `exec`, `poll_process`, `write_stdin`, `kill_process`, `list_processes`, `update_plan`, `web_fetch` | No options |
-| `apply_patch` | `format`: `v4a` (default) or `patch` |
-| `run_agent`, `subworkflow` | Required, nonempty, unique `references` list |
-| `mcp` | Optional `selections` list; omitted selects all enabled configured servers, `[]` selects none. Optional `component`, default `mcp` |
+| `read_file`, `list_files`, `exec`, `poll_process`, `write_stdin`, `kill_process`, `list_processes` | None |
+| `update_plan`, `web_fetch` | None |
+| `worktree_create`, `worktree_list`, `worktree_delete` | None; see [worktrees](../usage/worktrees.md) |
+| `apply_patch` | `format`: `v4a` (default) or `patch` (SEARCH/REPLACE) |
+| `run_agent`, `subworkflow` | Required nonempty, unique `references` list |
+| `mcp` | Optional `selections`; omission selects enabled servers, `[]` selects none. Optional `component`, default `mcp` |
 
-Selection never grants approval. All bindings retain normal approval handling under
-`components.tools.approval`. Collection configuration cannot install auto-approval
-rules. Do not put secrets in factory options: configuration is recorded in history.
-Use the owning subsystem's credential references instead.
+Do not put secrets in options: configuration is recorded in history. Importing
+`vectorops.runner.api.tools` registers its built-in factories but does not create
+bindings, grant permissions, launch processes, or contact servers.
 
 ## Load tools in a workflow
 
 ```python
 from vectorops.runner.api import llm, tools
+
 
 async def main(ctx, task: str):
     bindings = await tools.load_collection(
@@ -174,46 +97,39 @@ async def main(ctx, task: str):
     )
     conversation = llm.LLM("research")
     conversation.add_user_message(task)
-    response = await conversation.run(tools=bindings)
-    return response.model_dump(mode="json")
+    return (await conversation.run(tools=bindings)).model_dump(mode="json")
 ```
 
-Load once per conversation and reuse the bindings across turns. Each load constructs
-fresh bindings; plans and other mutable tool state are never shared globally.
-Selected configuration and module names use recorded configuration reads. Factories
-run again during replay to reconstruct bindings; MCP and subworkflow factories use
-their existing recorded discovery operations. Custom factories must do the same for
-external I/O. Do not wrap collection loading in an activity that would skip binding
-construction during replay. Changed workflow code/defaults must remain replay-compatible.
+Load once per conversation and reuse the bindings. Each load constructs fresh state,
+so plans are not shared globally. Factories run again during replay to rebuild
+bindings; external discovery must use recorded activities. Do not wrap collection
+loading in an activity that would skip reconstruction on replay.
 
-`load_collection` retains its static behavior, even when MCP mode is dynamic.
-Use the dynamic-aware loader to honor `[mcp].mode` and `[mcp].max_active`:
+`load_collection` always selects static bindings. To honor MCP dynamic mode, use
+`selected = await tools.load_tool_set("research")`, then
+`await conversation.run(tool_set=selected)`. Static tools remain available each round;
+dynamic tools activate from completed search results. Each `run` starts from the
+original activation state.
 
-```python
-selected = await tools.load_tool_set("research")
-response = await conversation.run(tool_set=selected)
-```
+## Register a custom tool
 
-Ordinary tools remain available every round; dynamic factories advance from
-completed tool results. Each `LLM.run` begins with the original activation state.
-Direct `mcp.dynamic(...)` remains available for explicit workflow-controlled catalogs.
-
-## Register custom tools
-
-Install an importable Python module, such as `my_project.tools`, in the runner's
-environment. Use the decorator on a factory:
+Install an importable module such as `my_project.tools` in the runner environment:
 
 ```python
 import connect
 import pydantic
+
 from vectorops.runner.api import tools
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+
 
 class EchoConfig(tools.ToolConfig):
     prefix: str = "Echo"
 
+
 class EchoArguments(pydantic.BaseModel):
     text: str
+
 
 @tools.register_tool("project_echo", config=EchoConfig)
 def create_echo(config: EchoConfig) -> tools.ToolBinding:
@@ -227,7 +143,7 @@ def create_echo(config: EchoConfig) -> tools.ToolBinding:
     return tools.Tool("project_echo", "Echo text", EchoArguments, invoke)
 ```
 
-Enable the module and select the tool:
+Enable and select it:
 
 ```toml
 [components.tools]
@@ -240,26 +156,22 @@ tools = ["project_echo"]
 prefix = "Result"
 ```
 
-Factories can be sync or async and return one binding or a sequence. With a `config`
-model they receive one validated model argument; without one they are called with no
-arguments and reject configuration options. Tool-call arguments remain separate from
-factory configuration. The decorator preserves the original callable and rejects
-duplicate registrations rather than replacing existing definitions.
+Factories can be sync or async and return a binding or sequence. A configured
+factory receives one validated model; a factory without a config model takes no
+arguments and rejects options. Duplicate registration fails. Tool-call arguments
+are separate from factory settings.
 
-An optional `tool_set=` factory on `register_tool` supplies a `ToolSet` to
-`load_tool_set`; it accepts the same configuration argument as the static factory
-and may be sync or async. Without one, the loader wraps ordinary bindings as a
-static set. `load_collection` always uses the original static factory. Dynamic
-factories own their binding authorization metadata and cannot be combined with
-the decorator's `auth_context` option.
+An optional `tool_set=` factory on `register_tool` supplies a dynamic `ToolSet` to
+`load_tool_set`. Without it, the loader wraps static bindings. Dynamic factories
+own authorization metadata and cannot combine with the decorator's `auth_context`.
 
-Imports execute trusted Python code and are not sandboxed. List the defining module
-of each custom factory in `modules`; loading it in another workspace does not make
-it selectable here. Python caches imported modules; restart the runner to pick up
-module edits. Modules should register definitions only, without import-time resource
-initialization. Only selected factories are invoked.
+Imports execute trusted Python. List each custom factory's defining module in
+`modules`; another workspace's imports do not make it selectable here. Restart to
+reload module edits. Keep imports free of resource initialization and external I/O.
 
 ## Related
 
-- [Built-in workflows and CLI](../usage/cli.md#coding-agent-and-helper)
-- [MCP configuration](mcp.md)
+- [Agent and helper usage](../usage/cli.md#coding-agent-and-helper)
+- [MCP setup and dynamic discovery](mcp.md)
+- [Tool approval](tool-approval.md)
+- [Compatibility](../reference/compatibility.md)

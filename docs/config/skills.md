@@ -4,7 +4,7 @@ Skills are on-demand Markdown instructions advertised to the built-in agent and 
 
 ## Quick start
 
-Create `.vocode/skills/review/SKILL.md` under the attached target project:
+Create `.voc/skills/review/SKILL.md` under the attached target project:
 
 ```markdown
 ---
@@ -25,7 +25,7 @@ Configure extra skill roots in the runner workspace's `config.toml`:
 
 ```toml
 [components.skills]
-directories = ["~/.vocode/skills", "/opt/team/skills", "../shared-skills"]
+directories = ["~/.voc/skills", "/opt/team/skills", "../shared-skills"]
 include_builtin = true
 ```
 
@@ -35,11 +35,15 @@ Each root contains direct child directories with a `SKILL.md`. Relative roots re
 
 Discovery uses this precedence, with the first valid skill for each frontmatter `name` winning:
 
-1. Target project `.vocode/skills`.
+1. Target project `.voc/skills`.
 2. Configured `directories`, in declaration order.
 3. Runner-provided skills installed with the package.
 
 Within a source, directories are selected in filename order. Invalid skills do not shadow valid lower-priority skills. Paths inside the target are target-relative; external skills use absolute paths readable by the normal file tools. Discovery does not grant tool permissions or bypass approval. Treat skills as instructions from their source, not as permission to expand a task.
+
+The project skill directory is always relative to the target project. Changing
+the runner's `--workspace-directory` does not relocate it. For older projects,
+move skills to `.voc/skills`; see [compatibility notes](../reference/compatibility.md#project-skills).
 
 ## Limits and replay
 

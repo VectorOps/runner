@@ -52,8 +52,8 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     (target / "AGENTS.md").write_text("Use focused tests and preserve user edits.")
-    (target / ".vocode/skills/review").mkdir(parents=True)
-    skill_path = target / ".vocode/skills/review/SKILL.md"
+    (target / ".voc/skills/review").mkdir(parents=True)
+    skill_path = target / ".voc/skills/review/SKILL.md"
     skill_path.write_text(
         "---\nname: review\ndescription: Review code for correctness.\n---\n"
         "Review carefully."
@@ -94,7 +94,7 @@ async def test_helper_context_tools_and_replay(tmp_path: Path) -> None:
         assert "Use focused tests" in prompt
         assert (
             "- review: Review code for correctness. "
-            "(file: .vocode/skills/review/SKILL.md)" in prompt
+            "(file: .voc/skills/review/SKILL.md)" in prompt
         )
         assert "read its SKILL.md" in prompt
         assert "Review carefully." not in prompt

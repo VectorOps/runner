@@ -1,7 +1,8 @@
 # Usage accounting
 
 Usage statistics expose recorded LLM token counts and estimated USD cost independently of the displayed conversation.
-Use the control client to read durable workspace counters or reset their baseline.
+Use a connected `RunnerClient` to read durable workspace counters or reset their
+baseline. See [client setup](control-protocol.md#quick-start).
 
 ```python
 totals = await client.runner_usage()
@@ -20,7 +21,7 @@ reset = await client.reset_runner_usage()
 | `executions.summary` | `execution_id` | Execution summary, including optional `usage` |
 
 Execution summary lists expose the same usage contract. Starting summaries can have `usage: null`.
-Usage fields retain their existing names and types. Totals remain numeric and start at zero.
+Token and call totals start at zero; cost uses the decimal-string format below.
 
 ## Scopes
 
@@ -32,7 +33,7 @@ Usage fields retain their existing names and types. Totals remain numeric and st
 
 ## Current context size
 
-`root_context.input_tokens_estimate` retains its existing wire name but contains
+Despite its historical name, `root_context.input_tokens_estimate` contains
 finalized provider input usage, including cache-read and cache-write tokens.
 `input_tokens_source` is `provider_usage`; `output_tokens_estimate` contains the
 measured output of that request. `step_id` identifies the measurement. Before the
@@ -56,7 +57,7 @@ unrecorded retry attempts. Finalization clears the corresponding pending coverag
 `estimated_calls` remains available for previously stored estimated contributions;
 new contributions do not count estimates.
 `input_tokens` is uncached input. `cache_read_tokens` and `cache_write_tokens` are
-separate; sum these three existing fields when a cache-inclusive total is needed.
+separate; sum these three fields when a cache-inclusive total is needed.
 Reasoning tokens are reported separately and must not be added again to output.
 Earlier retry attempt usage is not retained in the step snapshot. These totals are not a billing ledger.
 
@@ -74,3 +75,5 @@ can therefore still include estimates recorded by earlier versions.
 ## Related
 
 - [Control protocol](control-protocol.md)
+- [Per-step LLM metrics](llm-metrics.md)
+- [Compaction](../config/compaction.md)

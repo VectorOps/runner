@@ -18,7 +18,7 @@ async def target(tmp_path: Path) -> Path:
 
 
 def write_skill(tmp_path: Path, directory: str, content: str) -> Path:
-    path = tmp_path / ".vocode" / "skills" / directory / "SKILL.md"
+    path = tmp_path / ".voc" / "skills" / directory / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
@@ -96,12 +96,12 @@ async def test_discovery_skips_invalid_and_sorts(
     write_skill(tmp_path, "broken", "---\nname: [\n---")
     write_skill(tmp_path, "missing", document("missing")).unlink()
     write_skill(tmp_path, "binary", document("binary")).write_bytes(b"---\n\xff\n---")
-    (tmp_path / ".vocode/skills/not-a-directory").write_text(document("ignored"))
+    (tmp_path / ".voc/skills/not-a-directory").write_text(document("ignored"))
     catalog = await skills.discover_skills(target, include_builtin=False)
     assert [skill.name for skill in catalog.skills] == ["first", "last"]
     assert [skill.path for skill in catalog.skills] == [
-        ".vocode/skills/a-first/SKILL.md",
-        ".vocode/skills/z-last/SKILL.md",
+        ".voc/skills/a-first/SKILL.md",
+        ".voc/skills/z-last/SKILL.md",
     ]
     assert not catalog.truncated
     assert caplog.text.count("Ignoring skill at") == 3
@@ -109,7 +109,7 @@ async def test_discovery_skips_invalid_and_sorts(
 
 async def test_absent_and_empty_catalog(tmp_path: Path, target: Path) -> None:
     assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
-    (tmp_path / ".vocode/skills").mkdir(parents=True)
+    (tmp_path / ".voc/skills").mkdir(parents=True)
     assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
     write_skill(tmp_path, "invalid", "Not a skill")
     assert (await skills.discover_skills(target, include_builtin=False)).render() == ""
@@ -182,10 +182,10 @@ async def test_external_sources_and_precedence(
     shared = write_skill(external, "shared", document("shared", "External."))
     write_skill(bundled, "shared", document("shared", "Bundled."))
     builtin = write_skill(bundled, "builtin", document("builtin"))
-    monkeypatch.setattr(skills, "BUNDLED_SKILLS", bundled / ".vocode/skills")
+    monkeypatch.setattr(skills, "BUNDLED_SKILLS", bundled / ".voc/skills")
     catalog = await skills.discover_skills(
         target,
-        ["../missing", "../external/.vocode/skills", str(external / ".vocode/skills")],
+        ["../missing", "../external/.voc/skills", str(external / ".voc/skills")],
     )
     assert [(s.name, s.path) for s in catalog.skills] == [
         ("review", str(local.relative_to(target))),
@@ -207,7 +207,7 @@ async def test_home_relative_source(
     target = tmp_path / "target"
     target.mkdir()
     catalog = await skills.discover_skills(
-        target, ["~/.vocode/skills"], include_builtin=False
+        target, ["~/.voc/skills"], include_builtin=False
     )
     assert [skill.path for skill in catalog.skills] == [str(path)]
 
@@ -216,7 +216,7 @@ async def test_home_relative_source(
 async def test_external_symlink(tmp_path: Path, link_root: bool) -> None:
     target = tmp_path / "target"
     external = write_skill(tmp_path / "external", "shared", document("shared"))
-    local = target / ".vocode/skills"
+    local = target / ".voc/skills"
     link = local if link_root else local / "shared"
     link.parent.mkdir(parents=True)
     link.symlink_to(
@@ -233,7 +233,7 @@ async def test_sources_share_catalog_limit(tmp_path: Path) -> None:
         write_skill(target, f"s-{index:02}", document(f"s-{index:02}"))
     external = tmp_path / "external"
     write_skill(external, "shared", document("shared"))
-    catalog = await skills.discover_skills(target, [str(external / ".vocode/skills")])
+    catalog = await skills.discover_skills(target, [str(external / ".voc/skills")])
     assert [skill.name for skill in catalog.skills] == [
         f"s-{index:02}" for index in range(skills.SKILL_LIMIT)
     ]
@@ -250,6 +250,23 @@ async def test_builtin_skill_is_available_without_project_skills(
     assert Path(skill.path).is_absolute()
     assert Path(skill.path).is_file()
     assert not Path(skill.path).is_relative_to(tmp_path)
+
+
+async def test_legacy_skill_directory_requires_explicit_configuration(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / ".vocode/skills/legacy/SKILL.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(document("legacy"))
+    current = write_skill(tmp_path, "review", document("review"))
+    catalog = await skills.discover_skills(tmp_path, include_builtin=False)
+    assert [skill.path for skill in catalog.skills] == [
+        str(current.relative_to(tmp_path))
+    ]
+    configured = await skills.discover_skills(
+        tmp_path, [".vocode/skills"], include_builtin=False
+    )
+    assert [skill.name for skill in configured.skills] == ["review", "legacy"]
 
 
 async def test_invalid_project_skill_does_not_shadow_builtin(tmp_path: Path) -> None:

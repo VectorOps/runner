@@ -188,21 +188,11 @@ wheels = [
 [[package]]
 name = "connect"
 version = "0.1.0"
-source = { editable = "../connect" }
+source = { git = "https://github.com/vectorops/connect.git?rev=4756d7308f68905a35cb5500d3ba1c3284cbfff5#4756d7308f68905a35cb5500d3ba1c3284cbfff5" }
 dependencies = [
     { name = "aiohttp" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.13.4" },
-    { name = "pydantic", specifier = ">=2.7.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.0" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24.0" },
-    { name = "websockets", marker = "extra == 'websocket'", specifier = ">=12.0" },
-]
-provides-extras = ["websocket", "test"]
 
 [[package]]
 name = "cryptography"
@@ -718,7 +708,7 @@ crypto = [
 [[package]]
 name = "pypika"
 version = "0.48.9"
-source = { git = "https://github.com/VectorOps/pypika.git?rev=v0.49.4-dev#80f85b3c3df405cce235b9f2d23841ec43a0c97b" }
+source = { git = "https://github.com/vectorops/pypika.git?rev=v0.49.4-dev#80f85b3c3df405cce235b9f2d23841ec43a0c97b" }
 
 [[package]]
 name = "pytest"
@@ -1002,7 +992,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.4" },
     { name = "anyio", specifier = ">=4.5" },
     { name = "beautifulsoup4", specifier = ">=4.13,<5" },
-    { name = "connect", editable = "../connect" },
+    { name = "connect", git = "https://github.com/vectorops/connect.git?rev=4756d7308f68905a35cb5500d3ba1c3284cbfff5" },
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.23.0" },
@@ -1011,7 +1001,7 @@ requires-dist = [
     { name = "mcp", specifier = "==1.26.0" },
     { name = "pathspec", specifier = ">=0.12.1,<2" },
     { name = "pydantic", specifier = ">=2.12.0" },
-    { name = "pypika", git = "https://github.com/VectorOps/pypika.git?rev=v0.49.4-dev" },
+    { name = "pypika", git = "https://github.com/vectorops/pypika.git?rev=v0.49.4-dev" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "referencing", specifier = ">=0.36" },
 ]

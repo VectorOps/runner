@@ -1,17 +1,21 @@
-# Runner secrets and provider authentication
+# Provider authentication
 
-The runner stores API keys and OAuth credentials durably outside workspaces. Configure authentication before starting workflows. Login is an explicit control operation, never a workflow wait; missing credentials or authentication failures fail the affected operation and workflow rather than prompting a host. Existing OAuth tokens can refresh automatically without user interaction.
+Store provider API keys or sign in with OAuth before running an LLM workflow.
+Credentials live outside project workspaces. Missing credentials fail the operation
+instead of prompting during a workflow; stored OAuth tokens can refresh automatically.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Global configuration](#global-configuration)
+- [Credential profiles](#credential-profiles-and-workflow-behavior)
+- [Remote browser login](#coordinate-browser-login-from-a-remote-host)
+- [Authentication RPC reference](#authentication-rpc-reference)
+- [Protection and recovery](#protection-and-recovery-boundaries)
 
 ## Quick start
 
-Start a daemon without provisioning a session token:
-
-```bash
-uv run vops-runner --project /path/to/workspace daemon serve --port 43821
-uv run vops-runner daemon status --port 43821
-```
-
-Import a credential from a protected JSON file or a secret manager's stdout, not a command-line argument:
+For API keys, you do not need a daemon. Import a credential from a protected file:
 
 ```bash
 uv run vops-runner credentials-import < /protected/openai.json
@@ -23,9 +27,18 @@ The input describes one credential. This example contains a placeholder, not a u
 {"provider":"openai","profile":"default","kind":"api_key","secret":"replace-with-api-key"}
 ```
 
-Import prints only a success status. The source file is not removed or protected by the runner; manage it separately. Authenticated hosts can also call `RunnerClient.provision_credentials(Credential(...))` over the protected control connection.
+Import prints only a success status. Use a protected file or a secret manager's
+stdout, not a command-line argument or committed file. The runner does not remove
+or protect the source file; manage it separately. Authenticated clients can also
+use `RunnerClient.provision_credentials(Credential(...))`.
 
-For ChatGPT OAuth, create a profile and complete browser login before starting work:
+For ChatGPT OAuth, start a daemon in one terminal:
+
+```bash
+uv run vops-runner --project /path/to/project daemon serve --port 43821
+```
+
+In another terminal, create a profile and complete browser login:
 
 ```bash
 uv run vops-runner client --port 43821 auth profile add work
@@ -35,6 +48,10 @@ uv run vops-runner client --port 43821 auth login chatgpt --profile work
 The connected shell provides `/auth login chatgpt --profile work`. Omitting
 `--profile` selects the active profile. `--no-browser` returns a standalone login
 request for another host to complete instead of opening the local browser.
+
+Then [configure a model](llm.md) with the matching provider prefix. The API-key
+example uses `openai/...`; the browser-login example uses `chatgpt/...` and should
+pin `credential_profile="work"` or switch the active profile to `work`.
 
 ## Global configuration
 
@@ -78,9 +95,8 @@ Adding a profile does not select it. Switching requires an existing profile.
 removes locally stored credentials with that profile name across providers; it
 does not revoke remote tokens or erase credentials already held by in-flight
 requests or connected MCP sessions. Re-adding a deleted profile starts empty.
-Deletion is serialized against token publication, and deleted-profile guards
-prevent late refresh or provisioning from recreating credentials until explicitly
-re-added. Profile names and selection are shared across runners using the same
+Deleted profiles must be explicitly added again before credentials can be stored
+under those names. Profile names and selection are shared across runners using the same
 global credential directory, not stored in workspace history.
 
 Omitting `profile` in credential import/provisioning selects the active profile.
@@ -131,7 +147,10 @@ The helper claims an attempt, starts a callback listener on the host, then opens
 
 Claims expire after ten minutes. A busy callback port or browser-launch failure releases the claim so another host can retry. Hosts must close an old listener before taking a replacement claim. Disconnect releases an idle claim; an already accepted token exchange finishes independently. `cancel_authentication(id)` removes that standalone login request without affecting workflows. Stale attempts, wrong states, and callbacks from a different connection are rejected.
 
-Repeated login requests for the same provider/profile share a pending request. Login requests live only in the authentication service, with no execution ownership or workflow-recovery behavior. After a runner restart, initiate login again if needed; successfully stored credentials survive. Reconnecting to the same live runner can list and claim existing requests. Starting, stopping, or failing a workflow does not create or cancel login requests. Completed generation activities replay without credential resolution.
+Repeated login requests for the same provider/profile share a pending request.
+After a runner restart, initiate unfinished login again; stored credentials survive.
+Workflow start, stop, and failure do not create or cancel login requests. Completed
+generation activities replay without accessing credentials.
 
 ## Authentication RPC reference
 
@@ -243,7 +262,9 @@ publish a new credential later. Deletion is serialized with credential publicati
 
 Encryption protects against copying credential files alone and accidental workspace/history disclosure. It does not protect against same-user code execution or a compromised runner. Backups containing both `secrets.json` and the credential directory contain plaintext-equivalent secrets and require protection.
 
-Never delete or regenerate the encryption key to fix a startup error. Restore the original key and credential files together. A missing key with existing credential files, malformed configuration, wrong key, or corrupt ciphertext produces an error, with no plaintext fallback. Encryption-key rotation is not automated in v1.
+Never delete or regenerate the encryption key to fix a startup error. Restore the
+original key and credential files together. Missing or incorrect keys and corrupt
+files fail rather than falling back to plaintext. Automated key rotation is not provided.
 
 Authentication does not encrypt TCP. Use a host-key-verified SSH tunnel for remote connections; direct remote plaintext connections remain unsupported. OAuth callback HTTP is loopback-local on the host, not exposed on the runner.
 

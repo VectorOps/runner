@@ -1,7 +1,7 @@
 # Structured diagnostic logs
 
 Persistent runners write diagnostic JSONL to `<data_directory>/logs/`, separately
-from saga history. Use these logs to investigate errors and workflow lifecycle
+from execution history. Use these logs to investigate errors and workflow lifecycle
 events, not to reconstruct workflow results or provide an audit trail.
 
 ## Configure logging
@@ -17,13 +17,13 @@ queue_size = 1024
 max_record_bytes = 16384
 ```
 
-| Setting | Meaning |
-| --- | --- |
-| `level` | Minimum severity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
-| `max_bytes` | Maximum bytes per file, at least 1024 |
-| `max_files` | Retained files, 1-1000; oldest modified files are removed first |
-| `queue_size` | Pending records, 1-100000 |
-| `max_record_bytes` | Maximum encoded record size, at least 512; also bounded by `max_bytes` |
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `level` | `INFO` | Minimum severity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `max_bytes` | 8388608 | Maximum bytes per file, at least 1024 |
+| `max_files` | 5 | Retained files, 1-1000; oldest modified files are removed first |
+| `queue_size` | 1024 | Pending records, 1-100000 |
+| `max_record_bytes` | 16384 | Maximum encoded record size, at least 512; also bounded by `max_bytes` |
 
 Logs use unique filenames across rotation and restart. Configuration applies at
 runner/service startup; it is not part of deterministic workflow replay. History

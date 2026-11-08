@@ -1,7 +1,8 @@
 # Workspace file search
 
-`vectorops.runner.file_search` provides file-only autocomplete independently of UI,
-WebSocket, and environment adapters. Use one service per workspace on one event loop.
+Use `vectorops.runner.file_search` to add file autocomplete to a client or integration.
+It returns ranked paths, not file contents. Create one service per workspace on one
+event loop; it does not require a UI or a network transport.
 
 ## Quick start
 
@@ -15,7 +16,7 @@ try:
     updates = service.search("config", limit=20)
     try:
         async for update in updates:
-            consume(update)
+            print(update)
     finally:
         await updates.aclose()
 finally:
@@ -45,10 +46,9 @@ generation and removes deleted paths. Any failed or limited refresh rolls back t
 the last completed snapshot, including discarding newly discovered partial paths.
 
 Results during refresh are best-effort. The caller must validate that a selected
-path is still a permissible workspace file when resolving or attaching it. A
-future transport adapter owns session/query IDs, obsolete-query filtering, and
-selection preservation by path identity. This package implements none of those
-transport concerns and does not persist, watch, or poll the filesystem.
+path is still a permissible workspace file when resolving or attaching it. Your
+integration owns session/query IDs, obsolete-query filtering, and selection by path.
+The service does not persist, watch, or poll the filesystem.
 
 ## Discovery backends
 
@@ -61,19 +61,19 @@ the exit code. Only a missing executable triggers fallback.
 The iterative `os.scandir()` fallback applies workspace-root and nested
 `.gitignore` rules through `pathspec`, including inherited rules and negation. It
 prunes ignored directories and excludes `.git` and symlinks. Neither backend
-follows directory symlinks; version one does not include symlink entries.
+follows directory symlinks or includes symlink entries.
 Inaccessible paths fail the fallback scan rather than silently deleting indexed
 files. Set `rg_executable=None` to force fallback.
 
 The fallback does not read ancestor `.gitignore` files, `.ignore`, `.rgignore`,
 `.git/info/exclude`, global Git excludes, or ripgrep configuration. Ripgrep uses
-its own ignore sources and repository-boundary behavior. Bundle ripgrep with the
-desktop application for consistent discovery across installations.
+its own ignore sources and repository-boundary behavior. Install ripgrep for the
+preferred backend, or explicitly select the fallback for consistent behavior.
 
 ## Limits
 
-`SearchConfig` is immutable and rejects unknown settings. Defaults are provisional
-development limits, not benchmark-backed production thresholds.
+`SearchConfig` is immutable and rejects unknown settings. Measure representative
+repositories before choosing production limits; the defaults are not sizing guarantees.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -89,12 +89,8 @@ development limits, not benchmark-backed production thresholds.
 | `max_cache_candidates` | 100000 | Total retained prefix-cache candidates |
 | `rg_executable` | `rg` | Executable name/path; `None` forces fallback |
 
-The memory admission estimate includes conservative per-path overhead for entries,
-normalization, boundaries, and postings; it is not an operating-system RSS cap.
-Workers, transient snapshots, ignore rules, and subscriber results also consume
-memory. The prefix cache stores complete candidate sets, never just top-K results.
-Character masks are collision-tolerant prefilters followed by subsequence checks;
-trigram postings accelerate literal checks but never exclude fuzzy matches.
+The memory estimate is an index admission budget, not an operating-system RSS cap.
+Workers, temporary snapshots, ignore rules, and subscriber results also use memory.
 
 ## Verification and benchmarks
 
@@ -109,3 +105,8 @@ query latency, and current/peak traced Python allocations. Tracing adds overhead
 measure process RSS separately for production sizing. Run it on representative
 small, medium, and large repositories, with application queries, before selecting
 production thresholds. It does not run as part of pytest.
+
+## Related
+
+- [Control client integration](../reference/control-protocol.md)
+- [Contributor setup](../../CONTRIBUTING.md)

@@ -1,7 +1,8 @@
 # Activity execution context
 
-Activity implementations receive a runtime context as their first positional parameter.
-Use its stable step identity when your external service supports idempotency keys.
+Use activities to record external work such as a network request, filesystem access,
+or a timestamp. Implementations receive a runtime context as their first parameter.
+Completed replay returns the saved result; interrupted work can run again.
 
 ## Ordinary activities
 
@@ -44,8 +45,8 @@ Generated kinds require module-level callables and remain stable across loader i
 Explicit `kind` and `namespace` are mutually exclusive.
 Namespace components must be identifiers separated by dots.
 Namespace owners allocate contract names; generation alone cannot guarantee uniqueness across organizations.
-Use `vocode` for runner-provided contracts and an organization/project namespace for custom contracts.
-Without either option, the existing generic `activity` kind remains unchanged.
+Use your organization's namespace for custom contracts; do not rename runner-owned
+kinds. Without either option, the generic kind is `activity`.
 Older operation records without a version load as version `1`.
 Activity replay matches kind, name, and input; operation versions are informational
 and do not reject incompatible recorded payloads. Kinds beginning with `llm.` also
@@ -60,6 +61,10 @@ Reusing a completed child result does not execute or validate that child's inter
 | `execution_id` | Persistent execution identity, or `None` when using an injected history without execution metadata. |
 | `workflow_id` | Identity of the owning root or child workflow invocation. |
 | `step_id` | Stable identity of this operation attempt. |
+
+Activities also receive optional runtime services, including the local environment,
+mailbox, and cleanup registry. These can be absent in injected-history tests. Access
+them through their owning adapters, and do not serialize live services in results.
 
 Root and child activities share the persistent execution identity but have distinct workflow and step identities.
 The activity context does not expose workflow scheduling or history mutation APIs.
@@ -97,3 +102,9 @@ Streaming implementations receive the same explicit context contract.
 All snapshots retain one step identity, and interrupted recovery restarts the generator with that identity.
 Each `delta()` replaces the full streaming state; it is not an append or patch.
 An LLM activity must accumulate provider fragments before yielding a snapshot.
+
+## Related
+
+- [Workflow composition](workflows.md)
+- [Local processes and cleanup](target-environments.md)
+- [Saved-execution compatibility](../reference/compatibility.md)
