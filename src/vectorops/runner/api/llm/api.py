@@ -24,7 +24,7 @@ from vectorops.runner.api.llm.configuration import (
     resolve_configuration,
 )
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
-from vectorops.runner.runner.errors import ActivityError
+from vectorops.runner.runner.errors import ActivityError, ReplayMismatchError
 from vectorops.runner.runner import streaming
 
 
@@ -78,10 +78,7 @@ class LLM:
         self._backend = backend if backend is not None else provider.ConnectProvider()
         self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
-        self._provider_compaction = context.workflow.compaction_version == 3
-        self._compaction_history = compaction_api.History(
-            legacy=not self._provider_compaction
-        )
+        self._compaction_history = compaction_api.History()
         self._modern_compaction = context.workflow.compaction_version is not None
         self._image_compaction = context.workflow.compaction_version in (2, 3)
         self._usage = connect.Usage()
@@ -272,7 +269,7 @@ class LLM:
         return response
 
     def _signature(self, definitions: Sequence[connect.ToolSpec]) -> str:
-        if self._provider_compaction:
+        if self._modern_compaction:
             return ""
         assert self._settings is not None
         return _digest(
@@ -527,7 +524,16 @@ class LLM:
         policy = self._compaction
         if policy is None or policy.max_context_characters is None:
             return
-        cut = compaction_api.legacy_cut(self._messages, policy)
+        operation = await self._context.replay_operation()
+        if operation is None:
+            cut = compaction_api.legacy_cut(self._messages, policy)
+        else:
+            recorded = compaction_api.recorded_compaction(operation, self._identity)
+            if recorded is None:
+                return
+            cut = recorded.cut
+            if cut is None:
+                cut = compaction_api.legacy_cut(self._messages, policy)
         if cut is not None:
             await self._compact(cut, policy.instruction, definitions)
 
@@ -552,6 +558,7 @@ class LLM:
                 call,
                 summary.request,
                 finalize=summary.finalize,
+                metadata=lambda: {"cut": cut},
             )
         )
         text = compaction_api.summary_text(response)
@@ -566,19 +573,38 @@ class LLM:
         force: bool = False,
     ) -> bool:
         assert self._compaction is not None
-        selection = self._compaction_history.select(
-            self._messages,
-            message_id,
-            self._compaction,
-            self._signature(definitions),
-            force=force,
-            modern=self._modern_compaction,
-            allow_images=self._image_compaction,
+        operation = await self._context.replay_operation()
+        recorded = (
+            None
+            if operation is None
+            else compaction_api.recorded_compaction(operation, self._identity)
         )
+        if operation is not None and recorded is None:
+            return False
+        selection = None if recorded is None else recorded.selection
+        if selection is None:
+            selection = self._compaction_history.select(
+                self._messages,
+                message_id,
+                self._compaction,
+                self._signature(definitions),
+                force=force,
+                modern=self._modern_compaction,
+                allow_images=self._image_compaction,
+                legacy=recorded is not None,
+            )
         if selection is None:
             return False
+        if selection.anchor_id != message_id:
+            raise ReplayMismatchError("recorded compaction anchor differs from history")
+        self._compaction_history.validate(selection, self._messages)
         if self._modern_compaction:
-            await self._compact_context(selection, definitions, force=force)
+            await self._compact_context(
+                selection,
+                definitions,
+                force=force,
+                provider_tokens=recorded is None or recorded.provider_tokens,
+            )
         else:
             await self._compact_measured(selection, definitions)
         return True
@@ -591,6 +617,7 @@ class LLM:
         definitions: Sequence[connect.ToolSpec],
         *,
         force: bool = False,
+        provider_tokens: bool = True,
     ) -> None:
         """Summarize one readable prefix, then atomically replace it on success."""
         assert self._settings is not None and self._compaction is not None
@@ -608,7 +635,7 @@ class LLM:
                     self._settings,
                     self._compaction_history.has_summary,
                     prefix_tokens=(
-                        selection.prefix_tokens if self._provider_compaction else None
+                        selection.prefix_tokens if provider_tokens else None
                     ),
                 )
             return prepared
@@ -623,6 +650,7 @@ class LLM:
                     "anchor_id": selection.anchor_id,
                     "trigger": "overflow" if force else "threshold",
                     "measured_prefix_tokens": selection.prefix_tokens,
+                    "selection": selection.model_dump(mode="json"),
                     **prepare().metadata.model_dump(mode="json"),
                 },
             )
@@ -656,6 +684,7 @@ class LLM:
                 summary.request,
                 settings=summary.settings,
                 finalize=summary.finalize,
+                metadata=lambda: {"selection": selection.model_dump(mode="json")},
             )
         )
         text = compaction_api.summary_text(response)

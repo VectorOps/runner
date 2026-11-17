@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from datetime import datetime, timezone
 import typing
 
@@ -164,6 +164,59 @@ async def test_closed_session_rejects_requests(history: MemoryHistory) -> None:
         )
 
 
+async def test_replay_queries_are_serialized_non_consuming_and_isolated(
+    history: MemoryHistory,
+) -> None:
+    workflow = models.Workflow(id="w", definition_ref="file:workflow")
+    operations = [
+        models.StepOperation(
+            kind="activity", name=str(index), input={"nested": {"value": index}}
+        )
+        for index in range(2)
+    ]
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id=None, child_heads={}
+    )
+    replaying = False
+    effects: list[str] = []
+
+    async def activity(ctx: ActivityExecutionContext) -> pydantic.JsonValue:
+        effects.append(ctx.step_id)
+        return None
+
+    async def invoke() -> pydantic.JsonValue:
+        for operation in operations:
+            responses = await asyncio.gather(
+                session.submit(context.ReplayOperationRequest()),
+                session.submit(context.ReplayOperationRequest()),
+            )
+            for response in responses:
+                assert response.kind == "replay_operation"
+                assert response.operation == (operation if replaying else None)
+                if isinstance(response.operation, models.StepOperation):
+                    response.operation.input.clear()
+            await session.submit(context.ActivityRequest(operation, activity))
+        response = await session.submit(context.ReplayOperationRequest())
+        assert response.kind == "replay_operation"
+        assert response.operation == (
+            models.WorkflowCompleteOperation() if replaying else None
+        )
+        return None
+
+    first = await session.run(invoke)
+    assert first.outcome.kind == "completed", first.outcome
+    assert len(history.steps) == 3
+    assert len(effects) == 2
+    before = dict(history.steps)
+    replaying = True
+    session = ExecutionSession(
+        history, workflow, unused_child, continue_from_step_id=first.id, child_heads={}
+    )
+    assert await session.run(invoke) == first
+    assert history.steps == before
+    assert len(effects) == 2
+
+
 class GeneratedHistory:
     """Generate replay records without storing or materializing the history path."""
 
@@ -185,6 +238,11 @@ class GeneratedHistory:
 
     async def get_step_position(self, step_id: str) -> int:
         raise AssertionError("replay must not query positions without a listener")
+
+    async def first_completion(
+        self, workflow_ids: Sequence[str]
+    ) -> typing.Optional[models.WorkflowStep]:
+        raise AssertionError("replay must not query unrelated child completions")
 
     async def record_delivery(self, head_id: str, step_id: str) -> models.WorkflowStep:
         raise AssertionError("replay must not record delivery")

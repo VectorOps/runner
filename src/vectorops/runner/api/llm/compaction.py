@@ -8,8 +8,10 @@ from typing import Optional
 import connect
 import pydantic
 
+from vectorops.runner import models as runner_models
 from vectorops.runner.api.llm import configuration, models, observability
 from vectorops.runner.runner.activity_context import ActivityExecutionContext
+from vectorops.runner.runner.errors import ReplayMismatchError
 from vectorops.runner.runner import streaming
 
 Generation = models.Generation
@@ -147,6 +149,55 @@ class Selection(pydantic.BaseModel):
     prefix_tokens: int
 
 
+class RecordedCompaction(pydantic.BaseModel):
+    selection: Optional[Selection] = None
+    provider_tokens: bool = False
+    cut: Optional[int] = None
+
+
+def recorded_compaction(
+    operation: runner_models.WorkflowOperation, instance: str
+) -> Optional[RecordedCompaction]:
+    """Read saved compaction boundaries independently of current selection policy."""
+    if (
+        not isinstance(operation, runner_models.StepOperation)
+        or operation.kind != "llm.compact"
+        or operation.name != "_compact"
+        or operation.input.get("instance") != instance
+    ):
+        return None
+    metadata = operation.input.get("compaction")
+    if metadata is None:
+        return RecordedCompaction()
+    if not isinstance(metadata, dict):
+        raise ReplayMismatchError("invalid recorded compaction metadata")
+    try:
+        if "selection" in metadata:
+            return RecordedCompaction(
+                selection=Selection.model_validate(metadata["selection"]),
+                provider_tokens=True,
+            )
+        if "anchor_id" in metadata:
+            return RecordedCompaction(
+                selection=Selection.model_validate(
+                    {
+                        "anchor_id": metadata["anchor_id"],
+                        "cut": metadata.get("selected_messages"),
+                        "prefix_tokens": metadata.get("measured_prefix_tokens"),
+                    }
+                ),
+                provider_tokens=(
+                    metadata.get("source_tokens_estimate") is None
+                    and metadata.get("summary_target_tokens") is not None
+                ),
+            )
+        if "cut" in metadata:
+            return RecordedCompaction.model_validate(metadata)
+        raise ReplayMismatchError("recorded compaction metadata has no boundary")
+    except pydantic.ValidationError as exc:
+        raise ReplayMismatchError("invalid recorded compaction boundary") from exc
+
+
 def summary_tokens(
     response: connect.AssistantMessage,
     summary: models.Settings,
@@ -181,8 +232,7 @@ class History:
     therefore measures the prefix, not that message or later tool results.
     """
 
-    def __init__(self, *, legacy: bool = False) -> None:
-        self._legacy = legacy
+    def __init__(self) -> None:
         self.checkpoints: list[Checkpoint] = []
         self.has_summary = False
         self.compacted_anchor: Optional[str] = None
@@ -192,6 +242,27 @@ class History:
             return None
         latest = self.checkpoints[-1]
         return latest.message_id if index is None or latest.index == index else None
+
+    def validate(
+        self, selection: Selection, messages: Sequence[connect.Message]
+    ) -> None:
+        """Require recorded cuts to preserve the anchor and complete tool exchanges."""
+        anchor = next(
+            (
+                point
+                for point in self.checkpoints
+                if point.message_id == selection.anchor_id
+            ),
+            None,
+        )
+        if (
+            anchor is None
+            or not 0 < selection.cut <= anchor.index
+            or selection.cut not in safe_boundaries(messages)
+        ):
+            raise ReplayMismatchError(
+                "recorded compaction boundary differs from history"
+            )
 
     def prepare(
         self,
@@ -270,11 +341,12 @@ class History:
         force: bool = False,
         modern: bool = False,
         allow_images: bool = False,
+        legacy: bool = False,
     ) -> Optional[Selection]:
         """Choose the complete-exchange boundary nearest the provider-token target.
 
-        Keep legacy selection for saved executions. Never consume the anchor
-        response or newer messages, or substitute estimates for missing usage.
+        Legacy selection only reconstructs old records without boundary metadata.
+        Never consume the anchor response or substitute estimates for missing usage.
         """
         anchor = next(
             (point for point in self.checkpoints if point.message_id == message_id),
@@ -282,7 +354,7 @@ class History:
         )
         if (
             anchor is None
-            or (self._legacy and anchor.signature != signature)
+            or (legacy and anchor.signature != signature)
             or self.compacted_anchor == message_id
         ):
             return None
@@ -320,17 +392,17 @@ class History:
         for point in reversed(self.checkpoints):
             if point.index > anchor.index:
                 continue
-            if self._legacy and point.signature != signature:
+            if legacy and point.signature != signature:
                 break
             if point.index <= int(self.has_summary):
                 break
             if point.index not in safe or point.index > limit:
                 continue
             retained = total - point.context_tokens
-            if retained < (budget if self._legacy else 0):
+            if retained < (budget if legacy else 0):
                 continue
             candidates.append(point)
-            if self._legacy:
+            if legacy:
                 break
         selected = min(
             candidates,

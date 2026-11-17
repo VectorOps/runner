@@ -250,12 +250,12 @@ async def test_discovery_changes_compact_and_replay_without_repeating_tools(
 
 
 @pytest.mark.parametrize("version", [None, 1, 2, 3])
-async def test_tool_changes_preserve_legacy_replay_policy(
+async def test_tool_changes_compact_without_a_workflow_version_gate(
     history: MemoryHistory, version: Optional[Literal[1, 2, 3]]
 ) -> None:
-    backend = Backend([answer("first", 2000), answer("second", 8500)])
-    if version == 3:
-        backend.replies.append(answer("Summary", output=20))
+    backend = Backend(
+        [answer("first", 2000), answer("second", 8500), answer("Summary", output=20)]
+    )
     tool = connect.ToolSpec(
         name="new", description="New tool", input_schema={"type": "object"}
     )
@@ -275,7 +275,7 @@ async def test_tool_changes_preserve_legacy_replay_policy(
         await replay.run(history, workflow, first.id, compaction_version=version)
     ).outcome == first.outcome
     assert history.steps == before
-    assert len(backend.requests) == (3 if version == 3 else 2)
+    assert len(backend.requests) == 3
 
 
 async def test_discovery_reset_between_user_turns_does_not_block_compaction(

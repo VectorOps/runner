@@ -75,7 +75,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
         2,
     )
     child = next(w for w in history.workflows.values() if w.id != "root")
-    assert history.workflows["root"].compaction_version == child.compaction_version == 3
+    assert history.workflows["root"].compaction_version == child.compaction_version == 2
     assert (child.kind, child.version) == ("customer.acme.support.chat.turn", 4)
     invocation = [e for e in events if e.step.operation.kind == "vocode.llm.invoke"]
     assert len({e.step.id for e in invocation}) == 1
@@ -115,7 +115,7 @@ async def test_contracts_survive_sqlite_restart(workspace: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 async def test_compaction_upgrade_preserves_root_and_child_markers(
     workspace: Path,
     history: MemoryHistory,

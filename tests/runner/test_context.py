@@ -64,6 +64,15 @@ async def test_spawn_response(tmp_path: Path) -> None:
     assert await ctx.spawn_workflow("file:entry", input={"value": 1}) == handle
 
 
+@pytest.mark.parametrize("live", [False, True])
+async def test_replay_operation_response(tmp_path: Path, live: bool) -> None:
+    operation = (
+        None if live else models.StepOperation(kind="llm.compact", name="_compact")
+    )
+    ctx = make_context(tmp_path, context.ReplayOperationResponse(operation))
+    assert await ctx.replay_operation() == operation
+
+
 async def test_join_response_and_error(tmp_path: Path) -> None:
     handle = context.ChildWorkflowHandle("parent", "child", "spawn")
     outcomes: list[models.ChildOutcome] = [models.StepCompleted(result=1)]
@@ -87,7 +96,7 @@ async def test_foreign_handle_is_rejected(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["activity", "spawn", "join"])
+@pytest.mark.parametrize("operation", ["activity", "spawn", "join", "replay"])
 async def test_wrong_response_variant(tmp_path: Path, operation: str) -> None:
     ctx = make_context(
         tmp_path,
@@ -104,6 +113,8 @@ async def test_wrong_response_variant(tmp_path: Path, operation: str) -> None:
             )
         elif operation == "spawn":
             await ctx.spawn_workflow("file:workflow")
+        elif operation == "replay":
+            await ctx.replay_operation()
         else:
             await ctx.join_workflows(
                 [context.ChildWorkflowHandle("parent", "child", "spawn")]

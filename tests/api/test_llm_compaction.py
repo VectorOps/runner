@@ -107,7 +107,13 @@ async def test_post_response_repeated_compaction_and_replay(
     summaries = [request for request in backend.requests if request.system_prompt]
     initial = json.loads(str(summaries[0].messages[0].content))
     assert initial["previous_summary"] is None
-    assert [message["content"] for message in initial["transcript"]] == ["question-0"]
+    assert [message["role"] for message in initial["transcript"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert initial["transcript"][0]["content"] == "question-0"
+    assert initial["transcript"][-1]["content"] == "question-1"
     second = json.loads(str(summaries[1].messages[0].content))
     assert "summary-one" in second["previous_summary"]["content"]
     assert "question-0" not in str(second["transcript"])
@@ -116,7 +122,7 @@ async def test_post_response_repeated_compaction_and_replay(
             step.operation, models.StepOperation
         ) and step.operation.kind.startswith("llm."):
             assert step.operation.version == 2
-            assert len(str(step.operation.input)) < 150
+            assert len(str(step.operation.input)) < 400
 
 
 @pytest.mark.parametrize("retry_fails", [False, True])
@@ -219,7 +225,7 @@ async def test_failed_summary_preserves_history_and_replays(
         summary = answer("partial", 400)
         summary.finish_reason = "length"
     elif failure == "expanding":
-        summary = answer("expanded", 400, 500)
+        summary = answer("expanded", 400, 800)
     backend = Backend([answer("first", 300), answer("second", 750), summary])
 
     async def workflow() -> pydantic.JsonValue:
@@ -393,7 +399,7 @@ def test_policy_roundtrip() -> None:
 
 
 def test_rebased_coordinates_use_selected_prefix_not_retention_target() -> None:
-    state = compaction.History(legacy=True)
+    state = compaction.History()
     messages: list[connect.Message] = [connect.UserMessage(content="old")]
     for identifier, tokens in (("a", 300), ("b", 750)):
         response = answer(identifier, tokens)
@@ -405,7 +411,7 @@ def test_rebased_coordinates_use_selected_prefix_not_retention_target() -> None:
             "same",
         )
         messages.extend([response, connect.UserMessage(content="next")])
-    selected = state.select(messages, "b", policy(), "same")
+    selected = state.select(messages, "b", policy(), "same", legacy=True)
     assert selected == compaction.Selection(anchor_id="b", cut=1, prefix_tokens=300)
     state.commit(selected, 50)
     assert [
@@ -429,7 +435,7 @@ def test_measured_input_includes_cache_categories(completeness: str) -> None:
 
 
 @pytest.mark.parametrize("change", ["system", "model", "tools", "missing"])
-async def test_incompatible_checkpoints_are_not_subtracted(
+async def test_measured_checkpoints_survive_request_changes(
     history: MemoryHistory, change: str
 ) -> None:
     backend = Backend([answer("first", 300), answer("second", 750)])
@@ -437,9 +443,16 @@ async def test_incompatible_checkpoints_are_not_subtracted(
         response = backend.replies[0]
         assert isinstance(response, connect.AssistantMessage)
         response.usage = connect.Usage()
+    else:
+        backend.replies.append(answer("summary", 400, 50))
 
     async def workflow() -> pydantic.JsonValue:
-        agent = llm.LLM("chat", model="test", backend=backend, compaction=policy())
+        agent = llm.LLM(
+            "chat",
+            model="test",
+            backend=backend,
+            compaction=policy(keep_recent_messages=2),
+        )
         agent.add_user_message("old")
         await agent.generate()
         if change == "system":
@@ -460,10 +473,10 @@ async def test_incompatible_checkpoints_are_not_subtracted(
         assert len(agent.history) == 4
         return None
 
-    result = await replay.run(history, workflow)
+    result = await replay.run(history, workflow, compaction_version=2)
     assert result.outcome.kind == "completed"
-    await replay.run(history, workflow, result.id)
-    assert len(backend.requests) == 2
+    await replay.run(history, workflow, result.id, compaction_version=2)
+    assert len(backend.requests) == (2 if change == "missing" else 3)
 
 
 @pytest.mark.parametrize("known_limit", [False, True])
@@ -484,7 +497,7 @@ async def test_no_prediction_before_first_request(
         assert len(agent.history) == 2
         return None
 
-    result = await replay.run(history, workflow)
+    result = await replay.run(history, workflow, compaction_version=2)
     assert result.outcome.kind == "completed"
     assert len(backend.requests) == 1
 
@@ -536,7 +549,7 @@ async def test_unknown_summary_usage_discards_rebased_checkpoints(
         for text in ("old", "new"):
             agent.add_user_message(text)
             await agent.generate()
-        assert len(agent.history) == 4
+        assert len(agent.history) == 2
         assert not agent._compaction_history.checkpoints
         agent.add_user_message("large")
         with pytest.raises(ActivityError):
@@ -604,7 +617,7 @@ def test_selection_never_splits_parallel_tool_exchange() -> None:
         connect.ToolResultMessage(tool_call_id="b", tool_name="read", content=[]),
         answer("done", 800),
     ]
-    state = compaction.History(legacy=True)
+    state = compaction.History()
     for identity, index, tokens in (
         ("start", 1, 300),
         ("unsafe", 3, 500),
@@ -619,7 +632,7 @@ def test_selection_never_splits_parallel_tool_exchange() -> None:
             index,
             "same",
         )
-    selected = state.select(messages, "end", policy(), "same")
+    selected = state.select(messages, "end", policy(), "same", legacy=True)
     assert selected is not None and selected.cut == 1
 
 

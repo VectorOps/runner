@@ -455,7 +455,13 @@ class ExecutionSession:
                         )
                         pending = None
                         continue
-                response = await self.handlers.dispatch(pending.request)
+                if pending.request.kind == "replay_operation":
+                    step = await self._peek()
+                    response = context.ReplayOperationResponse(
+                        None if step is None else step.operation.model_copy(deep=True)
+                    )
+                else:
+                    response = await self.handlers.dispatch(pending.request)
                 self._start_live()
                 if pending.response.cancelled():
                     pending = None

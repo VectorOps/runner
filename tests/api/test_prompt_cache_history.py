@@ -195,16 +195,24 @@ class RecordedActivities:
         self, steps: Sequence[models.WorkflowStep], prompts: list[Prompt]
     ) -> None:
         self.steps = iter(steps)
+        self.next_step = next(self.steps, None)
         self.prompts = prompts
         self.generations = 0
 
     async def submit(
         self, request: context.OperationRequest
     ) -> context.OperationResponse:
+        if isinstance(request, context.ReplayOperationRequest):
+            return context.ReplayOperationResponse(
+                None
+                if self.next_step is None
+                else self.next_step.operation.model_copy(deep=True)
+            )
         assert isinstance(
             request, (context.ActivityRequest, context.StreamingActivityRequest)
         )
-        step = next(self.steps, None)
+        step = self.next_step
+        self.next_step = next(self.steps, None)
         if step is None or step.outcome.kind != "completed":
             raise HistoryExhausted
         assert isinstance(step.operation, models.StepOperation)

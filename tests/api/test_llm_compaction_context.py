@@ -159,11 +159,7 @@ async def test_projection_reference_context_injection_and_replay(
     assert compact_steps[0].metrics is not None
     metric = observability.Metrics.model_validate(compact_steps[0].metrics["llm"])
     assert metric.compaction is not None
-    if version == 3:
-        assert metric.compaction.saved_tokens_estimate is None
-    else:
-        assert metric.compaction.saved_tokens_estimate is not None
-        assert metric.compaction.saved_tokens_estimate > 0
+    assert metric.compaction.saved_tokens_estimate is None
     assert isinstance(compact_steps[0].operation, runner_models.StepOperation)
     debug = compact_steps[0].operation.input["compaction"]
     assert isinstance(debug, dict)
@@ -337,15 +333,24 @@ async def test_failed_summary_does_not_replace_history(
         result = answer("truncated")
         result.finish_reason = "length"
     elif failure == "expanded":
-        result = answer(OLD * 2)
+        result = answer(OLD * 2, output=2000)
     elif failure == "escaped_expansion":
-        result = answer(source + "extra")
+        result = answer(source + "extra", output=2000)
     elif failure == "cap":
         result = answer("summary", output=129)
     backend = Backend([answer("a", 2000), answer("b", 8500), result])
 
     async def workflow() -> pydantic.JsonValue:
-        agent = llm.LLM("worker", model="test", compaction=policy(), backend=backend)
+        agent = llm.LLM(
+            "worker",
+            model="test",
+            compaction=policy(
+                summary_max_output_tokens=(
+                    None if failure in ("expanded", "escaped_expansion") else 128
+                )
+            ),
+            backend=backend,
+        )
         agent.add_user_message(source)
         await agent.generate()
         agent.add_user_message(RECENT)
@@ -693,7 +698,7 @@ async def test_generation_overflow_retains_tool_results_without_reexecution(
     assert result.outcome.kind == "completed", result.outcome
     await replay.run(history, workflow, result.id, compaction_version=1)
     assert len(executions) == 2
-    assert backend.requests[2].messages[1:] == backend.requests[4].messages[1:]
+    assert backend.requests[2].messages[3:] == backend.requests[4].messages[1:]
     assert "large result" not in str(backend.requests[3].messages)
     compact_step = next(
         step for step in history.path(result.id) if step.operation.kind == "llm.compact"

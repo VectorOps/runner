@@ -94,6 +94,11 @@ class InvokeChildRequest:
 
 
 @dataclass(frozen=True)
+class ReplayOperationRequest:
+    kind: typing.ClassVar[typing.Literal["replay_operation"]] = "replay_operation"
+
+
+@dataclass(frozen=True)
 class ChildWorkflowHandle:
     """Child identity with a wait-only capability bound by its spawning context."""
 
@@ -120,6 +125,7 @@ OperationRequest: typing.TypeAlias = typing.Union[
     CancelRequest,
     NextCompletedRequest,
     InvokeChildRequest,
+    ReplayOperationRequest,
 ]
 
 
@@ -156,8 +162,18 @@ class NextCompletedResponse:
     completion: ChildCompletion
 
 
+@dataclass(frozen=True)
+class ReplayOperationResponse:
+    kind: typing.ClassVar[typing.Literal["replay_operation"]] = "replay_operation"
+    operation: typing.Optional[models.WorkflowOperation]
+
+
 OperationResponse: typing.TypeAlias = typing.Union[
-    ActivityResponse, SpawnResponse, JoinResponse, NextCompletedResponse
+    ActivityResponse,
+    SpawnResponse,
+    JoinResponse,
+    NextCompletedResponse,
+    ReplayOperationResponse,
 ]
 
 
@@ -180,6 +196,13 @@ class WorkflowExecutionContext:
     @property
     def data_path(self) -> Path:
         return self.project.data_path
+
+    async def replay_operation(self) -> typing.Optional[models.WorkflowOperation]:
+        """Inspect the next recorded operation without consuming or recording a step."""
+        response = await self.submitter.submit(ReplayOperationRequest())
+        if response.kind != "replay_operation":
+            raise RuntimeError("executor returned an invalid replay response")
+        return response.operation
 
     async def run_activity(
         self,
