@@ -87,10 +87,10 @@ def test_projection_excludes_transport_not_business_data() -> None:
     assert "business" in str(projected_tool)
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 async def test_projection_reference_context_injection_and_replay(
     history: MemoryHistory,
-    version: Literal[1, 2],
+    version: Literal[1, 2, 3],
 ) -> None:
     original = reasoning_reply(2000)
     backend = Backend(
@@ -159,8 +159,11 @@ async def test_projection_reference_context_injection_and_replay(
     assert compact_steps[0].metrics is not None
     metric = observability.Metrics.model_validate(compact_steps[0].metrics["llm"])
     assert metric.compaction is not None
-    assert metric.compaction.saved_tokens_estimate is not None
-    assert metric.compaction.saved_tokens_estimate > 0
+    if version == 3:
+        assert metric.compaction.saved_tokens_estimate is None
+    else:
+        assert metric.compaction.saved_tokens_estimate is not None
+        assert metric.compaction.saved_tokens_estimate > 0
     assert isinstance(compact_steps[0].operation, runner_models.StepOperation)
     debug = compact_steps[0].operation.input["compaction"]
     assert isinstance(debug, dict)
@@ -782,9 +785,9 @@ def test_multimodal_packet_uses_native_images_and_quoted_tool_history(
     assert json.dumps(payload).count(image.data) == 1
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 async def test_old_image_does_not_block_later_compaction_and_replay(
-    history: MemoryHistory, version: Literal[1, 2]
+    history: MemoryHistory, version: Literal[1, 2, 3]
 ) -> None:
     image = connect.ImageBlock(mime_type="image/png", data="aGVsbG8=")
     calls = connect.AssistantMessage(
@@ -806,7 +809,7 @@ async def test_old_image_does_not_block_later_compaction_and_replay(
             answer("Latest work", 8500),
         ]
     )
-    if version == 2:
+    if version != 1:
         backend.replies.append(answer("Updated continuation summary", output=20))
 
     async def workflow() -> pydantic.JsonValue:
@@ -841,7 +844,7 @@ async def test_old_image_does_not_block_later_compaction_and_replay(
         step for step in history.path(first.id) if step.operation.kind == "llm.compact"
     ]
     assert len(compact_steps) == (1 if version == 1 else 2)
-    if version == 2:
+    if version != 1:
         first_compact = compact_steps[0]
         assert isinstance(first_compact.operation, runner_models.StepOperation)
         debug = first_compact.operation.input["compaction"]

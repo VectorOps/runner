@@ -78,9 +78,12 @@ class LLM:
         self._backend = backend if backend is not None else provider.ConnectProvider()
         self._compaction: Optional[models.Compaction] = None
         self._messages: list[connect.Message] = []
-        self._compaction_history = compaction_api.History()
+        self._provider_compaction = context.workflow.compaction_version == 3
+        self._compaction_history = compaction_api.History(
+            legacy=not self._provider_compaction
+        )
         self._modern_compaction = context.workflow.compaction_version is not None
-        self._image_compaction = context.workflow.compaction_version == 2
+        self._image_compaction = context.workflow.compaction_version in (2, 3)
         self._usage = connect.Usage()
         self._busy = False
         self._inbox = inbox
@@ -269,6 +272,8 @@ class LLM:
         return response
 
     def _signature(self, definitions: Sequence[connect.ToolSpec]) -> str:
+        if self._provider_compaction:
+            return ""
         assert self._settings is not None
         return _digest(
             {
@@ -602,6 +607,9 @@ class LLM:
                     self._compaction,
                     self._settings,
                     self._compaction_history.has_summary,
+                    prefix_tokens=(
+                        selection.prefix_tokens if self._provider_compaction else None
+                    ),
                 )
             return prepared
 

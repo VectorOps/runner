@@ -181,7 +181,8 @@ class History:
     therefore measures the prefix, not that message or later tool results.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, legacy: bool = False) -> None:
+        self._legacy = legacy
         self.checkpoints: list[Checkpoint] = []
         self.has_summary = False
         self.compacted_anchor: Optional[str] = None
@@ -241,7 +242,7 @@ class History:
             selection.prefix_tokens,
         )
 
-    def record(self, generation: Generation, index: int, signature: str) -> None:
+    def record(self, generation: Generation, index: int, signature: str = "") -> None:
         usage = generation.response.usage
         tokens = input_tokens(usage)
         if tokens is None:
@@ -264,16 +265,16 @@ class History:
         messages: Sequence[connect.Message],
         message_id: str,
         policy: models.Compaction,
-        signature: str,
+        signature: str = "",
         *,
         force: bool = False,
         modern: bool = False,
         allow_images: bool = False,
     ) -> Optional[Selection]:
-        """Retain at least the target at measured, complete-exchange boundaries.
+        """Choose the complete-exchange boundary nearest the provider-token target.
 
-        Never consume the anchor response or any newer messages. Unknown usage
-        and changed request shapes are not bridged with character estimates.
+        Keep legacy selection for saved executions. Never consume the anchor
+        response or newer messages, or substitute estimates for missing usage.
         """
         anchor = next(
             (point for point in self.checkpoints if point.message_id == message_id),
@@ -281,7 +282,7 @@ class History:
         )
         if (
             anchor is None
-            or anchor.signature != signature
+            or (self._legacy and anchor.signature != signature)
             or self.compacted_anchor == message_id
         ):
             return None
@@ -314,23 +315,37 @@ class History:
                 ):
                     limit = min(limit, index)
                     break
+        candidates: list[Checkpoint] = []
+        total = anchor.context_tokens + anchor.output_tokens
         for point in reversed(self.checkpoints):
             if point.index > anchor.index:
                 continue
-            if point.signature != signature:
+            if self._legacy and point.signature != signature:
                 break
             if point.index <= int(self.has_summary):
                 break
-            retained = (
-                anchor.context_tokens + anchor.output_tokens - point.context_tokens
+            if point.index not in safe or point.index > limit:
+                continue
+            retained = total - point.context_tokens
+            if retained < (budget if self._legacy else 0):
+                continue
+            candidates.append(point)
+            if self._legacy:
+                break
+        selected = min(
+            candidates,
+            key=lambda point: (abs(total - point.context_tokens - budget), point.index),
+            default=None,
+        )
+        return (
+            None
+            if selected is None
+            else Selection(
+                anchor_id=message_id,
+                cut=selected.index,
+                prefix_tokens=selected.context_tokens,
             )
-            if retained >= budget and point.index in safe and point.index <= limit:
-                return Selection(
-                    anchor_id=message_id,
-                    cut=point.index,
-                    prefix_tokens=point.context_tokens,
-                )
-        return None
+        )
 
     def commit(self, selection: Selection, summary_tokens: Optional[int]) -> None:
         """Rebase retained checkpoints from the selected prefix, never a target budget."""

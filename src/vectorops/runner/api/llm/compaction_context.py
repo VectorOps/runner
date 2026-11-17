@@ -133,6 +133,8 @@ class Summary:
     before: connect.GenerateRequest
     cut: int
     metadata: Metadata
+    prefix_tokens: Optional[int] = None
+    comparable_usage: bool = False
 
     def finalize(
         self,
@@ -147,12 +149,20 @@ class Summary:
         cap = self.request.max_output_tokens
         if cap is not None and response.usage.output_tokens > cap:
             raise models.LLMResponseError("Compaction summary exceeded its output cap.")
-        size = observability.input_tokens(
-            connect.GenerateRequest(
-                messages=[project(message) for message in replacement([], 0, text)]
+        if self.prefix_tokens is None:
+            size = observability.input_tokens(
+                connect.GenerateRequest(
+                    messages=[project(message) for message in replacement([], 0, text)]
+                )
             )
-        )
-        original = self.metadata.source_tokens_estimate
+            original = self.metadata.source_tokens_estimate
+        else:
+            size = (
+                response.usage.output_tokens
+                if self.comparable_usage and response.usage.completeness == "final"
+                else None
+            )
+            original = self.prefix_tokens
         if original is not None and size is not None and size >= original:
             raise models.LLMResponseError(
                 "Compaction summary did not reduce the selected prefix."
@@ -162,7 +172,11 @@ class Summary:
         )
         assert item.metrics is not None
         metric = observability.Metrics.model_validate(item.metrics["llm"])
-        metric.compaction = observability.compaction_savings(self.before, after)
+        metric.compaction = (
+            observability.compaction_savings(self.before, after)
+            if self.prefix_tokens is None
+            else observability.CompactionSavings()
+        )
         return streaming.ActivityFinal(
             item.value, {"llm": metric.model_dump(mode="json")}
         )
@@ -174,18 +188,23 @@ def prepare(
     policy: models.Compaction,
     generation: models.Settings,
     has_summary: bool,
+    *,
+    prefix_tokens: Optional[int] = None,
 ) -> Summary:
-    """Build one readable payload with a soft target and technical output headroom."""
+    """Build a summary request from measured usage, preserving legacy replay policy."""
     selected = settings(generation, policy)
     prefix = before.messages[:cut]
     transcript: list[connect.Message] = [project(message) for message in prefix]
-    source_size = observability.input_tokens(
-        connect.GenerateRequest(messages=transcript)
+    source_size = (
+        observability.input_tokens(connect.GenerateRequest(messages=transcript))
+        if prefix_tokens is None
+        else None
     )
+    source_tokens = source_size if prefix_tokens is None else prefix_tokens
     target = (
         None
-        if source_size is None
-        else max(1, math.ceil(source_size * policy.summary_target_ratio))
+        if source_tokens is None
+        else max(1, math.ceil(source_tokens * policy.summary_target_ratio))
     )
     reference: dict[str, pydantic.JsonValue] = {
         "reference": {
@@ -233,23 +252,25 @@ def prepare(
         )
     except connect.RegistryError:
         catalog = None
-    window = (
-        compaction.context_window(generation, policy)
-        if selected.model == generation.model
-        else (None if catalog is None else catalog.context_window)
-    )
     limits = [
         selected.max_output_tokens,
         None if catalog is None else catalog.max_output_tokens,
     ]
-    size = observability.input_tokens(request)
-    if window is not None and size is not None:
-        available = window - size
-        if available <= 0:
-            raise models.CompactionCapacityError(
-                "Projected compaction input exceeds the summarizer context window; use a larger summary model."
-            )
-        limits.append(available)
+    size = None
+    if prefix_tokens is None:
+        window = (
+            compaction.context_window(generation, policy)
+            if selected.model == generation.model
+            else (None if catalog is None else catalog.context_window)
+        )
+        size = observability.input_tokens(request)
+        if window is not None and size is not None:
+            available = window - size
+            if available <= 0:
+                raise models.CompactionCapacityError(
+                    "Projected compaction input exceeds the summarizer context window; use a larger summary model."
+                )
+            limits.append(available)
     known = [limit for limit in limits if limit is not None]
     if known:
         request.max_output_tokens = min(known)
@@ -271,4 +292,11 @@ def prepare(
         summary_target_ratio=policy.summary_target_ratio,
         summary_target_tokens=target,
     )
-    return Summary(request, before, cut, metadata)
+    return Summary(
+        request,
+        before,
+        cut,
+        metadata,
+        prefix_tokens,
+        selected.model == generation.model,
+    )

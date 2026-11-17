@@ -393,7 +393,7 @@ def test_policy_roundtrip() -> None:
 
 
 def test_rebased_coordinates_use_selected_prefix_not_retention_target() -> None:
-    state = compaction.History()
+    state = compaction.History(legacy=True)
     messages: list[connect.Message] = [connect.UserMessage(content="old")]
     for identifier, tokens in (("a", 300), ("b", 750)):
         response = answer(identifier, tokens)
@@ -604,7 +604,7 @@ def test_selection_never_splits_parallel_tool_exchange() -> None:
         connect.ToolResultMessage(tool_call_id="b", tool_name="read", content=[]),
         answer("done", 800),
     ]
-    state = compaction.History()
+    state = compaction.History(legacy=True)
     for identity, index, tokens in (
         ("start", 1, 300),
         ("unsafe", 3, 500),

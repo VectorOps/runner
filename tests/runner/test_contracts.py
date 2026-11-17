@@ -75,7 +75,7 @@ async def test_nested_contracts_persist_and_stream_without_extra_content_steps(
         2,
     )
     child = next(w for w in history.workflows.values() if w.id != "root")
-    assert history.workflows["root"].compaction_version == child.compaction_version == 2
+    assert history.workflows["root"].compaction_version == child.compaction_version == 3
     assert (child.kind, child.version) == ("customer.acme.support.chat.turn", 4)
     invocation = [e for e in events if e.step.operation.kind == "vocode.llm.invoke"]
     assert len({e.step.id for e in invocation}) == 1
@@ -115,8 +115,12 @@ async def test_contracts_survive_sqlite_restart(workspace: Path) -> None:
     }
 
 
+@pytest.mark.parametrize("version", [1, 2])
 async def test_compaction_upgrade_preserves_root_and_child_markers(
-    workspace: Path, history: MemoryHistory, monkeypatch: pytest.MonkeyPatch
+    workspace: Path,
+    history: MemoryHistory,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
 ) -> None:
     (workspace / "workflows" / "contracts.py").write_text(SOURCE)
     configure = WorkflowExecutor.configure
@@ -125,7 +129,7 @@ async def test_compaction_upgrade_preserves_root_and_child_markers(
         self: WorkflowExecutor, value: models.Workflow
     ) -> models.Workflow:
         return (await configure(self, value)).model_copy(
-            update={"compaction_version": 1}
+            update={"compaction_version": version}
         )
 
     runner = WorkflowRunner(workspace, history)
@@ -136,14 +140,16 @@ async def test_compaction_upgrade_preserves_root_and_child_markers(
         }
     assert len(history.workflows) == 2
     assert all(
-        workflow.compaction_version == 1 for workflow in history.workflows.values()
+        workflow.compaction_version == version
+        for workflow in history.workflows.values()
     )
     assert await runner.run(
         "contracts:workflow", continue_from_step_id=history.heads["root"]
     ) == {"text": "hello"}
     assert len(history.workflows) == 2
     assert all(
-        workflow.compaction_version == 1 for workflow in history.workflows.values()
+        workflow.compaction_version == version
+        for workflow in history.workflows.values()
     )
 
 
