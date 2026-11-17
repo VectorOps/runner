@@ -14,7 +14,7 @@ from uuid import UUID
 import connect
 import pydantic
 
-from vectorops.runner import tool_policy
+from vectorops.runner import tool_policy, tool_safety
 from vectorops.runner.runner import mailbox
 
 if typing.TYPE_CHECKING:
@@ -111,9 +111,11 @@ class ToolAuthorizationService:
         self,
         data: AuthorizationData,
         policy: typing.Optional[tool_policy.ToolPolicy] = None,
+        safety: typing.Optional[tool_safety.Assessor] = None,
     ) -> None:
         self.policy = policy if policy is not None else tool_policy.ToolPolicy()
         self._data = data
+        self._safety = safety
 
     @contextmanager
     def activate(self) -> Iterator[None]:
@@ -259,6 +261,22 @@ class ToolAuthorizationService:
         if existing is None and decision.action != "deny":
             rules = await self._data.rules(context.workflow_id, request.name)
             decision = self.policy.resolve(settings, call, rules)
+
+        if existing is None and decision.action == "ask" and self._safety is not None:
+            assert definition is not None
+            assessment = context.safety_assessment
+            if assessment is not None and not assessment.matches(call, definition):
+                reason = "tool call changed since its safety assessment"
+                return AuthorizationResult(
+                    tool_policy.Decision(action="deny", reason=reason),
+                    ToolExecutionError(reason),
+                )
+            if assessment is None:
+                assessment = await self._safety.assess(call, definition)
+                if assessment is not None:
+                    await context.record_safety_assessment(assessment)
+            if assessment is not None and assessment.approved:
+                decision = tool_policy.Decision(action="approve")
 
         if decision.action == "ask":
             if context.mailbox is None:

@@ -16,8 +16,7 @@ from uuid import UUID, uuid4
 
 import pydantic
 
-from vectorops.runner import models
-from vectorops.runner import diagnostics
+from vectorops.runner import diagnostics, models, tool_safety
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
@@ -913,6 +912,11 @@ class ExecutionSession:
                         if step.authorization_rule_id is None
                         else step.authorization_rule_id
                     ),
+                    "safety_assessment": (
+                        previous.safety_assessment
+                        if step.safety_assessment is None
+                        else step.safety_assessment
+                    ),
                     "deliveries": previous.deliveries,
                     "created_at": previous.created_at,
                     "completed_at": (
@@ -935,6 +939,12 @@ class ExecutionSession:
             self.reporter.record(self.workflow.id, self.durable_head)
 
     def activity_context(self, step: models.WorkflowStep) -> ActivityExecutionContext:
+        async def record_safety(assessment: tool_safety.Assessment) -> None:
+            current = await self.history.get_step(step.id)
+            if current.workflow_id != self.workflow.id:
+                raise ValueError("step belongs to another workflow")
+            await self.update(current.assess_safety(assessment))
+
         async def record_decision(approved: bool, rule_id: UUID) -> None:
             current = await self.history.get_step(step.id)
             if current.workflow_id != self.workflow.id:
@@ -972,6 +982,8 @@ class ExecutionSession:
             authorization_rule_id=step.authorization_rule_id,
             targets=self.targets,
             persist_authorization_decision=record_decision,
+            safety_assessment=step.safety_assessment,
+            persist_safety_assessment=record_safety,
         )
 
     async def _emit(self, step: models.WorkflowStep, *, created: bool = False) -> None:

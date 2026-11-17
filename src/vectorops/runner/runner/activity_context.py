@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Optional
 from uuid import UUID
 
+from vectorops.runner import tool_safety
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
 from vectorops.runner.mcp.runtime import MCPRuntime
@@ -42,6 +43,24 @@ class ActivityExecutionContext:
         Callable[[bool, UUID], Awaitable[None]]
     ] = field(default=None, compare=False, repr=False)
     targets: Optional[ExecutionTargets] = field(default=None, compare=False, repr=False)
+    safety_assessment: Optional[tool_safety.Assessment] = None
+    persist_safety_assessment: Optional[
+        Callable[[tool_safety.Assessment], Awaitable[None]]
+    ] = field(default=None, compare=False, repr=False)
+
+    async def record_safety_assessment(
+        self, assessment: tool_safety.Assessment
+    ) -> None:
+        if self.persist_safety_assessment is None:
+            raise AuthorizationPersistenceError(
+                "safety assessment persistence is unavailable"
+            )
+        try:
+            await self.persist_safety_assessment(assessment)
+        except Exception as exc:
+            raise AuthorizationPersistenceError(
+                "cannot persist tool safety assessment"
+            ) from exc
 
     async def record_authorization_decision(
         self, approved: bool, rule_id: UUID

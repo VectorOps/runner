@@ -16,7 +16,7 @@ import pydantic
 from vectorops.runner import models, usage, presentation as presentation_models
 from vectorops.runner import diagnostics, global_config
 from vectorops.runner import tool_authorization, tool_authorization_store, tool_policy
-from vectorops.runner import tool_rule_api
+from vectorops.runner import tool_rule_api, tool_safety
 from vectorops.runner.references import WorkflowReference
 from vectorops.runner.authentication.service import AuthenticationService
 from vectorops.runner.environment.local import LocalEnvironment
@@ -896,6 +896,10 @@ class WorkflowRunner:
                 tool_authorization_store.WorkspaceRules(project.database),
             ),
             self._tool_policy,
+            safety=tool_safety.SafetyAssessor(
+                project.configuration,
+                RunnerLLM(project.configuration, self.authentication),
+            ),
         )
         self._tool_policy = authorization.policy
         with authorization.activate():

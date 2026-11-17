@@ -7,8 +7,11 @@ from uuid import UUID
 
 import pydantic
 
-from vectorops.runner import presentation as presentation_models
-from vectorops.runner import usage as usage_models
+from vectorops.runner import (
+    presentation as presentation_models,
+    tool_safety,
+    usage as usage_models,
+)
 from vectorops.runner.environment.target import LocalExecutionTarget
 
 _WORKFLOW_OPERATION_KINDS: typing.Final[tuple[str, ...]] = (
@@ -288,6 +291,9 @@ class WorkflowStep(_JsonModel):
     authorization_rule_id: typing.Optional[UUID] = pydantic.Field(
         default=None, exclude_if=lambda value: value is None
     )
+    safety_assessment: typing.Optional[tool_safety.Assessment] = pydantic.Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     created_at: typing.Optional[str] = None
     completed_at: typing.Optional[str] = None
     metrics: typing.Optional[dict[str, pydantic.JsonValue]] = None
@@ -315,7 +321,28 @@ class WorkflowStep(_JsonModel):
             update={"authorized": True, "authorization_rule_id": None}
         )
 
+    def assess_safety(self, assessment: tool_safety.Assessment) -> WorkflowStep:
+        """Attach a completed assessment before authorization or tool execution."""
+        if (
+            self.operation.kind != "llm.tool"
+            or self.outcome.kind != "pending"
+            or self.authorized is not None
+            or self.safety_assessment is not None
+        ):
+            raise ValueError(
+                "safety assessment requires an unassessed pending tool call"
+            )
+        return self.model_copy(update={"safety_assessment": assessment})
+
     def validate_authorization_update(self, previous: WorkflowStep) -> None:
+        if self.safety_assessment != previous.safety_assessment:
+            if self.safety_assessment is None:
+                raise ValueError("safety assessment cannot be removed")
+            previous.assess_safety(self.safety_assessment)
+            if self.outcome.kind != "pending" or self.authorized is not None:
+                raise ValueError(
+                    "safety assessment must be persisted before authorization"
+                )
         if self.authorization_rule_id != previous.authorization_rule_id:
             if (
                 previous.authorized is True
@@ -364,6 +391,8 @@ class WorkflowStep(_JsonModel):
             raise ValueError("a step cannot be its own predecessor")
         if self.authorized is not None and self.operation.kind != "llm.tool":
             raise ValueError("authorization is only valid for tool calls")
+        if self.safety_assessment is not None and self.operation.kind != "llm.tool":
+            raise ValueError("safety assessment is only valid for tool calls")
         if self.authorization_rule_id is not None and (
             self.operation.kind != "llm.tool" or self.authorized is None
         ):
