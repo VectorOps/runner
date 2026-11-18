@@ -71,7 +71,9 @@ class WorkflowNaming:
                 request = await store.first_input(workflow_id, "chat.message.v1")
                 if request is None or request.status != "answered":
                     return
-                message = chat_input.UserMessageInput.model_validate(request.response)
+                message = chat_input.LargeUserMessageInput.model_validate(
+                    request.response
+                )
                 async with asyncio.timeout(15):
                     response = await self.llm.generate(
                         message.to_message(),

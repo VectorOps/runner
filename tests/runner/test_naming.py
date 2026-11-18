@@ -94,6 +94,30 @@ async def test_description_survives_restart_without_steps_and_preserves_name(
     ).description == "Fix failing tests"
 
 
+async def test_large_image_can_name_a_conversation(tmp_path: Path) -> None:
+    database = await store(tmp_path / "history.sqlite3")
+    await database.register_input(
+        "request",
+        user_input.input_spec(
+            chat_input.UserMessageRequest(prompt="Image?"),
+            max_image_bytes=chat_input.MAX_IMAGE_BYTES,
+        ),
+    )
+    await database.answer_input(
+        answer(
+            {
+                "content": [
+                    {"type": "image", "mime_type": "image/png", "data": "AAAA" * 300000}
+                ]
+            }
+        )
+    )
+    owner = await naming(tmp_path)
+    await owner.ensure_name(database, "workflow")
+    assert (await database.get_workflow("workflow")).description == "Fix failing tests"
+    cast(AsyncMock, owner.llm.generate).assert_awaited_once()
+
+
 async def test_only_first_typed_prompt_is_used_after_failure(tmp_path: Path) -> None:
     database = await store(tmp_path / "history.sqlite3")
     spec = user_input.input_spec(chat_input.UserMessageRequest(prompt="Message?"))

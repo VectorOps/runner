@@ -380,7 +380,7 @@ def test_helper_overrides_and_tool_boundaries() -> None:
     assert tools.apply_patch_tool().definition.name == "apply_patch"
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
 async def test_agent_web_fetch_defaults_and_versioned_resume(
     tmp_path: Path, version: int
 ) -> None:
@@ -402,6 +402,10 @@ async def test_agent_web_fetch_defaults_and_versioned_resume(
                     "hello",
                 )
                 waiting = await pending(connection, accepted.execution_id)
+                assert isinstance(waiting.payload, dict)
+                assert waiting.payload.get("max_image_bytes", 786432) == (
+                    3145728 if version >= 6 else 786432
+                )
                 names = {tool.name for tool in backend.requests[0].tools}
                 assert ("web_fetch" in names) == (version >= 4)
                 assert "prefer web_fetch" in str(backend.requests[0].system_prompt)

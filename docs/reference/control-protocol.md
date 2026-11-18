@@ -464,6 +464,25 @@ workflow-side tools record a gate activity before durable child operations.
 See [Tool approval configuration](../config/tool-approval.md) for
 workspace defaults, extension points, and history compatibility.
 
+## Chat image input
+
+Chat mailbox requests use `request_type: "chat.message.v1"`. Responses contain
+up to four content blocks: text and inline PNG, JPEG, GIF, or WebP images.
+Image `data` is padded base64 without a data URL prefix.
+
+New coding-agent executions (workflow version 6 and later) advertise
+`payload.max_image_bytes: 3145728`, allowing up to 3 MiB per image before
+base64 encoding. If the field is absent, clients should use the legacy
+786432-byte limit. Clients may prepare images to a smaller budget. The
+8 MiB control-packet limit still applies to the entire encoded request.
+
+Custom workflows can opt in with
+`await llm.request_user_message(max_image_bytes=3 * 1024 * 1024)`.
+The default helper call and existing agent executions retain the legacy
+contract. Version-gate changes to this argument in existing workflows because
+input contracts participate in replay matching. The published limit is rounded
+down to a multiple of three bytes to fit the base64 length bound.
+
 ## Conversation inboxes and LLM steering
 
 Conversation inboxes accept user messages without a pending input request. New

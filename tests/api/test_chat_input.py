@@ -1,8 +1,11 @@
 import asyncio
+import base64
 
 import connect
 import pydantic
 import pytest
+import vectorops.runner.api.chat_input as chat_input
+import vectorops.runner.api.user_input as user_input
 
 from tests.api.test_tools import ApprovalStore, approve
 from tests.fixtures import replay
@@ -160,4 +163,65 @@ async def test_old_untyped_mailbox_history_still_replays(
 
     first = await replay.run(history, old_workflow)
     assert first.outcome.kind == "completed"
+    assert (await replay.run(history, workflow, first.id)).outcome == first.outcome
+
+
+def test_default_chat_contract_digest_is_unchanged() -> None:
+    spec = user_input.input_spec(chat_input.UserMessageRequest(prompt="Your message?"))
+    assert mailbox.InputSpec.contract_digest(
+        spec.request_schema, spec.response_schema
+    ) == ("551f7a32be94530740d2420aa65e449a4f7f6d720781d32ff6af445c0d72f36c")
+    assert spec.response_schema == chat_input.UserMessageInput.model_json_schema()
+
+
+def test_large_image_contract_is_opt_in_and_bounded() -> None:
+    data = base64.b64encode(bytes(chat_input.MAX_IMAGE_BYTES)).decode("ascii")
+    payload = {"content": [{"type": "image", "mime_type": "image/png", "data": data}]}
+    spec = user_input.input_spec(
+        chat_input.UserMessageRequest(prompt="Image?"),
+        max_image_bytes=chat_input.MAX_IMAGE_BYTES,
+    )
+    spec.validate_response(payload)
+    message = chat_input.LargeUserMessageInput.model_validate(payload).to_message()
+    assert message.role == "user"
+    assert isinstance(message.content, list)
+    assert message.content[0].type == "image"
+    assert message.content[0].data == data
+    with pytest.raises(pydantic.ValidationError):
+        chat_input.UserMessageInput.model_validate(payload)
+    payload["content"][0]["data"] += "AAAA"
+    with pytest.raises(input_schema.InputValidationError):
+        spec.validate_response(payload)
+    with pytest.raises(pydantic.ValidationError):
+        chat_input.LargeUserMessageInput.model_validate(payload)
+
+
+@pytest.mark.parametrize("size", [0, -1, True, 3145729])
+def test_invalid_image_budgets(size: int) -> None:
+    with pytest.raises(ValueError):
+        chat_input.response_schema(size)
+
+
+async def test_large_image_mailbox_and_replay(history: MemoryHistory) -> None:
+    store = ApprovalStore()
+    box = mailbox.Mailbox(store)
+    data = base64.b64encode(bytes(1024 * 1024)).decode("ascii")
+
+    async def workflow() -> pydantic.JsonValue:
+        message = await llm.request_user_message(
+            max_image_bytes=chat_input.MAX_IMAGE_BYTES
+        )
+        assert isinstance(message.content, list)
+        assert message.content[0].type == "image"
+        return len(message.content[0].data)
+
+    task = asyncio.create_task(replay.run(history, workflow, mailbox=box))
+    await asyncio.wait_for(store.registered.wait(), 2)
+    await approve(
+        box,
+        next(iter(store.requests.values())),
+        {"content": [{"type": "image", "mime_type": "image/png", "data": data}]},
+    )
+    first = await asyncio.wait_for(task, 5)
+    assert first.outcome.kind == "completed", first.outcome
     assert (await replay.run(history, workflow, first.id)).outcome == first.outcome

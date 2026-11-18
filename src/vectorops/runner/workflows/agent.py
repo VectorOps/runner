@@ -3,8 +3,9 @@
 import pydantic
 
 from vectorops.runner.api import composition, llm, tools
-from vectorops.runner.api import inbox
+from vectorops.runner.api.chat_input import LEGACY_IMAGE_BYTES, MAX_IMAGE_BYTES
 from vectorops.runner.api.configuration import get_config
+from vectorops.runner.api.inbox import Inbox
 from vectorops.runner.runner.context import WorkflowExecutionContext
 from vectorops.runner.workflows import context, prompts, settings
 from vectorops.runner.workflows.tools import default_collections
@@ -14,7 +15,7 @@ from vectorops.runner.workflows.tools import default_collections
     name="Coding agent",
     description="Plan, investigate, edit, and test with explicit helper delegation.",
     kind="builtin.agent",
-    version=5,
+    version=6,
 )
 async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
     """Retain one conversation and plan, refreshing model settings each turn."""
@@ -40,8 +41,14 @@ async def agent(ctx: WorkflowExecutionContext) -> pydantic.JsonValue:
         profile="strong",
         default_compaction=llm.Compaction() if ctx.version >= 5 else None,
         system_prompt=options.compose_prompt(prompts.AGENT, prompt_context),
-        inbox=inbox.Inbox("steer", workflow_id=ctx.workflow.id),
+        inbox=Inbox("steer", workflow_id=ctx.workflow.id),
     )
     while True:
-        conversation.add_message(await llm.request_user_message())
+        conversation.add_message(
+            await llm.request_user_message(
+                max_image_bytes=(
+                    MAX_IMAGE_BYTES if ctx.version >= 6 else LEGACY_IMAGE_BYTES
+                )
+            )
+        )
         await conversation.run(tools=bindings, tool_set=selected)
