@@ -9,7 +9,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "aiohttp>=3.13.4",
     "beautifulsoup4>=4.13,<5",
-    "connect @ git+https://github.com/vectorops/connect.git@4756d7308f68905a35cb5500d3ba1c3284cbfff5",
+    "connect @ git+https://github.com/vectorops/connect.git@5b3de9027c4c3c7d9cf5d60f3b317ca5be274c28",
     "cryptography>=44.0.0",
     "keyring>=25.0.0",
     "jsonschema>=4.23.0",
